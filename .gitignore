@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+cdk.out/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# ML artifacts (large files, never commit raw data or trained weights)
+ml/data/raw/
+ml/data/**/*.csv
+ml/data/**/*.tsv
+ml/data/**/*.parquet
+*.ckpt
+*.pt
+*.bin
+*.safetensors
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/MynorXico/es-kaq-translator-v2/discussions
+    about: Ask a question or start a discussion instead of opening an issue.
