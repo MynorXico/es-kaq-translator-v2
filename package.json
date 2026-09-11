@@ -1,0 +1,14 @@
+{
+  "name": "es-kaq-translator-v2",
+  "private": true,
+  "description": "Traductor Kaqchikel - open-source Spanish<->Kaqchikel translator monorepo",
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@12.3.4",
+  "scripts": {
+    "web:dev": "pnpm --filter web dev",
+    "web:build": "pnpm --filter web build",
+    "web:test": "pnpm --filter web test",
+    "cdk:synth": "pnpm --filter infra-cdk synth",
+    "cdk:test": "pnpm --filter infra-cdk test"
+  }
+}
