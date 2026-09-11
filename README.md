@@ -52,6 +52,10 @@ also read the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 
-Code is licensed under the [Apache License 2.0](LICENSE). The training
-corpus is governed separately — see
-[`docs/data-governance.md`](docs/data-governance.md).
+Code is licensed under the [Apache License 2.0](LICENSE). The project's
+original training corpus and trained model weights are **not** open
+source — they're kept private by the project owner and exposed only
+through the hosted API. Community-contributed sentence data forms a
+separate, openly licensed corpus. See
+[`docs/data-governance.md`](docs/data-governance.md) and
+[ADR 0002](docs/adr/0002-data-and-model-privacy.md) for details.

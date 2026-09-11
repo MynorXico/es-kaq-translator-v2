@@ -43,17 +43,20 @@ the target audience is primarily Spanish-speaking.
 ### 2. Linguistic data and translation quality
 
 Since this project translates a digitally low-resource language,
-contributions from native speakers and linguists are especially valuable:
+contributions from native speakers and linguists are especially valuable.
+Note: the project's original training corpus is private and not part of
+the open-source release (see [`docs/data-governance.md`](docs/data-governance.md));
+community-contributed sentences form a separate, openly licensed corpus.
 
 - **Report incorrect translations**: use the "Translation quality report"
   issue template.
 - **Propose new parallel sentences** (Spanish-Kaqchikel): open an issue
   using the corresponding template, indicating the source of the text and
-  confirming you have the right to share it under an open license. See
-  [`docs/data-governance.md`](docs/data-governance.md) for details on how
-  we handle data provenance and licensing.
-- Data of unknown origin or license will not be accepted directly into the
-  public repository without documenting its provenance first.
+  confirming you have the right to share it under an open license
+  (CC-BY/CC0). This grows the public community corpus, kept separate from
+  the project's private data.
+- Data of unknown origin or license will not be accepted without
+  documenting its provenance first.
 
 ### 3. Documentation
 
