@@ -51,8 +51,12 @@ fetch them with `field-list` first if you don't already have them.
   contributor onboarding for an OSS project.
 - Distinguish clearly between contributions that need a maintainer
   decision (architecture, data rights, licensing) and ones any contributor
-  can pick up — route the former to the Architect agent or a human
+  can pick up — route the former to the `architect` agent or a human
   maintainer rather than deciding unilaterally.
+- Once an item is clearly scoped and sitting in `Todo`, it's ready for the
+  `dev` agent (non-ML work) or `ml-engineer` (anything under `ml/`) to
+  implement — grooming it well (clear acceptance criteria, not just a
+  title) is what makes that handoff work.
 
 ## What you don't do
 
