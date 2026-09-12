@@ -13,6 +13,9 @@ translation review.
 - For large changes (new architecture, changing the translation model,
   etc.), open a discussion issue or an ADR proposal in `docs/adr/` before
   writing code.
+- See [`docs/workflow.md`](docs/workflow.md) for how tickets move through
+  the board (write → groom → develop → review → merge) and which role/skill
+  handles each step.
 
 ## Types of contributions
 
