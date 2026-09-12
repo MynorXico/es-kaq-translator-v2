@@ -26,6 +26,26 @@ item touches `apps/web` UI and no design spec exists yet. `ux` produces a
 mockup via `/design` and a concrete spec (Spanish copy, spacing, states);
 `dev` implements to that spec rather than improvising layout/copy.
 
+## Git conventions
+
+Every change traces back to an issue — if one doesn't exist yet, create
+it first (`new-ticket`) rather than starting untracked work.
+
+- **Branch**: `<issue-number>-<short-kebab-slug>` off `main`, e.g.
+  `12-community-corpus-pipeline`.
+- **Commits**: include a `Refs #<N>` line in the commit body, so history
+  is traceable to the issue even before/without a squash merge.
+- **PR description**: must contain a closing keyword, `Closes #<N>`
+  (already in `.github/PULL_REQUEST_TEMPLATE.md`) — this is what actually
+  auto-closes the issue and moves its board `Status` to `Done` on merge.
+- **Merge strategy**: squash-merge only. The repo is configured
+  (`gh repo edit`) to disable merge-commit and rebase-merge, and to build
+  the squash commit message from the PR title *and description*, so
+  `Closes #<N>` lands in `main`'s history for every merged change — no
+  separate step needed to keep that traceable.
+- No direct pushes to `main` for feature/fix work, even small ones — a
+  branch + PR is what keeps the issue link intact.
+
 ## Why a skill layer on top of the agents
 
 The agent definitions describe *who* does a piece of work and with what

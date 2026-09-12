@@ -24,6 +24,10 @@ open-source, AWS-native Spanish↔Kaqchikel machine translator monorepo.
      `docs/data-governance.md` and `.gitignore`).
    - Changes that imply a new architectural decision should come with an
      ADR update in `docs/adr/` (flag if missing, don't block on it alone).
+   - The PR description should contain a closing keyword (`Closes #N`)
+     and commits should carry a `Refs #N` line — flag if the ticket
+     reference is missing, since that's what keeps `main`'s history
+     traceable (`docs/workflow.md`).
 4. **Simplicity/reuse**: unnecessary abstractions, duplicated logic that
    should reuse an existing utility, over-engineered solutions for the
    current scale of the project.

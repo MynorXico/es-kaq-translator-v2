@@ -31,12 +31,19 @@ This is a monorepo with:
 Each folder has its own README with local setup instructions. Before
 opening a pull request:
 
-1. Create a branch off `main`.
-2. Make sure local tests and linters pass (see the corresponding workflow
+1. Make sure there's a GitHub issue for the change (open one if not).
+2. Create a branch off `main` named `<issue-number>-<short-kebab-slug>`.
+3. Make sure local tests and linters pass (see the corresponding workflow
    in `.github/workflows/`).
-3. Clearly describe the change and its motivation in the pull request.
-4. A pull request should address one concern at a time — avoid mixing
+4. Reference the issue in your commits (`Refs #<N>`) and in the PR
+   description (`Closes #<N>`, already in the PR template) — see
+   [`docs/workflow.md`](docs/workflow.md) for the full git convention and
+   why (traceability from `main`'s history back to the issue it resolved).
+5. A pull request should address one concern at a time — avoid mixing
    unrelated refactors with the functional change.
+
+PRs are merged via squash-merge only (the repo disables merge-commit and
+rebase-merge) — don't push directly to `main`.
 
 Note: all code, comments, commit messages, and documentation in this
 repository are written in English. Only user-facing strings in the web UI
