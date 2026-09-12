@@ -16,9 +16,18 @@ split CI/CD model (per ADR 0001):
 
 ## Environment layout
 
-- Separate AWS accounts under the existing Organization: `tooling` (hosts
-  the pipeline), `dev`, `qa`, `prod`. Cross-account IAM roles let the
-  tooling account's pipeline deploy into the others.
+- Separate AWS accounts under the existing Organization, in a dedicated
+  `TraductorKaqchikel` OU so this project's blast radius stays isolated
+  from unrelated accounts in the same org: `translator-tooling` (hosts the
+  CDK Pipelines pipeline), `translator-dev`, `translator-qa`,
+  `translator-prod`. See [the bootstrap runbook](../../docs/runbooks/aws-account-bootstrap.md)
+  for how these were created and how to redo it. Account IDs are
+  deliberately not recorded in this public repo (see the runbook) — pull
+  them from a private config source (SSM Parameter Store / CI secrets) or
+  `aws organizations list-accounts` rather than hardcoding them here.
+  Cross-account IAM roles let the tooling account's pipeline deploy into
+  the others (not yet set up — CDK bootstrap and pipeline trust
+  relationships are still pending).
 - Inference is served via SageMaker Serverless Inference (scale-to-zero);
   the API is a FastAPI app in a Lambda container behind API Gateway; the
   web app is a static SPA on S3 + CloudFront. Keep new infra consistent
