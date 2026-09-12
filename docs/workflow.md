@@ -53,7 +53,13 @@ it first (`new-ticket`) rather than starting untracked work.
   ```
 
   (`--no-track` avoids the branch's upstream defaulting to `origin/main`,
-  which is confusing once you push it as its own branch.) When delegating
+  which is confusing once you push it as its own branch.) `gh` commands
+  that infer the current branch (`gh pr create` without `--head`, `gh pr
+  checks` without an explicit number) read it from whatever directory the
+  shell is actually in — if a tool session's shell resets to the main
+  checkout between commands (some do), pass `--head <branch>` explicitly
+  rather than relying on inference, or `cd` into the worktree first. When
+  delegating
   to `dev`/`ml-engineer` via `work-ticket`, pass `isolation: "worktree"`
   on the `Agent` call instead of managing the path yourself — but still
   have the agent verify it's on a correctly-named branch based on latest
