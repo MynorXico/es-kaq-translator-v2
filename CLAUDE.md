@@ -34,7 +34,13 @@ Every change is tied to a GitHub issue on the
 (project `6`). If there's no issue yet, create one first (`new-ticket`
 skill) rather than starting work untracked.
 
-- **Branch naming**: `<issue-number>-<short-kebab-slug>` off `main`, e.g.
+- **Always branch from latest `main`**, in its own **git worktree** (not
+  the shared checkout) so parallel tickets don't collide — `git fetch
+  origin main && git worktree add --no-track ../<repo>-worktrees/<N>-slug
+  -b <N>-slug origin/main`. When delegating via `work-ticket`, pass
+  `isolation: "worktree"` on the `Agent` call instead. Full details and
+  cleanup steps in `docs/workflow.md`.
+- **Branch naming**: `<issue-number>-<short-kebab-slug>`, e.g.
   `12-community-corpus-pipeline`.
 - **Commits**: reference the ticket with a `Refs #<N>` line in the commit
   body (in addition to any attribution trailers already required for

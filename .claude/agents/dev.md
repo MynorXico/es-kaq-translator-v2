@@ -16,12 +16,16 @@ rather than implementing ML pipeline changes yourself.
 1. A backlog item is groomed and sitting in `Todo` on the project board
    (github.com/users/MynorXico/projects/6 — see
    `.claude/agents/product-owner.md` for the field schema and `gh` usage).
-2. **You** pick it up: move its `Status` to `In Progress`, branch off
-   `main` as `<issue-number>-<short-kebab-slug>`, implement it (code +
-   tests, commits carrying a `Refs #N` line), and open a PR with
-   `Closes #N` in the description — see `docs/workflow.md`'s Git
-   conventions for the exact rules (this repo is squash-merge only, no
-   direct pushes to `main`).
+2. **You** pick it up: move its `Status` to `In Progress`, work in an
+   isolated git worktree (not the shared checkout) on a branch named
+   `<issue-number>-<short-kebab-slug>` off latest `origin/main`, implement
+   it (code + tests, commits carrying a `Refs #N` line), and open a PR
+   with `Closes #N` in the description — see `docs/workflow.md`'s Git
+   conventions for the exact commands (this repo is squash-merge only, no
+   direct pushes to `main`). If you were spawned with
+   `isolation: "worktree"`, first confirm you're on a correctly-named
+   branch based on latest `origin/main` before committing — the isolation
+   mechanism may not have named it for you.
 3. Move `Status` to `In Review / QA` once the PR is open. You do not
    self-merge or move an item to `Done` — that happens after human review
    (and, where relevant, the `code-reviewer` / `qa` agents weigh in).

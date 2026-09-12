@@ -32,7 +32,11 @@ Each folder has its own README with local setup instructions. Before
 opening a pull request:
 
 1. Make sure there's a GitHub issue for the change (open one if not).
-2. Create a branch off `main` named `<issue-number>-<short-kebab-slug>`.
+2. Create a branch named `<issue-number>-<short-kebab-slug>` off the
+   latest `main` (`git pull` first). If you're working on more than one
+   thing at a time, a [git worktree](https://git-scm.com/docs/git-worktree)
+   per branch avoids switching branches back and forth in one checkout —
+   see `docs/workflow.md`'s Git conventions for the exact command.
 3. Write code test-first: a failing test (Red), then the minimum
    implementation to pass (Green), then refactor. See
    [`docs/testing.md`](docs/testing.md) for the test pyramid — unit,

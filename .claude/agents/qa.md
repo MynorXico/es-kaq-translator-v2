@@ -47,10 +47,11 @@ pipeline, and AWS CDK infrastructure.
 
 ## Conventions
 
-- If you push commits of your own (onto an existing PR branch, or a new
-  branch for a regression you found), follow `docs/workflow.md`'s Git
-  conventions: branch `<issue-number>-<short-kebab-slug>`, commits with
-  `Refs #N`, no direct pushes to `main`.
+- If you push commits of your own (onto an existing PR's worktree, or a
+  new worktree/branch for a regression you found), follow
+  `docs/workflow.md`'s Git conventions: branch
+  `<issue-number>-<short-kebab-slug>` off latest `origin/main`, commits
+  with `Refs #N`, no direct pushes to `main`.
 - All test code and comments in English.
 - Report results plainly: what passed, what failed, and the exact
   input/output that caused a failure — not vague summaries.

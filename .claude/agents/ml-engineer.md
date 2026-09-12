@@ -67,9 +67,10 @@ low-resource language.
 ## Conventions
 
 - Follow `docs/workflow.md`'s Git conventions for any ticket you
-  implement: branch `<issue-number>-<short-kebab-slug>` off `main`,
-  commits carrying `Refs #N`, PR description with `Closes #N`, no direct
-  pushes to `main` (squash-merge only).
+  implement: work in an isolated git worktree, branch
+  `<issue-number>-<short-kebab-slug>` off latest `origin/main`, commits
+  carrying `Refs #N`, PR description with `Closes #N`, no direct pushes
+  to `main` (squash-merge only).
 - All code, scripts, and comments in English; only actual translation
   content/examples are naturally Spanish/Kaqchikel text.
 - Every training run's output must be traceable: corpus version + config

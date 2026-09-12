@@ -36,7 +36,38 @@ given change needs.
 Every change traces back to an issue — if one doesn't exist yet, create
 it first (`new-ticket`) rather than starting untracked work.
 
-- **Branch**: `<issue-number>-<short-kebab-slug>` off `main`, e.g.
+- **Always branch from latest `main`**: `git fetch origin main` first,
+  then branch from `origin/main` — never from whatever the local `main`
+  or another feature branch happens to be at, so every ticket starts from
+  the same known-good point.
+- **Work in an isolated git worktree, not the shared checkout**: this
+  lets multiple tickets be worked on in parallel without branch-switching
+  collisions (two pieces of work can't have different branches checked
+  out in the same directory at once). Create one per ticket:
+
+  ```sh
+  git fetch origin main
+  git worktree add --no-track \
+    ../<repo>-worktrees/<issue-number>-<short-kebab-slug> \
+    -b <issue-number>-<short-kebab-slug> origin/main
+  ```
+
+  (`--no-track` avoids the branch's upstream defaulting to `origin/main`,
+  which is confusing once you push it as its own branch.) `gh` commands
+  that infer the current branch (`gh pr create` without `--head`, `gh pr
+  checks` without an explicit number) read it from whatever directory the
+  shell is actually in — if a tool session's shell resets to the main
+  checkout between commands (some do), pass `--head <branch>` explicitly
+  rather than relying on inference, or `cd` into the worktree first. When
+  delegating
+  to `dev`/`ml-engineer` via `work-ticket`, pass `isolation: "worktree"`
+  on the `Agent` call instead of managing the path yourself — but still
+  have the agent verify it's on a correctly-named branch based on latest
+  `origin/main` before it commits, since the isolation mechanism may not
+  name the branch for you. After the PR merges, clean up:
+  `git worktree remove <path>` (from the main checkout) and
+  `git branch -d <issue-number>-<short-kebab-slug>`.
+- **Branch naming**: `<issue-number>-<short-kebab-slug>`, e.g.
   `12-community-corpus-pipeline`.
 - **Commits**: include a `Refs #<N>` line in the commit body, so history
   is traceable to the issue even before/without a squash merge.
