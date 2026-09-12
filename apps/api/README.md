@@ -23,6 +23,11 @@ uv sync
 
 ```sh
 uv run uvicorn app.main:app --reload   # run the dev server
-uv run pytest                          # run tests
+uv run pytest                          # run tests (unit/ + integration/)
 uv run ruff check .                    # lint
 ```
+
+Tests are split `tests/unit/` (pure functions, no I/O) and
+`tests/integration/` (through the actual FastAPI app via `TestClient`).
+See [`docs/testing.md`](../../docs/testing.md) for the full pyramid and
+the TDD process this project follows.

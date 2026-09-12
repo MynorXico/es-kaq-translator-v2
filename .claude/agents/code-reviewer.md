@@ -12,10 +12,18 @@ open-source, AWS-native Spanish↔Kaqchikel machine translator monorepo.
 1. **Correctness**: logic errors, off-by-ones, incorrect handling of the
    two translation directions (es->cak vs cak->es), broken API contracts,
    race conditions in infra/pipeline code.
-2. **Security**: injection risks, secrets committed to the repo, overly
+2. **Test coverage** (per `docs/testing.md`): does this PR add
+   non-trivial production code with no corresponding test change? That's
+   a flag regardless of whether the code looks correct — it means TDD
+   wasn't followed and there's no regression protection. Check the
+   *level* matches the change, not just that some test exists: a new
+   `apps/web` user flow needs a Playwright e2e test, not only a component
+   test; a change crossing a component boundary needs an integration
+   test, not only a unit test.
+3. **Security**: injection risks, secrets committed to the repo, overly
    broad IAM permissions in CDK code, missing input validation on the
    public translation API.
-3. **Repo conventions**:
+4. **Repo conventions**:
    - All code, comments, commit messages, and docs are in English. Flag
      any Spanish (or other non-English) content that isn't genuinely
      user-facing (UI copy in `apps/web`, translation content, API
@@ -28,7 +36,7 @@ open-source, AWS-native Spanish↔Kaqchikel machine translator monorepo.
      and commits should carry a `Refs #N` line — flag if the ticket
      reference is missing, since that's what keeps `main`'s history
      traceable (`docs/workflow.md`).
-4. **Simplicity/reuse**: unnecessary abstractions, duplicated logic that
+5. **Simplicity/reuse**: unnecessary abstractions, duplicated logic that
    should reuse an existing utility, over-engineered solutions for the
    current scale of the project.
 

@@ -18,6 +18,7 @@ API, ML pipeline), AWS-native, AI-native. See [`README.md`](README.md).
 - `docs/data-governance.md` — what data is private vs. public.
 - `docs/workflow.md` — the full ticket lifecycle, git conventions, and
   which `.claude/agents`/`.claude/skills` handle each step.
+- `docs/testing.md` — TDD process and the test pyramid per component.
 - `docs/runbooks/` — operational procedures (e.g. AWS account bootstrap).
 
 ## Language convention
@@ -50,6 +51,17 @@ skill) rather than starting work untracked.
 - No direct pushes to `main` for feature/fix work — go through a branch +
   PR, even for small changes, so the issue link is never lost.
 
+## Testing — TDD, Red → Green → Refactor
+
+All new production code (`dev`, `ml-engineer`) is written test-first:
+write a failing test (Red), implement the minimum to pass (Green),
+refactor while keeping it green. See `docs/testing.md` for the full
+policy and the test pyramid per component (`apps/web`: Vitest unit/
+component + Playwright e2e; `apps/api`: pytest unit/integration;
+`infra/cdk`: CDK assertion tests; `ml/`: conventions defined, no code
+yet). A PR that adds non-trivial production code with no corresponding
+test is a review flag, not a style nitpick.
+
 ## Roles and reusable workflows
 
 - `.claude/agents/`: `product-owner`, `architect`, `ux`, `dev`,
@@ -79,7 +91,8 @@ skill) rather than starting work untracked.
 
 ```sh
 make install   # pnpm install + uv sync
-make test      # web + infra-cdk + api tests
+make test      # web + infra-cdk + api tests (unit/integration, fast)
+make test-e2e  # web Playwright e2e (needs a one-time browser install)
 make build     # web + infra-cdk build
 make synth     # cdk synth
 ```

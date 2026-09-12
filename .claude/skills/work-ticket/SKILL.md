@@ -35,10 +35,12 @@ through to an open PR.
 5. **Delegate the implementation.** Spawn the chosen agent with a
    self-contained prompt — it starts with zero context, so include the
    issue title/body/URL verbatim, the acceptance criteria, and explicitly
-   say it should: branch off `main` as `<N>-<short-kebab-slug>`, implement
-   + write tests, commit with a `Refs #<N>` line in each commit body, run
-   the relevant checks (`make test` or the specific `pnpm`/`uv` commands
-   for the component it touched) until green, then open a PR with
+   say it should: branch off `main` as `<N>-<short-kebab-slug>`, work
+   **test-first** (Red → Green → Refactor per `docs/testing.md` — a
+   failing test before each piece of production code, not tests written
+   after), commit with a `Refs #<N>` line in each commit body, run the
+   relevant checks (`make test` or the specific `pnpm`/`uv` commands for
+   the component it touched) until green, then open a PR with
    `Closes #<N>` in the description — not merge it. See
    `docs/workflow.md`'s Git conventions for the full rules (squash-merge
    only, no direct pushes to `main`).

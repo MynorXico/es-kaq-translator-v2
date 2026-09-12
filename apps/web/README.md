@@ -24,6 +24,12 @@ pnpm install
 pnpm dev        # start the Vite dev server
 pnpm build      # type-check and build for production
 pnpm preview    # serve the production build locally
-pnpm test       # run vitest
+pnpm test       # run vitest (unit/component)
+pnpm test:e2e   # run Playwright e2e tests (builds + serves the app itself)
 pnpm lint       # run eslint
 ```
+
+First time running e2e locally, install the browser once:
+`pnpm exec playwright install chromium`. See
+[`docs/testing.md`](../../docs/testing.md) for the test pyramid and the
+TDD process this project follows.

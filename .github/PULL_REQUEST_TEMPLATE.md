@@ -17,6 +17,8 @@ Closes #
 
 ## Checklist
 
+- [ ] Written test-first (Red → Green → Refactor) at the appropriate
+      level(s) — see `docs/testing.md`
 - [ ] Tests/linters pass locally
 - [ ] Documentation updated if needed (README, ADR, etc.)
 - [ ] No raw corpus data or secrets committed

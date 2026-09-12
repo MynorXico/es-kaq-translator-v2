@@ -26,6 +26,11 @@ item touches `apps/web` UI and no design spec exists yet. `ux` produces a
 mockup via `/design` and a concrete spec (Spanish copy, spacing, states);
 `dev` implements to that spec rather than improvising layout/copy.
 
+The Develop step is TDD: `dev`/`ml-engineer` write a failing test before
+any production code, then implement to green, then refactor — see
+[`docs/testing.md`](testing.md) for the process and which test level(s) a
+given change needs.
+
 ## Git conventions
 
 Every change traces back to an issue — if one doesn't exist yet, create

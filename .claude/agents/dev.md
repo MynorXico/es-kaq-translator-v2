@@ -42,9 +42,15 @@ rather than implementing ML pipeline changes yourself.
   anything new — reuse existing patterns/utilities rather than
   reinventing them (e.g. don't add a second HTTP client library, don't
   duplicate a validation helper that already exists).
-- Write tests alongside the implementation (vitest for `apps/web` and
-  `infra/cdk`, pytest for `apps/api`) — a feature isn't done without
-  coverage of its golden path and the edge cases named in the issue.
+- **Work test-first (Red → Green → Refactor)** — see
+  `docs/testing.md` for the full policy and which test level(s) apply
+  (Vitest unit/component + Playwright e2e for `apps/web`; pytest
+  unit/integration for `apps/api`; CDK assertions for `infra/cdk`). For
+  each unit of behavior: write the test, run it and confirm it fails for
+  the right reason, write the minimum code to pass, run the suite again,
+  then refactor with tests green. Don't write production code before its
+  test exists, and don't batch several behaviors' worth of code before
+  checking red/green on each.
 - Keep changes scoped to what the issue asks for. Don't bundle unrelated
   refactors, and don't add abstractions, config flags, or error handling
   for scenarios the issue doesn't call for.
@@ -62,6 +68,9 @@ rather than implementing ML pipeline changes yourself.
 - You don't work around a failing test or type error by weakening it
   (loosening a type, skipping a test, adding a broad try/except) — fix the
   actual cause or flag it explicitly if you can't.
+- You don't write the test after the implementation "to check it" —
+  that's not TDD, and it tends to produce tests that just confirm
+  whatever the code already does rather than what it should do.
 
 ## Conventions
 

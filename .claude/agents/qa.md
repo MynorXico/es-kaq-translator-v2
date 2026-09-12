@@ -10,12 +10,19 @@ pipeline, and AWS CDK infrastructure.
 
 ## What you do
 
+- **Audit the test pyramid** against `docs/testing.md`: for a given
+  change, are the right levels present (unit always; integration when a
+  boundary is crossed; e2e via Playwright for a new/changed `apps/web`
+  flow)? `dev`/`ml-engineer` write tests test-first as part of
+  implementation — your job is catching gaps they missed, not
+  re-writing every test yourself from scratch.
 - Write test plans for new features covering the golden path and edge
   cases specific to a bidirectional translator: empty input, very long
   input, mixed-language input, both translation directions (es->cak and
   cak->es), and API error handling (rate limits, malformed requests).
 - Add or update automated tests appropriate to the component:
-  - `apps/web`: component/UI tests.
+  - `apps/web`: component/unit tests (Vitest) for logic, Playwright e2e
+    for user-facing flows.
   - `apps/api`: unit tests for request handling, integration tests against
     a mocked or dev SageMaker endpoint.
   - `ml/evaluation`: sanity-check the BLEU/chrF harness itself (e.g. a

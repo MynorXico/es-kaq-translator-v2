@@ -33,13 +33,18 @@ opening a pull request:
 
 1. Make sure there's a GitHub issue for the change (open one if not).
 2. Create a branch off `main` named `<issue-number>-<short-kebab-slug>`.
-3. Make sure local tests and linters pass (see the corresponding workflow
+3. Write code test-first: a failing test (Red), then the minimum
+   implementation to pass (Green), then refactor. See
+   [`docs/testing.md`](docs/testing.md) for the test pyramid — unit,
+   integration, and (for `apps/web`) e2e via Playwright. A PR that adds
+   non-trivial code with no test changes will get flagged in review.
+4. Make sure local tests and linters pass (see the corresponding workflow
    in `.github/workflows/`).
-4. Reference the issue in your commits (`Refs #<N>`) and in the PR
+5. Reference the issue in your commits (`Refs #<N>`) and in the PR
    description (`Closes #<N>`, already in the PR template) — see
    [`docs/workflow.md`](docs/workflow.md) for the full git convention and
    why (traceability from `main`'s history back to the issue it resolved).
-5. A pull request should address one concern at a time — avoid mixing
+6. A pull request should address one concern at a time — avoid mixing
    unrelated refactors with the functional change.
 
 PRs are merged via squash-merge only (the repo disables merge-commit and
