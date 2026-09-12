@@ -15,9 +15,16 @@ the mechanical parts, a `.claude/skills/*` skill:
 |---|---|---|---|
 | Write | (new) → `Backlog` | `product-owner` | `new-ticket` |
 | Groom | `Backlog` → `Todo` | `product-owner` | `groom-backlog` |
+| Design (UI tickets only) | (within `Todo`, before implementation) | `ux` | the built-in `/design` skill |
 | Develop | `Todo` → `In Progress` → `In Review / QA` | `dev` (or `ml-engineer` for `ml/` work) | `work-ticket` |
 | Review/verify | (within `In Review / QA`) | `code-reviewer`, `qa` | the built-in `/code-review` skill |
 | Merge | `In Review / QA` → `Done` | human maintainer | — |
+
+Design isn't a board Status of its own — it's a step `work-ticket` (or you,
+if working inline) should trigger before implementation when a `Todo`
+item touches `apps/web` UI and no design spec exists yet. `ux` produces a
+mockup via `/design` and a concrete spec (Spanish copy, spacing, states);
+`dev` implements to that spec rather than improvising layout/copy.
 
 ## Why a skill layer on top of the agents
 

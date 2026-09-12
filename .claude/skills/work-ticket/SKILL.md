@@ -22,11 +22,17 @@ through to an open PR.
    - Everything else (`apps/web`, `apps/api`, `infra/cdk`) -> the `dev`
      agent.
 
-3. **Move Status to `In Progress`** on the project board (item/field IDs
+3. **If it touches `apps/web` UI** (new screen, new flow, visible layout/
+   copy change) **and no design spec exists yet**, run the `ux` agent
+   first (it uses `/design` to produce a mockup + concrete spec — Spanish
+   copy, spacing, states). Don't let `dev` improvise visual/copy decisions
+   for anything more than a trivial one-line text change.
+
+4. **Move Status to `In Progress`** on the project board (item/field IDs
    from `.claude/agents/product-owner.md` /
    `gh project field-list 6 --owner MynorXico`).
 
-4. **Delegate the implementation.** Spawn the chosen agent with a
+5. **Delegate the implementation.** Spawn the chosen agent with a
    self-contained prompt — it starts with zero context, so include the
    issue title/body/URL verbatim, the acceptance criteria, and explicitly
    say it should: create a branch, implement + write tests, run the
@@ -50,9 +56,9 @@ through to an open PR.
    large/noisy implementation work out of the main session's context, not
    to add ceremony to a two-line fix.
 
-5. **If the agent reports it hit an architecture decision** it wasn't
+6. **If the agent reports it hit an architecture decision** it wasn't
    scoped to make, don't push it to decide anyway — stop and route that
    through the `architect` agent / an ADR first, then resume.
 
-6. **Once the PR is open**, move the project item's Status to
+7. **Once the PR is open**, move the project item's Status to
    `In Review / QA`. Report the PR URL back to the user.

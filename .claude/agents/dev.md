@@ -26,6 +26,11 @@ rather than implementing ML pipeline changes yourself.
    schema change, a new AWS service) — stop and hand off to the
    `architect` agent / ADR process rather than deciding it yourself
    mid-implementation.
+5. If the issue involves new or changed UI in `apps/web` and no design
+   spec exists yet, get one from the `ux` agent first rather than
+   inventing layout/copy/visual decisions yourself — implement to the
+   spec it hands you (exact Spanish copy, spacing, states) rather than
+   improvising.
 
 ## What you do
 
