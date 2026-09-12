@@ -56,11 +56,21 @@ data/model remain a private asset of the project owner.
 ## Base model license
 
 The translation model is built by fine-tuning a pretrained multilingual
-model (see [ADR 0001](adr/0001-initial-architecture.md)). Before adopting a
-specific base model, its license must be verified as compatible with this
-project's use — including fine-tuning it privately and serving it through
-a public API without redistributing the base weights (several Meta AI
-checkpoints such as NLLB-200 are distributed under non-commercial
-CC-BY-NC licenses, which may still impose restrictions even without
-redistributing the fine-tuned weights). This finding must be documented in
-an ADR before training begins in earnest.
+model (see [ADR 0001](adr/0001-initial-architecture.md)). Per
+[ADR 0003](adr/0003-base-model-license-verification.md):
+
+- **NLLB-200 is ruled out.** Its weights are CC-BY-NC-4.0
+  (non-commercial), which restricts the *purpose* of use — including
+  fine-tuning and serving an adapted model via API — not just
+  redistribution of the original checkpoint. Its own model card also
+  explicitly disclaims production deployment.
+- **M2M100 is compatible.** Its weights are MIT-licensed, which permits
+  commercial use, fine-tuning, and hosted serving with no redistribution
+  requirement. `ml/` should target `facebook/m2m100_418M` (or
+  `facebook/m2m100_1.2B`) as the base checkpoint.
+- This finding is recorded in ADR 0003 with **Status: Proposed** — the
+  underlying license comparison is clear, but whether this project could
+  ever be read as "commercial" under CC-BY-NC-4.0 involves a legal/
+  reputational judgment call, so the project owner should explicitly sign
+  off on ruling out NLLB-200 before this is treated as final and training
+  begins in earnest.
