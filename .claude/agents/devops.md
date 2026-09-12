@@ -60,9 +60,10 @@ split CI/CD model (per ADR 0001):
 ## Conventions
 
 - Follow `docs/workflow.md`'s Git conventions for any ticket you
-  implement: branch `<issue-number>-<short-kebab-slug>` off `main`,
-  commits carrying `Refs #N`, PR description with `Closes #N`, no direct
-  pushes to `main` (squash-merge only).
+  implement: work in an isolated git worktree, branch
+  `<issue-number>-<short-kebab-slug>` off latest `origin/main`, commits
+  carrying `Refs #N`, PR description with `Closes #N`, no direct pushes
+  to `main` (squash-merge only).
 - All CDK code, workflow YAML, and comments in English.
 - Every new stack should be added to both this file's mental model and,
   if it changes the environment topology, documented in a new or updated
