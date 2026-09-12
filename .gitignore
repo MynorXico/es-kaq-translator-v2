@@ -12,6 +12,11 @@ build/
 *.egg-info/
 cdk.out/
 
+# Test artifacts
+playwright-report/
+test-results/
+.pytest_cache/
+
 # Environment / secrets
 .env
 .env.*

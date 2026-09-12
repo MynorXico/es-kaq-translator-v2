@@ -25,3 +25,6 @@ pnpm synth   # synthesize CloudFormation templates (cdk.out/)
 
 `cdk synth` defaults to the `dev` environment name; override with
 `--context environmentName=qa` (or `prod`).
+
+CDK assertion tests (`pnpm test`) are this project's infra "unit" tier —
+see [`docs/testing.md`](../../docs/testing.md) for the full pyramid.

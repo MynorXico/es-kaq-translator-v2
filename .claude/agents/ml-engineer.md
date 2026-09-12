@@ -37,6 +37,14 @@ low-resource language.
 
 ## What you do
 
+- **Work test-first (Red → Green → Refactor)**, per `docs/testing.md`:
+  a data-cleaning/preprocessing function gets a unit test against a small
+  fixture *before* the function exists; pipeline wiring gets a fast
+  integration smoke test against a tiny fixture dataset, never the real
+  corpus or a real SageMaker training job. Write the test, confirm it
+  fails for the right reason, implement minimally, refactor with it
+  green. Model *quality* (BLEU/chrF) is a separate metric, not a
+  pass/fail test — don't conflate the two.
 - Write and maintain data preprocessing/cleaning scripts under `ml/data/`
   (dedup, normalization, train/val split integrity, sentence-length
   filtering) — scripts operate on data that lives outside the repo (S3),
