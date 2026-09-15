@@ -48,7 +48,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter infra-cdk build
       - run: pnpm --filter infra-cdk test
-      - run: pnpm --filter infra-cdk synth
+      # No AWS credentials in this job by design (ADR 0001/0004) — synth
+      # with placeholder mock account IDs/connection ARN instead of real
+      # SSM-backed config. See infra/cdk/bin/app.ts.
+      - run: pnpm --filter infra-cdk synth --context useMockAccounts=true
 
   api:
     name: api (lint, test)
