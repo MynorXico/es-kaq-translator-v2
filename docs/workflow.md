@@ -23,8 +23,14 @@ the mechanical parts, a `.claude/skills/*` skill:
 Every PR against `main` also gets an automated first-pass review from
 `.github/workflows/claude-code-review.yml` (the `anthropics/claude-code-action`
 GitHub Action, running Anthropic's `code-review` plugin), which posts
-inline comments directly on the PR. It's a first pass, not a replacement
-for `code-reviewer`/`qa` or human review — findings don't block merging.
+inline comments directly on the PR for anything it flags, plus a tracking
+comment (`track_progress: true`) that gets replaced with a final summary
+when it finishes — so a clean PR still gets a visible "reviewed, no
+issues found" comment instead of silence. Without `track_progress`, a PR
+with zero findings got no PR-visible signal at all beyond the passing
+`review` check, making it impossible to tell "ran and found nothing" from
+"silently failed" at a glance. It's a first pass, not a replacement for
+`code-reviewer`/`qa` or human review — findings don't block merging.
 Authenticated via the `CLAUDE_CODE_OAUTH_TOKEN` repo secret (tied to a
 Claude subscription) and the Claude GitHub App installed on this repo.
 
