@@ -34,15 +34,22 @@ split CI/CD model (per ADR 0001):
   with this serverless-first, cost-conscious posture unless there's a
   concrete reason to deviate — surface that reason rather than silently
   switching to an always-on resource.
-- Domain: `traductorkaqchikel.com`, managed in Route 53, with `app.` and
-  `api.` subdomains and per-environment subdomains (`dev.`, `qa.`) as
-  needed.
-- When wiring up Route 53/CloudFront/API Gateway custom domains in CDK,
-  keep the domain name in **one** config value (a CDK context param or a
-  single `config.ts` constant that stacks import) — never hardcode the
-  literal domain string across multiple stack files. It's not a secret
-  (it's the public site's own URL), this is purely about not having to
-  grep-and-replace it everywhere if it ever changes.
+- Domain: `traductorkaqchikel.com`, registered via Route 53 Domains under
+  `translator-tooling` (auto-delegated hosted zone, already verified —
+  no manual NS setup needed). Flat, one-level subdomains only —
+  `app.`/`api.` for prod, `app-dev.`/`api-dev.`/`app-qa.`/`api-qa.` for
+  lower envs (not nested, so a single `*.traductorkaqchikel.com` ACM
+  wildcard cert covers everything). Resolve the hosted zone in CDK via
+  `HostedZone.fromLookup`, never hardcode its ID. See
+  [the domain runbook](../../docs/runbooks/domain-and-dns.md) for the
+  full plan — records for `app.`/`api.` etc. don't exist yet since
+  nothing is deployed to point them at.
+- When wiring up those domains in CDK, keep the domain name in **one**
+  config value (a CDK context param or a single `config.ts` constant that
+  stacks import) — never hardcode the literal domain string across
+  multiple stack files. It's not a secret (it's the public site's own
+  URL), this is purely about not having to grep-and-replace it everywhere
+  if it ever changes.
 
 ## What you do
 

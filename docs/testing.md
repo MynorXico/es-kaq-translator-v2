@@ -76,14 +76,16 @@ credentials. There's no automated integration/e2e tier for infra in CI
 a live environment is a QA responsibility before promoting dev → qa →
 prod, not a PR gate.
 
-### `ml/` (not built yet)
+### `ml/`
 
-No code exists here yet. When it does:
+| Level | Tool | What it covers | Where |
+|---|---|---|---|
+| Unit | pytest | Pure data-cleaning/preprocessing and evaluation functions (dedup, normalization, BLEU/chrF wrapper, model card rendering) against small fixture inputs | `ml/tests/unit/` |
+| Integration | pytest | A fast smoke run of pipeline wiring (tiny fixture dataset, not the real corpus, not a real SageMaker training job) — confirms the pieces connect, not model quality | `ml/tests/integration/` |
 
-| Level | Tool | What it covers |
-|---|---|---|
-| Unit | pytest | Pure data-cleaning/preprocessing functions (dedup, normalization) against small fixture inputs |
-| Integration | pytest | A fast smoke run of the pipeline wiring (tiny fixture dataset, not the real corpus, not a real SageMaker training job) — confirms the pieces connect, not model quality |
+Run: `cd ml && uv run pytest`. Fixture data lives under `ml/tests/fixtures/`
+and is hand-written/synthetic — the real private validation set (ADR
+0002) is never fetched or referenced by this suite.
 
 There is no e2e tier for `ml/` — "does the deployed model actually
 translate correctly" is measured by BLEU/chrF against the validation set
