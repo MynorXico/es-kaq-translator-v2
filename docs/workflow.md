@@ -17,8 +17,16 @@ the mechanical parts, a `.claude/skills/*` skill:
 | Groom | `Backlog` → `Todo` | `product-owner` | `groom-backlog` |
 | Design (UI tickets only) | (within `Todo`, before implementation) | `ux` | the built-in `/design` skill |
 | Develop | `Todo` → `In Progress` → `In Review / QA` | `dev` (or `ml-engineer` for `ml/` work) | `work-ticket` |
-| Review/verify | (within `In Review / QA`) | `code-reviewer`, `qa` | the built-in `/code-review` skill |
+| Review/verify | (within `In Review / QA`) | `code-reviewer`, `qa`, automated (see below) | the built-in `/code-review` skill |
 | Merge | `In Review / QA` → `Done` | human maintainer | — |
+
+Every PR against `main` also gets an automated first-pass review from
+`.github/workflows/claude-code-review.yml` (the `anthropics/claude-code-action`
+GitHub Action, running Anthropic's `code-review` plugin), which posts
+inline comments directly on the PR. It's a first pass, not a replacement
+for `code-reviewer`/`qa` or human review — findings don't block merging.
+Authenticated via the `CLAUDE_CODE_OAUTH_TOKEN` repo secret (tied to a
+Claude subscription) and the Claude GitHub App installed on this repo.
 
 Design isn't a board Status of its own — it's a step `work-ticket` (or you,
 if working inline) should trigger before implementation when a `Todo`
