@@ -37,6 +37,12 @@ split CI/CD model (per ADR 0001):
 - Domain: `traductorkaqchikel.com`, managed in Route 53, with `app.` and
   `api.` subdomains and per-environment subdomains (`dev.`, `qa.`) as
   needed.
+- When wiring up Route 53/CloudFront/API Gateway custom domains in CDK,
+  keep the domain name in **one** config value (a CDK context param or a
+  single `config.ts` constant that stacks import) — never hardcode the
+  literal domain string across multiple stack files. It's not a secret
+  (it's the public site's own URL), this is purely about not having to
+  grep-and-replace it everywhere if it ever changes.
 
 ## What you do
 
