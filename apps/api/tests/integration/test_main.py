@@ -26,3 +26,22 @@ def test_translate_rejects_empty_text():
         json={"text": "", "direction": "es-to-cak"},
     )
     assert response.status_code == 422
+    assert response.json() == {"error": "El texto no puede estar vacío."}
+
+
+def test_translate_rejects_text_over_length_limit():
+    response = client.post(
+        "/v1/translate",
+        json={"text": "a" * 2001, "direction": "es-to-cak"},
+    )
+    assert response.status_code == 422
+    assert response.json() == {"error": "El texto no puede tener más de 2000 caracteres."}
+
+
+def test_translate_rejects_invalid_direction():
+    response = client.post(
+        "/v1/translate",
+        json={"text": "Hola", "direction": "en-to-fr"},
+    )
+    assert response.status_code == 422
+    assert response.json() == {"error": "La dirección debe ser 'es-to-cak' o 'cak-to-es'."}
