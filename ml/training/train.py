@@ -1,0 +1,416 @@
+"""SageMaker Training Job entrypoint: fine-tune `facebook/m2m100_418M`
+(ADR 0003) for Spanish<->Kaqchikel translation.
+
+## What this script does
+
+1. Reads the training and validation corpora as two-column TSV
+   (source<TAB>target) files via `data.corpus_io.read_tsv_pairs`, from
+   whatever local path or `s3://` URI is passed in as `--train`/
+   `--validation` -- never a hardcoded bucket. When run inside a real
+   SageMaker Training Job, point these at the container's channel paths
+   (e.g. `/opt/ml/input/data/train/train.tsv`,
+   `/opt/ml/input/data/validation/val.tsv`, populated from whichever S3
+   prefix the job's `Estimator` call configures -- the private ALMG
+   corpus and the public community corpus live under distinct prefixes
+   per ADR 0002, and it is the *caller's* job -- not this script's -- to
+   keep them physically separate on disk/S3).
+2. Loads the `facebook/m2m100_418M` tokenizer + model.
+3. Extends the tokenizer's vocabulary and resizes the model's embeddings
+   to cover Kaqchikel (`training.tokenizer_extension`, built in #34/#62),
+   using the actual training corpus text as the sample text the gap is
+   computed against, plus this script's own direction tag tokens (see
+   `training.direction`).
+4. Fine-tunes the model via `transformers.Seq2SeqTrainer`.
+5. Saves the fine-tuned model + tokenizer to `SM_MODEL_DIR` (`--model-dir`)
+   for SageMaker to upload as the training job's model artifact.
+6. Generates translations for the validation set, computes BLEU/chrF via
+   `evaluation.metrics`, and writes a model card via
+   `evaluation.model_card` alongside the saved model artifact
+   (`SM_MODEL_DIR/model_card.md`), per ADR 0001's traceability
+   requirement (register the resulting model card + config in SageMaker
+   Model Registry, not just the raw weights).
+
+## Direction handling: one multilingual checkpoint, tagged
+
+ADR 0001 left open whether to train one multilingual checkpoint (with
+direction tags) or two separate per-direction checkpoints. This script
+implements **one multilingual checkpoint** -- see `training.direction`'s
+module docstring and `docs/adr/0006-translation-direction-handling.md`
+for the full rationale (short version: the corpus is small enough that
+splitting it in two would hurt more than cross-direction interference
+would, Kaqchikel has no pretrained skill in either direction to protect
+via separation, and one checkpoint is cheaper to register/serve).
+`--direction` defaults to `"both"`, training on both es->cak and cak->es
+examples in the same run; it can be set to a single direction for
+experimentation/comparison.
+
+## Testing
+
+This script is never run for real (no real training pass, no real
+checkpoint download) in this repo's test suite -- that is issue #66's
+job. `tests/integration/test_train_pipeline.py` exercises the wiring
+(argument parsing -> corpus loading -> direction-tagged example building
+-> vocab/embedding extension -> save -> evaluate -> model card) against
+tiny fixture data, a duck-typed fake tokenizer/model, and fake
+`trainer`/`translator` callables injected into `run_training_job` in place
+of the real (heavy) `fine_tune`/`generate_translations` -- following the
+same "duck-type and fixture" approach as `training/tokenizer_extension.py`
+(#34/#62).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from data.corpus_io import read_tsv_pairs
+from evaluation.run import run_evaluation
+from training.direction import (
+    ALL_DIRECTION_TAG_TOKENS,
+    DIRECTION_CHOICES,
+    DIRECTION_TAGS,
+    TranslationExample,
+    build_direction_examples,
+    tag_source_text,
+)
+from training.tokenizer_extension import extend_tokenizer_vocab, resize_embeddings_for_new_tokens
+
+DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse CLI args, matching the SageMaker Training Job convention of
+    passing hyperparameters as `--key value` flags and reading channel/
+    output directories from `SM_*` environment variables when not
+    explicitly overridden.
+    """
+    parser = argparse.ArgumentParser(
+        description=(
+            "Fine-tune facebook/m2m100_418M for Spanish<->Kaqchikel "
+            "translation (ADR 0001, ADR 0003)."
+        )
+    )
+    parser.add_argument(
+        "--train",
+        required=True,
+        help=(
+            "Path or s3:// URI to the training corpus TSV (source<TAB>target). "
+            "In a real SageMaker Training Job, point this at the 'train' "
+            "channel's file, e.g. /opt/ml/input/data/train/train.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--validation",
+        required=True,
+        help=(
+            "Path or s3:// URI to the validation corpus TSV. In a real "
+            "SageMaker Training Job, point this at the 'validation' "
+            "channel's file, e.g. /opt/ml/input/data/validation/val.tsv."
+        ),
+    )
+    parser.add_argument(
+        "--corpus-version",
+        required=True,
+        help=(
+            "Identifier/tag for the corpus version used (e.g. an S3 object "
+            "version id or a dataset release tag), recorded in the model "
+            "card for traceability (ADR 0001). Never derived automatically "
+            "from corpus content, since that content must never leak into "
+            "a run artifact (ADR 0002)."
+        ),
+    )
+    parser.add_argument(
+        "--model-dir",
+        default=os.environ.get("SM_MODEL_DIR", "./model-output"),
+        help="Output directory for the fine-tuned model+tokenizer (SM_MODEL_DIR).",
+    )
+    parser.add_argument(
+        "--output-data-dir",
+        default=os.environ.get("SM_OUTPUT_DATA_DIR", "./output-data"),
+        help="Output directory for non-model run artifacts, e.g. predictions/"
+        "references used to compute metrics (SM_OUTPUT_DATA_DIR).",
+    )
+    parser.add_argument(
+        "--base-model",
+        default=DEFAULT_BASE_MODEL,
+        help="Hugging Face model id to fine-tune (ADR 0003).",
+    )
+    parser.add_argument(
+        "--direction",
+        choices=DIRECTION_CHOICES,
+        default="both",
+        help=(
+            "Which translation direction(s) to train. Default 'both' trains "
+            "a single multilingual checkpoint with direction tags -- see "
+            "training/direction.py for why."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Identifier for this training run; defaults to a UTC timestamp if omitted.",
+    )
+    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--learning-rate", type=float, default=5e-5)
+    parser.add_argument("--max-length", type=int, default=128)
+    parser.add_argument("--seed", type=int, default=42)
+
+    return parser.parse_args(argv)
+
+
+def load_base_model_and_tokenizer(base_model: str) -> tuple[Any, Any]:
+    """Load the real `M2M100Tokenizer` + `M2M100ForConditionalGeneration`
+    from the Hugging Face Hub. Lazily imports `transformers` so this module
+    can be imported (e.g. for `parse_args` unit tests) without requiring a
+    full `transformers`/`torch` install, mirroring the laziness pattern in
+    `training/tokenizer_extension.py`.
+    """
+    from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+
+    tokenizer = M2M100Tokenizer.from_pretrained(base_model)
+    model = M2M100ForConditionalGeneration.from_pretrained(base_model)
+    return tokenizer, model
+
+
+def extend_vocabulary_for_examples(
+    tokenizer: Any, model: Any, examples: list[TranslationExample], *, seed: int | None = None
+) -> list[str]:
+    """Extend `tokenizer`/`model` to cover the Kaqchikel text in `examples`,
+    plus this script's own direction tag tokens (`training.direction`), so
+    they get real, warm-started embedding rows too rather than falling back
+    to whatever `add_tokens` would leave uninitialized.
+
+    Returns the list of tokens actually added (may be empty).
+    """
+    sample_texts = [ex.source_text for ex in examples] + [ex.target_text for ex in examples]
+    sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+
+    added_tokens = extend_tokenizer_vocab(tokenizer, sample_texts)
+    resize_embeddings_for_new_tokens(model, len(added_tokens), seed=seed)
+    return added_tokens
+
+
+class TranslationDataset:
+    """Tokenizes `TranslationExample`s into `Seq2SeqTrainer`-ready dicts.
+
+    Direction-tags each example's source text (`training.direction.
+    tag_source_text`) before encoding, and encodes the target text as
+    labels, so a single multilingual checkpoint can be trained on examples
+    from both directions at once (see `training/direction.py`).
+    """
+
+    def __init__(self, examples: list[TranslationExample], tokenizer: Any, max_length: int):
+        self._examples = examples
+        self._tokenizer = tokenizer
+        self._max_length = max_length
+
+    def __len__(self) -> int:
+        return len(self._examples)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        example = self._examples[index]
+        tagged_source = tag_source_text(example.source_text, example.target_lang)
+        model_inputs = self._tokenizer(
+            tagged_source, max_length=self._max_length, truncation=True
+        )
+        labels = self._tokenizer(
+            text_target=example.target_text, max_length=self._max_length, truncation=True
+        )
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+
+def fine_tune(
+    model: Any,
+    tokenizer: Any,
+    train_examples: list[TranslationExample],
+    eval_examples: list[TranslationExample],
+    args: argparse.Namespace,
+) -> Any:
+    """Fine-tune `model` via `transformers.Seq2SeqTrainer`.
+
+    This is the one real gradient-descent step in this script, and is
+    deliberately never exercised directly by the automated test suite --
+    `tests/integration/test_train_pipeline.py` injects a fake in its place
+    via `run_training_job`'s `trainer` parameter, since a real forward/
+    backward pass is out of scope for a fast wiring test (and running a
+    real multi-epoch fine-tune here would be issue #66's job, not this
+    one's).
+    """
+    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
+
+    train_dataset = TranslationDataset(train_examples, tokenizer, args.max_length)
+    eval_dataset = (
+        TranslationDataset(eval_examples, tokenizer, args.max_length) if eval_examples else None
+    )
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir=str(Path(args.model_dir) / "checkpoints"),
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        seed=args.seed,
+        save_strategy="no",
+        report_to=[],
+    )
+    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+
+    trainer = Seq2SeqTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=data_collator,
+    )
+    trainer.train()
+    return model
+
+
+def generate_translations(
+    model: Any,
+    tokenizer: Any,
+    examples: list[TranslationExample],
+    *,
+    max_length: int = 128,
+    batch_size: int = 16,
+) -> list[str]:
+    """Generate hypothesis translations for `examples` using `model.generate`.
+
+    Groups examples by target language so each batch uses the correct
+    `forced_bos_token_id` (the direction tag token for that target
+    language -- see `training.direction`), then generates greedily.
+    Deliberately never exercised directly by the automated test suite for
+    the same reason as `fine_tune` -- see that function's docstring.
+    """
+    hypotheses: list[str | None] = [None] * len(examples)
+    indices_by_target_lang: dict[str, list[int]] = {}
+    for index, example in enumerate(examples):
+        indices_by_target_lang.setdefault(example.target_lang, []).append(index)
+
+    for target_lang, indices in indices_by_target_lang.items():
+        forced_bos_token_id = tokenizer.convert_tokens_to_ids(DIRECTION_TAGS[target_lang])
+        for start in range(0, len(indices), batch_size):
+            batch_indices = indices[start : start + batch_size]
+            batch_texts = [
+                tag_source_text(examples[i].source_text, target_lang) for i in batch_indices
+            ]
+            encoded = tokenizer(
+                batch_texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            generated_ids = model.generate(
+                **encoded, forced_bos_token_id=forced_bos_token_id, max_length=max_length
+            )
+            decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            for i, text in zip(batch_indices, decoded, strict=True):
+                hypotheses[i] = text
+
+    assert all(h is not None for h in hypotheses)
+    return hypotheses  # type: ignore[return-value]
+
+
+def save_model_and_tokenizer(model: Any, tokenizer: Any, model_dir: str) -> None:
+    """Save the fine-tuned model + tokenizer to `model_dir` (`SM_MODEL_DIR`
+    in a real Training Job), for SageMaker to upload as the job's model
+    artifact. Trained weights are never published (see ADR 0002/CLAUDE.md)
+    -- this only ever writes to the job's private model output directory.
+    """
+    Path(model_dir).mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(model_dir)
+    tokenizer.save_pretrained(model_dir)
+
+
+def run_training_job(
+    args: argparse.Namespace,
+    *,
+    model_loader: Callable[[str], tuple[Any, Any]] = load_base_model_and_tokenizer,
+    trainer: Callable[
+        [Any, Any, list[TranslationExample], list[TranslationExample], argparse.Namespace], Any
+    ] = fine_tune,
+    translator: Callable[..., list[str]] = generate_translations,
+) -> Path:
+    """Run the full training job: load corpus -> extend vocab -> fine-tune
+    -> save -> evaluate -> write model card. Returns the path to the
+    written model card.
+
+    `model_loader`/`trainer`/`translator` default to the real
+    implementations above; tests inject fakes in their place (see this
+    module's own docstring and `tests/integration/test_train_pipeline.py`).
+    """
+    run_id = args.run_id or datetime.now(UTC).strftime("run-%Y%m%dT%H%M%SZ")
+
+    train_pairs = read_tsv_pairs(args.train)
+    val_pairs = read_tsv_pairs(args.validation)
+
+    train_examples = build_direction_examples(train_pairs, args.direction)
+    val_examples = build_direction_examples(val_pairs, args.direction)
+
+    tokenizer, model = model_loader(args.base_model)
+
+    added_tokens = extend_vocabulary_for_examples(
+        tokenizer, model, train_examples, seed=args.seed
+    )
+
+    model = trainer(model, tokenizer, train_examples, val_examples, args)
+
+    save_model_and_tokenizer(model, tokenizer, args.model_dir)
+
+    hypotheses = translator(model, tokenizer, val_examples, max_length=args.max_length)
+    references = [example.target_text for example in val_examples]
+
+    output_dir = Path(args.output_data_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    predictions_path = output_dir / "predictions.txt"
+    references_path = output_dir / "references.txt"
+    predictions_path.write_text("\n".join(hypotheses) + "\n", encoding="utf-8")
+    references_path.write_text("\n".join(references) + "\n", encoding="utf-8")
+
+    notes = None
+    if args.direction == "both":
+        notes = (
+            "Single multilingual checkpoint trained with explicit direction "
+            "tags for both es->cak and cak->es (see training/direction.py "
+            "and ADR 0006) rather than two separate checkpoints."
+        )
+
+    run_metadata = {
+        "run_id": run_id,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "base_model": args.base_model,
+        "direction": args.direction,
+        "corpus_version": args.corpus_version,
+        "train_sentence_count": len(train_pairs),
+        "hyperparameters": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "max_length": args.max_length,
+            "seed": args.seed,
+            "new_tokens_added": len(added_tokens),
+        },
+        "notes": notes,
+    }
+
+    model_card_path = Path(args.model_dir) / "model_card.md"
+    _metrics, model_card_path = run_evaluation(
+        predictions_path, references_path, run_metadata, model_card_path
+    )
+    return model_card_path
+
+
+def main(argv: Sequence[str] | None = None) -> Path:
+    args = parse_args(argv)
+    return run_training_job(args)
+
+
+if __name__ == "__main__":
+    main()
