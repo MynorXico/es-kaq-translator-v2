@@ -15,6 +15,17 @@ published, redistributed, or shared externally for any purpose (research
 included), regardless of what ALMG would permit. It lives only in a
 private S3 bucket used by the training pipeline.
 
+That bucket (and the SageMaker execution role that reads/writes it during
+training jobs) is provisioned by `DataStack`
+(`infra/cdk/lib/data-stack.ts`), one instance per environment (dev/qa/
+prod), deployed through the same CDK Pipeline as the rest of the
+infrastructure (ADR 0004). The bucket blocks all public access, is
+versioned, and is encrypted at rest; the execution role's IAM policy is
+scoped to only that bucket's ARN plus a CloudWatch Logs prefix for
+training job output — never a broad SageMaker-managed policy. As with
+every other AWS resource in this repo, no real bucket name or account ID
+is committed to git — only the CDK construct that generates them.
+
 - The public repository never contains this raw data — only
   preprocessing/cleaning scripts that operate on it, plus a minimal
   synthetic sample for automated tests if needed.
