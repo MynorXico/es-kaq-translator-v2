@@ -64,7 +64,10 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     run this against real corpus data in this repo/CI — only against S3
     paths from an authorized environment.
 - `training/` — SageMaker training job entrypoint (`training/train.py`,
-  see below) and tokenizer/vocabulary extension for Kaqchikel (see below).
+  see below), the code that submits/monitors a real training job and
+  registers it in SageMaker Model Registry (`training/submit_job.py`, see
+  "Job submission" below), and tokenizer/vocabulary extension for
+  Kaqchikel (see below).
 - `evaluation/` — BLEU/chrF evaluation harness and model card generation
   (see below).
 
@@ -251,3 +254,61 @@ register/serve. `train.py --direction` can still be set to a single
 direction for a comparison run; this is a starting decision to revisit
 with real per-direction BLEU/chrF once training runs (#66) exist, not a
 permanent one.
+
+## Job submission (`training/submit_job.py`)
+
+`training/submit_job.py` is the code that actually submits a real
+(billable) SageMaker Training Job running `training/train.py` against the
+private ALMG corpus, and registers the resulting model in SageMaker Model
+Registry -- issue #66. **This repo's automated test suite never runs a
+real training job or calls real AWS**; every AWS/`sagemaker` SDK call in
+`submit_job.py` is exercised only against mocks
+(`tests/unit/test_submit_job.py`, `tests/integration/test_submit_job_cli.py`).
+Actually submitting the real job is a separate, deliberate, maintainer-run
+action, gated on an AWS quota increase.
+
+Run it from `ml/` (so `source_dir="training"` resolves):
+
+```sh
+cd ml
+uv run python -m training.submit_job --dry-run          # sanity-check first
+uv run python -m training.submit_job                     # the real, billable submission
+```
+
+CLI flags (all optional, defaulting to `training/train.py`'s own defaults
+where applicable): `--environment` (dev/qa/prod, selects which `DataStack`
+to resolve), `--instance-type` (default `ml.g4dn.xlarge`), `--max-run`
+(hard wall-clock cap in seconds, default 10800 = 3h, so a runaway job can't
+bill forever), `--corpus-version`, `--direction`, `--run-id`, `--base-model`,
+`--epochs`, `--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
+`--model-package-group-name`, `--approval-status` (default
+`PendingManualApproval` -- a human reviews BLEU/chrF before approving),
+`--no-wait` (submit without blocking/monitoring; also skips registration,
+since there's nothing to register until the job finishes), `--no-logs`
+(don't stream CloudWatch Logs while waiting), `--no-register` (skip Model
+Registry registration even after a successful, waited-for run).
+
+**`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
+outputs (a free, read-only call) and prints the full would-be job config --
+resolved bucket/role, instance type, image version combination,
+hyperparameters, and channel S3 URIs -- as JSON, without ever constructing
+a `HuggingFace` estimator or calling `.fit()`. This is what the maintainer
+runs first to sanity-check before the real submission.
+
+**Channel path convention**: the `train`/`validation` channels point at the
+exact corpus object keys, `s3://<bucket>/corpus/almg/v1/train.tsv` and
+`.../val.tsv` -- not the whole prefix. Combined with SageMaker's standard
+`/opt/ml/input/data/<channel>/<s3-object-basename>` download convention,
+this makes the container-side paths deterministic:
+`/opt/ml/input/data/train/train.tsv` and
+`/opt/ml/input/data/validation/val.tsv`. `submit_job.py` passes those exact
+paths as the `--train`/`--validation` hyperparameters to `train.py`.
+
+`submit_job.py`'s module docstring documents why `ml/pyproject.toml` pins
+`sagemaker>=2.257,<3` (the `HuggingFace` estimator / `TrainingInput` API
+this ticket requires only exists in the SageMaker Python SDK's `2.x` line;
+the installed `3.x` line is an unrelated, incompatible rewrite) and how the
+`transformers_version`/`pytorch_version`/`py_version` combination
+(`4.56.2`/`2.8.0`/`py312`) was derived from the installed SDK's own
+HuggingFace DLC compatibility table rather than guessed by hand -- re-check
+that derivation after any future `sagemaker` upgrade.

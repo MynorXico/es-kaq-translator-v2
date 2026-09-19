@@ -10,6 +10,7 @@ dependencies = [
     "torch>=2.2",
     "transformers>=4.40",
     "sentencepiece>=0.2",
+    "sagemaker>=2.257,<3",
 ]
 
 [dependency-groups]
