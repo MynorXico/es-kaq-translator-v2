@@ -30,15 +30,29 @@ of the project's workflow — see `docs/workflow.md`.
 
 4. **Pick labels** from the existing set only — don't invent new ones:
    `bug`, `enhancement`, `documentation`, `ml`, `infra`, `governance`,
-   `translation-quality`, `data-contribution`, `good first issue`,
+   `translation-quality`, `data-contribution`, `design`, `good first issue`,
    `help wanted`. Check with `gh label list --repo MynorXico/es-kaq-translator-v2`
    if unsure what exists.
 
-5. **Determine Phase** from the roadmap in
+5. **Check for a shared unmet prerequisite before finalizing** — this is
+   how issue #52 almost didn't happen: six tickets (#36/#38/#39/#40/#41/#44)
+   were each independently written as "needs a `ux` pass," instead of
+   recognizing they all shared one missing thing (a real visual design)
+   that should be its own ticket, done once. If you're writing more than
+   one ticket in the same area at once (a batch, or several related asks
+   in a row), ask: do two or more of them depend on the same
+   not-yet-decided foundation (a design, an architecture decision, a
+   shared pattern)? If so, write **one** ticket for that foundation and
+   have the others say "implement against [that ticket]" instead of each
+   separately triggering it. This applies across a single grooming/planning
+   session even if the tickets aren't created in the same batch — see
+   `groom-backlog`'s equivalent check for tickets already on the board.
+
+6. **Determine Phase** from the roadmap in
    `docs/adr/0001-initial-architecture.md` (Phase 0 - Bootstrap, Phase 1 -
    MVP, Phase 2 - Promotion Pipeline, Phase 3 - Open Sourcing).
 
-6. **Create it and add it to the board** (project `6`, owner `MynorXico`
+7. **Create it and add it to the board** (project `6`, owner `MynorXico`
    — field/option IDs and the full `gh` recipe are in
    `.claude/agents/product-owner.md`, fetch current IDs with
    `gh project field-list 6 --owner MynorXico` since they aren't
@@ -60,4 +74,4 @@ of the project's workflow — see `docs/workflow.md`.
    the point where readiness gets a second look. Only set `Todo` directly
    if the user explicitly says this is ready to start right now.
 
-7. **Report back** the issue URL and the Status/Phase you set.
+8. **Report back** the issue URL and the Status/Phase you set.

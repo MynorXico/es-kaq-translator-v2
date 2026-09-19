@@ -45,6 +45,28 @@ any production code, then implement to green, then refactor — see
 [`docs/testing.md`](testing.md) for the process and which test level(s) a
 given change needs.
 
+## Grooming looks across tickets, not just at one at a time
+
+Two real planning gaps happened back to back on 2026-09-19, both from
+grooming/ticket-writing being purely reactive and per-item:
+
+1. A phase's backlog covered only whatever had been explicitly requested
+   (narrow "wire the stub to the real model" tickets), with no ticket at
+   all for what the phase's actual stated goal in
+   [ADR 0001](adr/0001-initial-architecture.md) required — nobody
+   noticed until the user asked "where's the ticket for building the
+   real UI?"
+2. Six tickets were each independently written as "needs a `ux` pass"
+   instead of recognizing they shared one missing prerequisite (a real
+   visual design), which should have been one consolidated ticket from
+   the start.
+
+`new-ticket` and `groom-backlog` (see those skills) now both check for
+these explicitly: a shared-unmet-prerequisite scan across related
+tickets, and a phase-coverage check against ADR 0001's stated goals. Ask
+these questions proactively during grooming rather than waiting for gaps
+to be pointed out.
+
 ## Git conventions
 
 Every change traces back to an issue — if one doesn't exist yet, create
