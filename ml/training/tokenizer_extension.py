@@ -6,14 +6,13 @@ This module is intentionally thin: all the actual decision logic (which
 characters/words are missing, how to dedupe against the existing vocab, how
 to initialize new embedding rows) lives in `vocab_gap.py` /
 `vocab_extension.py` and is fully unit-tested there against plain
-dicts/lists/arrays -- never against a real tokenizer. `transformers` and
-`torch` are deliberately *not* added as `ml/` dependencies (see
-`ml/pyproject.toml`): this sandbox has no downloaded M2M100 checkpoint and
-installing a GPU ML framework here just to leave it untested would be
-misleading. `resize_embeddings_for_new_tokens` below lazily imports `torch`
-inside its own body for that reason, and is not covered by the fast unit
-test suite -- it can only be exercised against a real checkpoint in a real
-training environment.
+dicts/lists/arrays -- never against a real tokenizer.
+`resize_embeddings_for_new_tokens` below is exercised against the real
+`facebook/m2m100_418M` checkpoint in
+`tests/integration/test_tokenizer_extension_real_model.py` (see ADR 0003);
+it still lazily imports `torch` inside its own body so importing this
+module never requires `torch` to be installed for callers that only need
+`extend_tokenizer_vocab`.
 
 `extend_tokenizer_vocab`, in contrast, only relies on two methods any HF
 tokenizer implements (`get_vocab()`, `add_tokens()`), so it *is* fully
@@ -75,14 +74,23 @@ def extend_tokenizer_vocab(tokenizer: TokenizerLike, sample_texts: Iterable[str]
     return new_tokens
 
 
-def resize_embeddings_for_new_tokens(model, new_vocab_size: int, *, seed: int | None = None) -> None:
-    """Resize `model`'s token embeddings and warm-start the newly added rows.
+def resize_embeddings_for_new_tokens(model, num_new_tokens: int, *, seed: int | None = None) -> None:
+    """Grow `model`'s token embeddings by `num_new_tokens` rows and warm-start them.
 
     Real usage: `model` is a `transformers.M2M100ForConditionalGeneration`
     loaded from the same checkpoint as the tokenizer passed to
-    `extend_tokenizer_vocab`, and `new_vocab_size` is `len(tokenizer)`
-    after that call. M2M100 ties its input and output embeddings by
-    default, so resizing the input embedding matrix is sufficient.
+    `extend_tokenizer_vocab`, and `num_new_tokens` is `len(extend_tokenizer_vocab(...))`
+    -- the count of tokens actually added, not the tokenizer's resulting
+    `len(tokenizer)`. Those two are *not* interchangeable: a real M2M100
+    checkpoint's embedding matrix is pre-padded a few rows beyond its
+    tokenizer's raw vocab size (128112 rows for a 128104-token vocab, as
+    of `facebook/m2m100_418M`), so comparing `len(tokenizer)` against the
+    model's current embedding row count would silently no-op whenever the
+    tokenizer's growth fit inside that existing padding -- leaving new
+    token ids pointing at untrained padding rows instead of warm-started
+    ones. Always growing by the actual new-token count sidesteps that
+    entirely. M2M100 ties its input and output embeddings by default, so
+    resizing the input embedding matrix is sufficient.
 
     This calls HF's own `model.resize_token_embeddings` first (which
     allocates the new rows), then overwrites just the newly added rows
@@ -90,24 +98,25 @@ def resize_embeddings_for_new_tokens(model, new_vocab_size: int, *, seed: int | 
     mean-of-existing-rows-plus-noise initialization, rather than leaving
     them at whatever default `resize_token_embeddings` used.
 
-    Not covered by the fast unit test suite: it requires `torch` and a
-    real model checkpoint, neither available in this sandbox (see module
-    docstring). The row-initialization math it delegates to is fully
-    tested in isolation against a fake embedding matrix instead.
+    Covered by `tests/integration/test_tokenizer_extension_real_model.py`
+    against the real checkpoint (see ADR 0003); the row-initialization
+    math it delegates to is additionally unit-tested in isolation against
+    a fake embedding matrix.
     """
+    if num_new_tokens <= 0:
+        return
+
     import torch
 
     embeddings = model.get_input_embeddings()
     old_weight = embeddings.weight.detach().cpu().numpy()
-    old_vocab_size = old_weight.shape[0]
-    num_new_tokens = new_vocab_size - old_vocab_size
-    if num_new_tokens <= 0:
-        return
+    old_size = old_weight.shape[0]
+    new_size = old_size + num_new_tokens
 
     resized = resize_embedding_matrix(old_weight, num_new_tokens, seed=seed)
 
-    model.resize_token_embeddings(new_vocab_size)
+    model.resize_token_embeddings(new_size)
     with torch.no_grad():
-        model.get_input_embeddings().weight[old_vocab_size:] = torch.from_numpy(
-            resized[old_vocab_size:]
+        model.get_input_embeddings().weight[old_size:new_size] = torch.from_numpy(
+            resized[old_size:new_size]
         )
