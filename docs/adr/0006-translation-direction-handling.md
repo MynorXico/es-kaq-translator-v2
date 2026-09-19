@@ -1,6 +1,6 @@
 # ADR 0006: Translation direction handling (one multilingual model vs. two checkpoints)
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-09-18
 
 ## Context
