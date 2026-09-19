@@ -24,7 +24,7 @@ fields beyond the built-ins:
 Useful `gh` commands (requires a token with the `project` scope):
 
 ```sh
-gh project item-list 6 --owner MynorXico                # see the board
+gh project item-list 6 --owner MynorXico --limit 100     # see the board
 gh project field-list 6 --owner MynorXico                # field/option IDs
 gh issue create --repo MynorXico/es-kaq-translator-v2 ...
 gh project item-add 6 --owner MynorXico --url <issue-url>
@@ -34,6 +34,11 @@ gh project item-edit --id <item-id> --project-id <project-id> \
 
 `item-edit` needs the numeric project/field/option IDs, not their names —
 fetch them with `field-list` first if you don't already have them.
+**Always pass `--limit` well above the board's current size on
+`item-list`** — its default page size is small enough that it silently
+truncates results once the board grows past it, which has actually
+caused a status update to look up an empty item ID and fail. Check the
+board's current item count if unsure whether 100 is still enough.
 
 ## What you do
 
