@@ -27,6 +27,16 @@ uv run pytest                          # run tests (unit/ + integration/)
 uv run ruff check .                    # lint
 ```
 
+## Configuration
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `ALLOWED_ORIGINS` | Comma-separated list of origins allowed to call the API cross-origin (CORS), i.e. the deployed `apps/web` origin for the current environment. | `http://localhost:5173` (Vite's default dev server origin) |
+
+Each environment's CDK deployment sets `ALLOWED_ORIGINS` to its own
+`apps/web` origin once that domain exists (see
+[`docs/runbooks/domain-and-dns.md`](../../docs/runbooks/domain-and-dns.md)).
+
 Tests are split `tests/unit/` (pure functions, no I/O) and
 `tests/integration/` (through the actual FastAPI app via `TestClient`).
 See [`docs/testing.md`](../../docs/testing.md) for the full pyramid and
