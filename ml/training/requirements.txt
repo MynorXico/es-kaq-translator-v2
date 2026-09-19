@@ -1,0 +1,15 @@
+# Dependency manifest for the SageMaker Training Job container running
+# training/train.py (entry_point) with training/ as source_dir.
+#
+# SageMaker's PyTorch/HuggingFace framework containers already provide a
+# matching torch build for the container's CUDA version, but pin these
+# explicitly here so a script-mode job installs a known-compatible set
+# rather than whatever happens to already be on the base image. Kept in
+# sync by hand with ml/pyproject.toml's [project.dependencies] -- if you
+# bump a version there for a reason relevant to training (not just
+# evaluation/data tooling), mirror it here too.
+transformers>=4.40
+sentencepiece>=0.2
+sacrebleu>=2.4
+boto3>=1.34
+numpy>=1.26

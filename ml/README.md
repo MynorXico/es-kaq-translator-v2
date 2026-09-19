@@ -25,9 +25,8 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     clean <input> <output>` or `... validate-split <train> <val>`. Never
     run this against real corpus data in this repo/CI — only against S3
     paths from an authorized environment.
-- `training/` — SageMaker training job entrypoints, tokenizer/vocabulary
-  extension for Kaqchikel (see below). Job entrypoint wiring itself is not
-  yet scaffolded.
+- `training/` — SageMaker training job entrypoint (`training/train.py`,
+  see below) and tokenizer/vocabulary extension for Kaqchikel (see below).
 - `evaluation/` — BLEU/chrF evaluation harness and model card generation
   (see below).
 
@@ -147,3 +146,70 @@ warm-started ones. It now takes the actual new-token count directly
 entirely. This is exactly the class of bug the duck-typed fake in the unit
 tests can't catch, since a fake tokenizer/embedding pair has no reason to
 reproduce a real checkpoint's padding quirks.
+
+## Training entrypoint (`training/train.py`)
+
+`training/train.py` is the SageMaker Training Job entrypoint that wires
+everything above (`data/`, `training/tokenizer_extension.py`,
+`evaluation/`) into an actual fine-tuning run:
+
+1. Reads the training/validation corpora via `data.corpus_io.read_tsv_pairs`
+   from paths/S3 URIs passed in as `--train`/`--validation` — never a
+   hardcoded bucket. In a real SageMaker Training Job, point these at the
+   container's channel paths (e.g.
+   `/opt/ml/input/data/train/train.tsv`), populated from whichever S3
+   prefix the job configures; keeping the private ALMG corpus and public
+   community corpus physically separate on S3 (ADR 0002) is the caller's
+   responsibility, not this script's.
+2. Builds direction-tagged training/eval examples
+   (`training/direction.py`) — see "Direction handling" below.
+3. Loads `facebook/m2m100_418M` (ADR 0003), extends its vocabulary and
+   resizes its embeddings for Kaqchikel plus the direction tag tokens,
+   using `training/tokenizer_extension.py` (#34/#62) against the actual
+   training corpus text.
+4. Fine-tunes via `transformers.Seq2SeqTrainer`.
+5. Saves the fine-tuned model + tokenizer to `SM_MODEL_DIR`
+   (`--model-dir`) — this artifact is **never published**; it's only
+   uploaded by SageMaker as a private training-job artifact and served
+   through the project's own hosted API (ADR 0002, CLAUDE.md).
+6. Generates validation-set translations, computes BLEU/chrF, and writes
+   a model card (`evaluation/run.py`) to `SM_MODEL_DIR/model_card.md`,
+   alongside the saved model artifact, for registration in SageMaker
+   Model Registry per ADR 0001's traceability requirement.
+
+Run `uv run python -m training.train --help` for the full CLI (corpus
+paths, `--direction`, hyperparameters, `--corpus-version`, `--run-id`).
+`training/requirements.txt` lists the extra dependencies the SageMaker
+training container needs at runtime (kept in sync by hand with
+`pyproject.toml`; `torch` is intentionally omitted there since SageMaker's
+PyTorch/HuggingFace framework containers already provide a
+CUDA-compatible build).
+
+**No real training run happens in this repo's test suite** — issue #66
+covers the first real (billable) training job.
+`tests/integration/test_train_pipeline.py` exercises the full wiring
+(argument parsing → corpus loading → direction-tagged example building →
+vocab/embedding extension → save → evaluate → model card) against tiny
+fixture data, a duck-typed fake tokenizer/model (no download), and fake
+`trainer`/`translator` callables standing in for the real (heavy)
+`fine_tune`/`generate_translations` functions — the same "duck-type and
+fixture" approach as the tokenizer-extension tests above.
+
+### Direction handling: one multilingual model, tagged
+
+ADR 0001 left open whether to train one multilingual model (distinguishing
+directions via a tag) or two separate per-direction checkpoints. **This
+project trains one multilingual checkpoint** for both `es->cak` and
+`cak->es`, using an explicit direction tag token (`__es__` / `__cak__`)
+prepended to the source text and used as the generation-time
+`forced_bos_token_id`, rather than M2M100's built-in language-code
+mechanism (which doesn't cover Kaqchikel). See
+[`docs/adr/0006-translation-direction-handling.md`](../docs/adr/0006-translation-direction-handling.md)
+for the full rationale — in short: the corpus is small enough that
+splitting it in two would likely hurt more than any cross-direction
+interference would, Kaqchikel has no pretrained skill in either direction
+to protect via separation, and one checkpoint is cheaper to
+register/serve. `train.py --direction` can still be set to a single
+direction for a comparison run; this is a starting decision to revisit
+with real per-direction BLEU/chrF once training runs (#66) exist, not a
+permanent one.
