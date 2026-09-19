@@ -4,7 +4,11 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
 
 - `data/` — corpus preprocessing/cleaning scripts. **Never commit raw
   corpus files here** — see [`docs/data-governance.md`](../docs/data-governance.md).
-  Raw data lives in a private S3 bucket. Composable functions:
+  Raw data lives in a private, versioned S3 bucket provisioned by
+  `DataStack` (`infra/cdk/lib/data-stack.ts`), one per environment
+  (dev/qa/prod); the bucket name/ARN is only ever referenced via CDK
+  cross-stack refs or `CfnOutput`, never hardcoded here. Composable
+  functions:
   - `data/normalize.py` — whitespace/Unicode (NFC) cleanup. Never
     lowercases (see module docstring for why).
   - `data/dedup.py` — exact-duplicate `(source, target)` pair removal.
