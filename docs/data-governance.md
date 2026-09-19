@@ -68,9 +68,7 @@ model (see [ADR 0001](adr/0001-initial-architecture.md)). Per
   commercial use, fine-tuning, and hosted serving with no redistribution
   requirement. `ml/` should target `facebook/m2m100_418M` (or
   `facebook/m2m100_1.2B`) as the base checkpoint.
-- This finding is recorded in ADR 0003 with **Status: Proposed** — the
-  underlying license comparison is clear, but whether this project could
-  ever be read as "commercial" under CC-BY-NC-4.0 involves a legal/
-  reputational judgment call, so the project owner should explicitly sign
-  off on ruling out NLLB-200 before this is treated as final and training
-  begins in earnest.
+- This finding is recorded in ADR 0003, **Status: Accepted** — the
+  project owner reviewed the legal/reputational judgment call (whether
+  this project could ever be read as "commercial" under CC-BY-NC-4.0) and
+  signed off on ruling out NLLB-200. Training against M2M100 may proceed.

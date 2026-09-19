@@ -1,6 +1,6 @@
 # ADR 0003: Base model license verification (NLLB-200 vs. M2M100)
 
-- Status: Proposed
+- Status: Accepted (2026-09-19, by the project owner)
 - Date: 2026-09-11
 
 ## Context
@@ -103,14 +103,15 @@ redistribute the checkpoint itself.
   reference M2M100 (`facebook/m2m100_418M` as the default, smaller
   checkpoint for iteration; `facebook/m2m100_1.2B` as a candidate for a
   quality-focused later run) rather than NLLB-200.
-- **This ADR's Status is "Proposed," not "Accepted."** Although the
-  license *text* comparison is fairly clear-cut (CC-BY-NC-4.0 vs. MIT),
-  whether a small, currently-unmonetized open-source project would ever
-  actually be treated as "commercial" under CC-BY-NC-4.0 is a judgment
-  call with real legal and reputational stakes, and it directly overrides
-  a model choice ADR 0001 left open. This should get explicit human
-  (project owner) sign-off before being treated as binding, rather than
-  Claude deciding it silently on the project's behalf.
+- **This ADR was left as "Proposed," not "Accepted," until the project
+  owner explicitly reviewed it.** Although the license *text* comparison
+  is fairly clear-cut (CC-BY-NC-4.0 vs. MIT), whether a small,
+  currently-unmonetized open-source project would ever actually be
+  treated as "commercial" under CC-BY-NC-4.0 is a judgment call with real
+  legal and reputational stakes, and it directly overrides a model choice
+  ADR 0001 left open — not something to decide silently on the project's
+  behalf. The project owner reviewed and accepted this finding on
+  2026-09-19; see the Status line above.
 
 ## Consequences
 
