@@ -112,14 +112,38 @@ as pure, unit-testable logic, separate from actually running a training job:
   zeros/random, so new tokens start in-distribution but can still diverge
   from each other during fine-tuning).
 - `training/tokenizer_extension.py` — the thin integration layer wiring the
-  above to a real `transformers.M2M100Tokenizer`/model. `transformers` and
-  `torch` are deliberately **not** `ml/` dependencies: there's no
-  downloaded M2M100 checkpoint or GPU in this environment, so
-  `resize_embeddings_for_new_tokens` (which needs `torch`) is documented
-  but not exercised by the test suite. `extend_tokenizer_vocab`, which only
-  needs `get_vocab()`/`add_tokens()`, *is* fully unit-tested against a fake
-  tokenizer that duck-types those two methods.
+  above to a real `transformers.M2M100Tokenizer`/model.
+  `extend_tokenizer_vocab`, which only needs `get_vocab()`/`add_tokens()`,
+  is unit-tested against a fake tokenizer that duck-types those two
+  methods. `resize_embeddings_for_new_tokens` is exercised against the real
+  `facebook/m2m100_418M` checkpoint in
+  `tests/integration/test_tokenizer_extension_real_model.py`.
 
 All fixtures here are a handful of hand-written Kaqchikel sentences
 (`tests/fixtures/sample_kaqchikel_text.txt`) — never the real private ALMG
 corpus (ADR 0002).
+
+### Real-checkpoint integration test
+
+`tests/integration/test_tokenizer_extension_real_model.py` downloads and
+loads the actual `facebook/m2m100_418M` tokenizer + model (ADR 0003) — the
+only test in this repo that touches a real pretrained checkpoint. It
+requires `torch`, `transformers`, and `sentencepiece` (real `ml/`
+dependencies, unlike the rest of this pipeline's data/logic code, which
+stays framework-free). First run downloads ~1.9GB from the Hugging Face
+Hub to `~/.cache/huggingface` (`$HF_HOME` if set); CI caches that directory
+across runs (see `.github/workflows/ci.yml`), keyed on this test file's
+contents so a model/config change busts the cache.
+
+This test caught a real bug during development: a real M2M100 checkpoint's
+embedding matrix is pre-padded a few rows beyond its tokenizer's raw vocab
+size (128112 rows for a 128104-token `facebook/m2m100_418M` vocab).
+`resize_embeddings_for_new_tokens` originally inferred how many new rows
+to add from `len(tokenizer) - model_embedding_row_count`, which silently
+no-op'd whenever a small vocab extension fit inside that existing padding
+— leaving new token ids pointing at untrained padding rows instead of
+warm-started ones. It now takes the actual new-token count directly
+(`len(extend_tokenizer_vocab(...))`), sidestepping the padding mismatch
+entirely. This is exactly the class of bug the duck-typed fake in the unit
+tests can't catch, since a fake tokenizer/embedding pair has no reason to
+reproduce a real checkpoint's padding quirks.
