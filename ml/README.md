@@ -17,13 +17,47 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     thresholds via `LengthFilterConfig`).
   - `data/split_integrity.py` — validates a train/val split has no
     overlapping sentence pairs (raises `SplitIntegrityError` on exact-pair
-    leakage; also reports weaker one-sided source/target overlap).
+    leakage; also reports weaker one-sided source/target overlap). This
+    caught a real issue when the private corpus (`v1`) was first uploaded:
+    97 exact pairs — mostly short dictionary/glossary-style entries
+    (single words, numbers, technical terms) — appeared in both `train`
+    and `val`, because the original train/val split predates this check
+    and wasn't deduplicated first. Fixed by removing those 97 pairs from
+    `val.tsv` only (every one was already present in `train.tsv`, so
+    nothing was lost); `val` is now 3,609 pairs, `train` unchanged at
+    32,906. Re-run `validate-split` (below) after any future re-upload or
+    reprocessing of the corpus to confirm this hasn't regressed.
   - `data/corpus_io.py` — reads/writes two-column TSV sentence pairs from
     a local path or an `s3://` URI. Callers pass the URI; this module
     never hardcodes a bucket or distinguishes the private ALMG corpus
     from the public community corpus (see ADR 0002) — that separation is
     the caller's responsibility, by pointing at distinct S3
     buckets/prefixes for each.
+
+    **File format** (`read_tsv_pairs`/`write_tsv_pairs`, and therefore
+    every corpus file in the training bucket): plain UTF-8 text, one
+    sentence pair per line, **two fields separated by a literal tab
+    character** — **no header row** (a header line would itself be
+    parsed as a malformed data row and raise `ValueError`, since it
+    won't split into exactly two fields the way real header text
+    usually looks). Column order is **Spanish first, then Kaqchikel**:
+
+    ```
+    Buenos días	Utz sq'ij
+    ¿Cómo estás?	La utz awäch?
+    ```
+
+    Blank lines are skipped; any line that isn't exactly two
+    tab-separated fields raises an error rather than being silently
+    dropped, so a malformed upload fails loudly instead of quietly
+    losing data.
+
+    The private ALMG corpus lives under a versioned prefix,
+    `s3://<training-bucket>/corpus/almg/v1/{train,val}.tsv` (bucket name
+    from `DataStack`, see above) — bump the version segment on any future
+    reprocessing of the raw source data, rather than overwriting `v1` in
+    place, so a given training run's corpus version stays traceable
+    (ADR 0001).
   - `data/pipeline.py` — chains the above into `clean_corpus_file` and
     `validate_split_files`, plus a CLI: `uv run python -m data.pipeline
     clean <input> <output>` or `... validate-split <train> <val>`. Never
