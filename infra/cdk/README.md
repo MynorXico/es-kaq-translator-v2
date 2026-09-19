@@ -66,7 +66,8 @@ works without credentials.
 
 ## One-time bootstrap
 
-Actually bootstrapping the 4 AWS accounts, setting up cross-account trust,
-creating the SSM parameters, and creating/completing the GitHub connection
-handshake is a one-time manual/CLI procedure, tracked in a runbook once
-someone has actually performed it (not written speculatively here).
+Done — see [the bootstrap runbook](../../docs/runbooks/cdk-pipelines-bootstrap.md)
+for the exact steps performed (account bootstrapping, SSM parameters, the
+GitHub connection handshake, and the first pipeline deploy). The pipeline
+is self-mutating from here on; a fresh `cdk deploy` of this stack is only
+needed again if rebuilding from scratch.
