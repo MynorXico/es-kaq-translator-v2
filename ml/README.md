@@ -26,7 +26,8 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     run this against real corpus data in this repo/CI — only against S3
     paths from an authorized environment.
 - `training/` — SageMaker training job entrypoints, tokenizer/vocabulary
-  extension for Kaqchikel. Not yet scaffolded.
+  extension for Kaqchikel (see below). Job entrypoint wiring itself is not
+  yet scaffolded.
 - `evaluation/` — BLEU/chrF evaluation harness and model card generation
   (see below).
 
@@ -89,3 +90,36 @@ See [`docs/adr/0001-initial-architecture.md`](../docs/adr/0001-initial-architect
 for the modeling approach and
 [`docs/adr/0003-base-model-license-verification.md`](../docs/adr/0003-base-model-license-verification.md)
 for the base model choice (M2M100).
+
+## Tokenizer/vocabulary extension for Kaqchikel (`training/`)
+
+M2M100's pretrained vocabulary was not trained on Kaqchikel, so it needs to
+be extended before fine-tuning (per ADR 0003's consequences). This is kept
+as pure, unit-testable logic, separate from actually running a training job:
+
+- `training/vocab_gap.py` — `find_missing_characters` / `find_missing_words`
+  identify which characters/word-forms in sample Kaqchikel text are not
+  already representable by a base tokenizer's vocabulary. Kaqchikel shares
+  the Latin alphabet with Spanish, so the real gap is narrower than "the
+  whole alphabet" — mainly a handful of extra vowels (e.g. "ä") and the
+  plain apostrophe marking glottalized consonants (k', tz', ch', q').
+- `training/vocab_extension.py` — `select_new_tokens` / `extend_vocab`
+  extend a base vocab dict with new tokens, deterministically and without
+  ever duplicating an existing entry. `resize_embedding_matrix` returns a
+  resized `(vocab_size + N, dim)` NumPy array given a base embedding matrix
+  and a count of new tokens, initializing new rows at the mean of the
+  existing rows plus a small amount of noise (a warm start, rather than
+  zeros/random, so new tokens start in-distribution but can still diverge
+  from each other during fine-tuning).
+- `training/tokenizer_extension.py` — the thin integration layer wiring the
+  above to a real `transformers.M2M100Tokenizer`/model. `transformers` and
+  `torch` are deliberately **not** `ml/` dependencies: there's no
+  downloaded M2M100 checkpoint or GPU in this environment, so
+  `resize_embeddings_for_new_tokens` (which needs `torch`) is documented
+  but not exercised by the test suite. `extend_tokenizer_vocab`, which only
+  needs `get_vocab()`/`add_tokens()`, *is* fully unit-tested against a fake
+  tokenizer that duck-types those two methods.
+
+All fixtures here are a handful of hand-written Kaqchikel sentences
+(`tests/fixtures/sample_kaqchikel_text.txt`) — never the real private ALMG
+corpus (ADR 0002).
