@@ -14,9 +14,14 @@ actually ready to move to `Todo`.
 1. **List everything in Backlog:**
 
    ```sh
-   gh project item-list 6 --owner MynorXico --format json \
+   gh project item-list 6 --owner MynorXico --format json --limit 100 \
      | jq '.items[] | select(.status=="Backlog")'
    ```
+
+   Always pass `--limit` well above the board's current item count —
+   `item-list`'s default page size silently truncates once the board
+   grows past it (this has actually caused a status update to fail
+   against an empty item ID).
 
    For a small backlog (roughly under 15-20 items), do this pass inline
    in the current session. If it's grown large enough that reading every
