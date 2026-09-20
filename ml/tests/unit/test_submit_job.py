@@ -10,11 +10,74 @@ from __future__ import annotations
 
 import io
 import tarfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from training import submit_job
+
+# ---------------------------------------------------------------------------
+# build_source_bundle
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_ml_root(tmp_path: Path) -> Path:
+    """A tiny stand-in for the real ml/ package root: data/, evaluation/,
+    training/, each with a marker file plus a __pycache__ dir that must not
+    be copied, and training/requirements.txt.
+    """
+    ml_root = tmp_path / "ml"
+    for package_name in ("data", "evaluation", "training"):
+        package_dir = ml_root / package_name
+        package_dir.mkdir(parents=True)
+        (package_dir / "__init__.py").write_text("")
+        (package_dir / f"{package_name}_marker.py").write_text(f"# {package_name}\n")
+        cache_dir = package_dir / "__pycache__"
+        cache_dir.mkdir()
+        (cache_dir / "stale.pyc").write_bytes(b"\x00")
+    (ml_root / "training" / "train.py").write_text("# entry point\n")
+    (ml_root / "training" / "requirements.txt").write_text("transformers>=4.40\n")
+    return ml_root
+
+
+def test_build_source_bundle_copies_all_three_packages(tmp_path):
+    ml_root = _make_fake_ml_root(tmp_path)
+
+    bundle_dir = submit_job.build_source_bundle(ml_root)
+
+    assert (bundle_dir / "data" / "data_marker.py").exists()
+    assert (bundle_dir / "evaluation" / "evaluation_marker.py").exists()
+    assert (bundle_dir / "training" / "train.py").exists()
+
+
+def test_build_source_bundle_excludes_pycache(tmp_path):
+    ml_root = _make_fake_ml_root(tmp_path)
+
+    bundle_dir = submit_job.build_source_bundle(ml_root)
+
+    assert not (bundle_dir / "data" / "__pycache__").exists()
+    assert not (bundle_dir / "training" / "__pycache__").exists()
+
+
+def test_build_source_bundle_copies_requirements_txt_to_bundle_root(tmp_path):
+    ml_root = _make_fake_ml_root(tmp_path)
+
+    bundle_dir = submit_job.build_source_bundle(ml_root)
+
+    root_requirements = bundle_dir / "requirements.txt"
+    assert root_requirements.exists()
+    assert root_requirements.read_text() == "transformers>=4.40\n"
+
+
+def test_build_source_bundle_returns_a_fresh_directory_each_call(tmp_path):
+    ml_root = _make_fake_ml_root(tmp_path)
+
+    first = submit_job.build_source_bundle(ml_root)
+    second = submit_job.build_source_bundle(ml_root)
+
+    assert first != second
+
 
 # ---------------------------------------------------------------------------
 # resolve_stack_outputs
@@ -143,7 +206,9 @@ def test_build_hyperparameters_generates_run_id_when_not_given():
 def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
     args = submit_job.parse_args(["--run-id", "run-test"])
 
-    config = submit_job.build_job_config(bucket="fake-bucket", role="fake-role", args=args)
+    config = submit_job.build_job_config(
+        bucket="fake-bucket", role="fake-role", args=args, source_dir="fake-bundle"
+    )
 
     assert config["role"] == "fake-role"
     assert config["instance_type"] == "ml.g4dn.xlarge"
@@ -165,10 +230,21 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
 def test_build_job_config_respects_custom_instance_type_and_max_run():
     args = submit_job.parse_args(["--instance-type", "ml.p3.2xlarge", "--max-run", "3600"])
 
-    config = submit_job.build_job_config(bucket="b", role="r", args=args)
+    config = submit_job.build_job_config(bucket="b", role="r", args=args, source_dir="fake-bundle")
 
     assert config["instance_type"] == "ml.p3.2xlarge"
     assert config["max_run"] == 3600
+
+
+def test_build_job_config_passes_through_source_dir_and_entry_point():
+    args = submit_job.parse_args([])
+
+    config = submit_job.build_job_config(
+        bucket="b", role="r", args=args, source_dir="/tmp/fake-bundle-dir"
+    )
+
+    assert config["source_dir"] == "/tmp/fake-bundle-dir"
+    assert config["entry_point"] == "training/train.py"
 
 
 # ---------------------------------------------------------------------------
@@ -181,14 +257,16 @@ def test_build_estimator_constructs_huggingface_estimator_with_expected_kwargs(m
     monkeypatch.setattr(submit_job, "HuggingFace", fake_huggingface_cls)
 
     args = submit_job.parse_args(["--run-id", "run-test"])
-    config = submit_job.build_job_config(bucket="fake-bucket", role="fake-role", args=args)
+    config = submit_job.build_job_config(
+        bucket="fake-bucket", role="fake-role", args=args, source_dir="/tmp/fake-bundle"
+    )
 
     estimator = submit_job.build_estimator(config)
 
     assert estimator is fake_huggingface_cls.return_value
     _, kwargs = fake_huggingface_cls.call_args
-    assert kwargs["entry_point"] == "train.py"
-    assert kwargs["source_dir"] == "training"
+    assert kwargs["entry_point"] == "training/train.py"
+    assert kwargs["source_dir"] == "/tmp/fake-bundle"
     assert kwargs["role"] == "fake-role"
     assert kwargs["instance_type"] == "ml.g4dn.xlarge"
     assert kwargs["instance_count"] == 1
