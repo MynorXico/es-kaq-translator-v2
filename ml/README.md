@@ -267,13 +267,28 @@ real training job or calls real AWS**; every AWS/`sagemaker` SDK call in
 Actually submitting the real job is a separate, deliberate, maintainer-run
 action, gated on an AWS quota increase.
 
-Run it from `ml/` (so `source_dir="training"` resolves):
+Run it from `ml/` (so `build_source_bundle()`'s default `ml_root` resolves):
 
 ```sh
 cd ml
 uv run python -m training.submit_job --dry-run          # sanity-check first
 uv run python -m training.submit_job                     # the real, billable submission
 ```
+
+**Source packaging**: `train.py` imports sibling packages (`data.*`,
+`evaluation.*`, `training.*`), but `sagemaker.huggingface.HuggingFace`'s
+`source_dir` upload flattens *the contents of* whatever directory you give
+it into `/opt/ml/code/` inside the container -- it does not preserve that
+directory's own name. Pointing `source_dir` directly at `training/` (an
+earlier version of this script did exactly that) meant those sibling
+imports failed with `ModuleNotFoundError: No module named 'data'` the
+first time this ran for real -- a bug a mocked unit test can't catch,
+since it's about how the real SDK packages a real local directory, not
+about this script's own logic. `build_source_bundle()` fixes this by
+assembling a temp directory containing `data/`, `evaluation/`, and
+`training/` together before building the estimator, so
+`entry_point="training/train.py"` and its imports resolve exactly as they
+do when running `train.py` locally from `ml/`.
 
 CLI flags (all optional, defaulting to `training/train.py`'s own defaults
 where applicable): `--environment` (dev/qa/prod, selects which `DataStack`

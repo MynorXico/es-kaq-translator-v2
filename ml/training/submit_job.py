@@ -11,10 +11,15 @@ module is never exercised against real AWS in this repo's test suite.
    `SageMakerExecutionRoleArn`) at runtime, per environment
    (`infra/cdk/lib/data-stack.ts`). Never hardcodes a bucket name, role ARN,
    or account id.
-2. `build_job_config` / `build_estimator` -- build a
-   `sagemaker.huggingface.HuggingFace` estimator wired to `train.py`
-   (`entry_point="train.py"`, `source_dir="training"`), with a `max_run`
-   safety cap so a runaway job can't rack up unbounded cost.
+2. `build_source_bundle` -- assembles a temp directory containing `data/`,
+   `evaluation/`, and `training/` together (see its own docstring for why
+   this is necessary: `source_dir` pointed at `training/` alone flattens
+   away the sibling packages `train.py` actually imports, which surfaced
+   as a real `ModuleNotFoundError` the first time this ran for real).
+   `build_job_config` / `build_estimator` -- build a
+   `sagemaker.huggingface.HuggingFace` estimator wired to that bundle
+   (`entry_point="training/train.py"`, `source_dir=<bundle path>`), with a
+   `max_run` safety cap so a runaway job can't rack up unbounded cost.
 3. `build_training_inputs` / `submit_training_job` -- point the `train`/
    `validation` channels at the exact private-corpus object keys and call
    `estimator.fit(...)`.
@@ -80,8 +85,11 @@ import argparse
 import io
 import json
 import re
+import shutil
 import tarfile
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -116,8 +124,12 @@ TRANSFORMERS_VERSION = "4.56.2"
 PYTORCH_VERSION = "2.8.0"
 PY_VERSION = "py312"
 
-ENTRY_POINT = "train.py"
-SOURCE_DIR = "training"
+# train.py is run as part of a package tree (it imports `data.*`,
+# `evaluation.*`, and `training.*` as siblings), so `source_dir` must be a
+# bundle whose root contains all three top-level packages -- see
+# `build_source_bundle`. entry_point is relative to that bundle root.
+ENTRY_POINT = "training/train.py"
+BUNDLED_PACKAGES = ("data", "evaluation", "training")
 
 REQUIRED_STACK_OUTPUTS = ("TrainingDataBucketName", "SageMakerExecutionRoleArn")
 
@@ -253,6 +265,46 @@ def resolve_stack_outputs(
 # ---------------------------------------------------------------------------
 
 
+def build_source_bundle(ml_root: Path | None = None) -> Path:
+    """Assemble a fresh temp directory containing `data/`, `evaluation/`,
+    and `training/` (this file's own package root by default), plus a
+    root-level `requirements.txt` copied from `training/requirements.txt`.
+
+    Why this exists: `sagemaker.huggingface.HuggingFace`'s `source_dir`
+    upload flattens *the contents of* the given directory into
+    `/opt/ml/code/` inside the training container -- it does not preserve
+    that directory's own name as a package. Pointing `source_dir` directly
+    at `ml/training/` (as an earlier version of this script did) meant
+    `train.py`'s `from data.corpus_io import ...` / `from training.direction
+    import ...` (sibling-package imports) failed with `ModuleNotFoundError`
+    the first time this was run for real -- a duck-typed unit test can't
+    catch this, since it's purely about how the real SDK packages a real
+    local directory. This bundle preserves `data/`, `evaluation/`, and
+    `training/` as actual subdirectories of `source_dir`'s root, so those
+    imports resolve exactly as they do when running `train.py` locally from
+    `ml/`. `entry_point` is `"training/train.py"`, relative to this root.
+
+    Caller owns cleanup (`shutil.rmtree`) once the bundle has been uploaded
+    (i.e. after `estimator.fit()`/`HuggingFace(...)` construction returns).
+    """
+    ml_root = ml_root or Path(__file__).resolve().parent.parent
+    bundle_dir = Path(tempfile.mkdtemp(prefix="kaqchikel-train-bundle-"))
+
+    for package_name in BUNDLED_PACKAGES:
+        shutil.copytree(
+            ml_root / package_name,
+            bundle_dir / package_name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+
+    shutil.copy2(
+        ml_root / "training" / "requirements.txt",
+        bundle_dir / "requirements.txt",
+    )
+
+    return bundle_dir
+
+
 def build_channel_uris(bucket: str) -> dict[str, str]:
     """The exact S3 object URIs for the train/validation channels -- not the
     whole corpus prefix, so the container-side paths are deterministic (see
@@ -288,10 +340,17 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def build_job_config(*, bucket: str, role: str, args: argparse.Namespace) -> dict[str, Any]:
+def build_job_config(
+    *, bucket: str, role: str, args: argparse.Namespace, source_dir: str
+) -> dict[str, Any]:
     """Assemble every value the `HuggingFace` estimator needs, as a plain
     dict -- used both to build the real estimator (`build_estimator`) and to
     print the `--dry-run` preview, so the two can never drift apart.
+
+    `source_dir` is required (not defaulted here) so this function stays a
+    pure dict-builder with no filesystem side effects -- callers build the
+    real bundle via `build_source_bundle()` (see `main`) and pass its path
+    in; tests pass a fake placeholder string instead.
     """
     hyperparameters = build_hyperparameters(args)
     return {
@@ -308,6 +367,8 @@ def build_job_config(*, bucket: str, role: str, args: argparse.Namespace) -> dic
         "channels": build_channel_uris(bucket),
         "model_package_group_name": args.model_package_group_name,
         "approval_status": args.approval_status,
+        "source_dir": source_dir,
+        "entry_point": ENTRY_POINT,
     }
 
 
@@ -316,8 +377,8 @@ def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None
     `training/train.py`. Never calls `.fit()` -- see `submit_training_job`.
     """
     return HuggingFace(
-        entry_point=ENTRY_POINT,
-        source_dir=SOURCE_DIR,
+        entry_point=job_config["entry_point"],
+        source_dir=job_config["source_dir"],
         role=job_config["role"],
         instance_type=job_config["instance_type"],
         instance_count=job_config["instance_count"],
@@ -499,8 +560,8 @@ def _print_dry_run_config(outputs: dict[str, str], config: dict[str, Any]) -> No
     preview = {
         "resolved_stack_outputs": outputs,
         "estimator_kwargs": {
-            "entry_point": ENTRY_POINT,
-            "source_dir": SOURCE_DIR,
+            "entry_point": config["entry_point"],
+            "source_dir": config["source_dir"],
             "role": config["role"],
             "instance_type": config["instance_type"],
             "instance_count": config["instance_count"],
@@ -527,16 +588,25 @@ def main(argv: list[str] | None = None) -> int:
     bucket = outputs["TrainingDataBucketName"]
     role = outputs["SageMakerExecutionRoleArn"]
 
-    config = build_job_config(bucket=bucket, role=role, args=args)
+    bundle_dir = build_source_bundle()
+    try:
+        config = build_job_config(
+            bucket=bucket, role=role, args=args, source_dir=str(bundle_dir)
+        )
 
-    if args.dry_run:
-        _print_dry_run_config(outputs, config)
-        return 0
+        if args.dry_run:
+            _print_dry_run_config(outputs, config)
+            return 0
 
-    estimator = build_estimator(config)
-    inputs = build_training_inputs(bucket)
+        estimator = build_estimator(config)
+        inputs = build_training_inputs(bucket)
 
-    submit_training_job(estimator, inputs, wait=not args.no_wait, logs=not args.no_logs)
+        submit_training_job(estimator, inputs, wait=not args.no_wait, logs=not args.no_logs)
+    finally:
+        # Safe to remove once HuggingFace(...)/estimator.fit() has returned --
+        # the source_dir tarball is uploaded to S3 synchronously during
+        # estimator construction/fit, not read lazily afterward.
+        shutil.rmtree(bundle_dir, ignore_errors=True)
 
     if args.no_wait or args.no_register:
         return 0
