@@ -135,6 +135,13 @@ describe("DataStack", () => {
         const resolved = typeof resource === "string" ? resource : JSON.stringify(resource);
         // Must be scoped to the SageMaker log group namespace, not every log group in the account.
         expect(resolved).toContain("sagemaker");
+        // Real SageMaker training job log groups are literally named
+        // "/aws/sagemaker/TrainingJobs" (leading slash). A resource pattern
+        // missing that slash (e.g. "log-group:aws/sagemaker/*") silently
+        // never matches a real log group and blocks all training job
+        // logging — this exact bug shipped once and was only caught on a
+        // real, billable training run (issue #66).
+        expect(resolved).toContain("log-group:/aws/sagemaker");
       }
     }
   });

@@ -199,9 +199,28 @@ class TranslationDataset:
     """Tokenizes `TranslationExample`s into `Seq2SeqTrainer`-ready dicts.
 
     Direction-tags each example's source text (`training.direction.
-    tag_source_text`) before encoding, and encodes the target text as
-    labels, so a single multilingual checkpoint can be trained on examples
-    from both directions at once (see `training/direction.py`).
+    tag_source_text`) before encoding, and builds labels that start with
+    the same direction-tag token id used as `forced_bos_token_id` at
+    generation time (`generate_translations`), so a single multilingual
+    checkpoint can be trained on examples from both directions at once
+    (see `training/direction.py`).
+
+    Labels are built *without* the tokenizer's `text_target=` kwarg,
+    deliberately. M2M100Tokenizer's `text_target=` path calls
+    `_switch_to_target_mode()`, which requires `tokenizer.tgt_lang` to
+    already be a valid entry in its own pretrained language table
+    (`lang_code_to_id`) -- but this project's direction tags (ADR 0006)
+    exist specifically *because* Kaqchikel isn't in that table, and
+    `tgt_lang` is never set anywhere in this script. Calling
+    `tokenizer(text_target=...)` therefore crashes with `KeyError: None`
+    (confirmed against the real checkpoint -- this surfaced on the first
+    real, billable training run, since a duck-typed fake tokenizer has no
+    reason to reproduce this real API's internal state requirements).
+    Encoding target text as plain (non-target) text and prepending our
+    own direction-tag token id manually sidesteps that internal mechanism
+    entirely, and also keeps training consistent with generation: the
+    decoder is trained to predict the exact same first token
+    (`forced_bos_token_id`) it will later be forced to start from.
     """
 
     def __init__(self, examples: list[TranslationExample], tokenizer: Any, max_length: int):
@@ -218,10 +237,20 @@ class TranslationDataset:
         model_inputs = self._tokenizer(
             tagged_source, max_length=self._max_length, truncation=True
         )
-        labels = self._tokenizer(
-            text_target=example.target_text, max_length=self._max_length, truncation=True
+
+        target_tag_id = self._tokenizer.convert_tokens_to_ids(
+            DIRECTION_TAGS[example.target_lang]
         )
-        model_inputs["labels"] = labels["input_ids"]
+        target_budget = max(1, self._max_length - 2)  # room for the tag + eos below
+        target_ids = self._tokenizer(
+            example.target_text,
+            add_special_tokens=False,
+            max_length=target_budget,
+            truncation=True,
+        )["input_ids"]
+        labels = [target_tag_id, *target_ids, self._tokenizer.eos_token_id]
+
+        model_inputs["labels"] = labels
         return model_inputs
 
 

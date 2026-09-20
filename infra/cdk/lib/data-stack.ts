@@ -1,4 +1,4 @@
-import { CfnOutput, RemovalPolicy, Stack, StackProps } from "aws-cdk-lib";
+import { ArnFormat, CfnOutput, RemovalPolicy, Stack, StackProps } from "aws-cdk-lib";
 import { BlockPublicAccess, Bucket, BucketEncryption } from "aws-cdk-lib/aws-s3";
 import { PolicyStatement, Role, ServicePrincipal } from "aws-cdk-lib/aws-iam";
 import type { Construct } from "constructs";
@@ -47,6 +47,17 @@ export class DataStack extends Stack {
 
     // SageMaker Training Jobs write their logs under this fixed log group
     // namespace; scope write access there instead of granting logs:* on "*".
+    // Two easy-to-miss details, both required to actually match a real
+    // CloudWatch log group ARN (arn:aws:logs:<region>:<account>:log-group:
+    // /aws/sagemaker/TrainingJobs:*) rather than silently matching nothing:
+    // (1) resourceName needs its own leading "/" (CloudWatch log group
+    // names for SageMaker are literally "/aws/sagemaker/..."), and
+    // (2) ArnFormat.COLON_RESOURCE_NAME, since CDK's formatArn defaults to
+    // joining resource+resourceName with a "/" for many services, which
+    // for logs ARNs (colon-joined) produces a bogus double-slash
+    // ("log-group//aws/sagemaker/*") instead of the real
+    // "log-group:/aws/sagemaker/*". This exact combination silently
+    // blocked all training job logging on the first real run (issue #66).
     this.sageMakerExecutionRole.addToPolicy(
       new PolicyStatement({
         actions: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
@@ -54,7 +65,8 @@ export class DataStack extends Stack {
           this.formatArn({
             service: "logs",
             resource: "log-group",
-            resourceName: "aws/sagemaker/*",
+            resourceName: "/aws/sagemaker/*",
+            arnFormat: ArnFormat.COLON_RESOURCE_NAME,
           }),
         ],
       }),
