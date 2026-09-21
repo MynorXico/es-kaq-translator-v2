@@ -17,9 +17,24 @@ from evaluation.model_card import ModelCardData, render_model_card
 
 
 def _read_lines(path: str | Path) -> list[str]:
-    """Read a text file into a list of stripped, non-empty lines."""
+    """Read a text file into a list of lines, one per input line.
+
+    Deliberately keeps blank lines instead of dropping them. This file is
+    always one of a pair (predictions/references) written 1:1 aligned by
+    position (`train.py`'s `run_training_job` writes
+    `"\n".join(hypotheses) + "\n"`) -- a real training run can legitimately
+    produce an empty-string hypothesis for some example (e.g. the model
+    generates nothing for a very short/edge-case source, which this
+    corpus has plenty of: single words, bare numbers like "6."). Silently
+    filtering blank lines here desyncs that hypothesis from its reference
+    by one position for everything after it, which surfaced as a real
+    crash on the 5th real training run (issue #66):
+    `ValueError: hypotheses and references must be the same length (got
+    7217 hypotheses, 7218 references)` -- exactly a one-line shortfall,
+    from exactly one blank hypothesis being dropped.
+    """
     text = Path(path).read_text(encoding="utf-8")
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    return [line.strip() for line in text.splitlines()]
 
 
 def run_evaluation(
