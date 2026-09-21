@@ -52,6 +52,35 @@ def test_run_evaluation_writes_model_card_and_returns_metrics(tmp_path):
     assert f"{metrics.chrf:.1f}" in card_text
 
 
+def test_run_evaluation_keeps_a_blank_hypothesis_line_aligned(tmp_path):
+    # Reproduces the real bug found on the 5th real training run (#66):
+    # a blank hypothesis line (the model generated nothing for one
+    # example -- plausible given this corpus's many single-word/bare-
+    # number entries) must stay in place, not be silently dropped and
+    # desync every hypothesis after it from its reference.
+    predictions = tmp_path / "predictions.txt"
+    references = tmp_path / "references.txt"
+    predictions.write_text("hola\n\nadios\ngracias\n", encoding="utf-8")
+    references.write_text("utz\nla utz awäch\nchabe'\nmatyox\n", encoding="utf-8")
+
+    metrics, _ = run_evaluation(
+        predictions_path=predictions,
+        references_path=references,
+        run_metadata={
+            "run_id": "smoke-test-run",
+            "timestamp": "2026-09-14T00:00:00Z",
+            "base_model": "facebook/m2m100_418M",
+            "direction": "cak-to-es",
+            "corpus_version": "fixture-v0",
+            "train_sentence_count": 100,
+            "hyperparameters": {},
+        },
+        output_path=tmp_path / "model-card.md",
+    )
+
+    assert metrics.num_sentences == 4
+
+
 def test_run_evaluation_rejects_mismatched_line_counts(tmp_path):
     bad_predictions = tmp_path / "predictions.txt"
     bad_predictions.write_text("Only one line.\n")
