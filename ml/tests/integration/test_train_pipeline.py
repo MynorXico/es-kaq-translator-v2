@@ -111,10 +111,14 @@ def _base_vocab() -> dict[str, int]:
 
 
 def fake_model_loader(base_model: str) -> tuple[FakeM2M100Tokenizer, FakeM2M100Model]:
+    fake_model_loader.calls.append(base_model)
     vocab = _base_vocab()
     tokenizer = FakeM2M100Tokenizer(vocab)
     model = FakeM2M100Model(vocab_size=len(vocab))
     return tokenizer, model
+
+
+fake_model_loader.calls = []
 
 
 def fake_trainer(model, tokenizer, train_examples, eval_examples, args):
@@ -237,3 +241,62 @@ def test_run_training_job_single_direction_trains_half_the_examples(tmp_path):
     call = fake_trainer.calls[0]
     assert call["num_train_examples"] == 2
     assert call["num_eval_examples"] == 2
+
+
+def test_run_training_job_loads_base_model_when_no_init_model_given(tmp_path):
+    fake_model_loader.calls.clear()
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--base-model",
+            "facebook/m2m100_418M",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    assert fake_model_loader.calls == ["facebook/m2m100_418M"]
+
+
+def test_run_training_job_resumes_from_init_model_when_given(tmp_path):
+    fake_model_loader.calls.clear()
+    checkpoint_dir = tmp_path / "prior-checkpoint"
+    checkpoint_dir.mkdir()
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--base-model",
+            "facebook/m2m100_418M",
+            "--init-model",
+            str(checkpoint_dir),
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    # Loaded from the checkpoint, not the base pretrained model.
+    assert fake_model_loader.calls == [str(checkpoint_dir)]

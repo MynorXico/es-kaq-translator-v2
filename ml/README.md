@@ -309,13 +309,42 @@ where applicable): `--environment` (dev/qa/prod, selects which `DataStack`
 to resolve), `--instance-type` (default `ml.g4dn.xlarge`), `--max-run`
 (hard wall-clock cap in seconds, default 10800 = 3h, so a runaway job can't
 bill forever), `--corpus-version`, `--direction`, `--run-id`, `--base-model`,
-`--epochs`, `--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
+`--init-model-s3-uri` (continue training from a previous run's artifact --
+see "Continuing training from a checkpoint" below), `--epochs`,
+`--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
 `--model-package-group-name`, `--approval-status` (default
 `PendingManualApproval` -- a human reviews BLEU/chrF before approving),
 `--no-wait` (submit without blocking/monitoring; also skips registration,
 since there's nothing to register until the job finishes), `--no-logs`
 (don't stream CloudWatch Logs while waiting), `--no-register` (skip Model
 Registry registration even after a successful, waited-for run).
+
+### Continuing training from a checkpoint
+
+`train.py --init-model <path>` (issue #75) loads a previously fine-tuned
+checkpoint instead of `--base-model`, so a second (or third...) training
+pass doesn't re-pay for epochs already trained. Accepts a local directory
+(an already-extracted `save_pretrained()` output) or a local
+`model.tar.gz` path, extracted automatically
+(`training.train.resolve_model_source`). The checkpoint's vocabulary is
+already extended from the first run, so
+`extend_vocabulary_for_examples`/`extend_tokenizer_vocab` becomes a safe
+no-op when nothing new is missing -- no special-casing needed.
+
+To submit a real continuation job, pass `submit_job.py --init-model-s3-uri
+s3://<bucket>/model-artifacts/<prior-run-name>/output/model.tar.gz`: this
+stages that artifact as an `init-model` input channel (SageMaker training
+containers can't reach an arbitrary S3 URI at runtime otherwise, same
+reasoning as the `train`/`validation` channels), and passes
+`--init-model /opt/ml/input/data/init-model/model.tar.gz` through to
+`train.py` automatically.
+
+`--base-model` still gets recorded in the model card for traceability even
+when resuming -- it names what the checkpoint chain ultimately started
+from, not literally what this run loaded. The model card's `notes` field
+flags when a run was a continuation, and its `train_sentence_count`/
+`hyperparameters` describe only that run's additional training, not the
+full cumulative history across every continuation.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call) and prints the full would-be job config --

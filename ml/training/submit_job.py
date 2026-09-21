@@ -113,6 +113,13 @@ VALIDATION_OBJECT_KEY = f"{CORPUS_PREFIX}/val.tsv"
 TRAIN_CONTAINER_PATH = "/opt/ml/input/data/train/train.tsv"
 VALIDATION_CONTAINER_PATH = "/opt/ml/input/data/validation/val.tsv"
 
+# Channel name for an optional previous run's model artifact to continue
+# training from (issue #75) -- container path is computed from the given
+# S3 URI's basename (see `_init_model_container_path`), since unlike the
+# fixed corpus files, that basename varies (a training job's own artifact
+# is always named model.tar.gz, but this stays robust either way).
+INIT_MODEL_CHANNEL_NAME = "init-model"
+
 # --- Cost/safety defaults ---------------------------------------------------
 DEFAULT_INSTANCE_TYPE = "ml.g4dn.xlarge"
 DEFAULT_MAX_RUN_SECONDS = 3 * 60 * 60  # 3 hours -- a runaway job can't run forever.
@@ -188,6 +195,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Identifier for this run; auto-generated (UTC timestamp) if omitted.",
     )
     parser.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
+    parser.add_argument(
+        "--init-model-s3-uri",
+        default=None,
+        help=(
+            "s3:// URI to a previous run's model.tar.gz artifact to continue "
+            "training from (issue #75), instead of --base-model. Staged as "
+            "an input channel exactly like the train/validation corpus "
+            "files, since a SageMaker training container can't reach an "
+            "arbitrary S3 URI at runtime otherwise."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=5e-5)
@@ -305,15 +323,28 @@ def build_source_bundle(ml_root: Path | None = None) -> Path:
     return bundle_dir
 
 
-def build_channel_uris(bucket: str) -> dict[str, str]:
+def build_channel_uris(bucket: str, *, init_model_s3_uri: str | None = None) -> dict[str, str]:
     """The exact S3 object URIs for the train/validation channels -- not the
     whole corpus prefix, so the container-side paths are deterministic (see
-    module docstring / ml/README.md).
+    module docstring / ml/README.md). Includes the optional `init-model`
+    channel (issue #75) when `init_model_s3_uri` is given.
     """
-    return {
+    channels = {
         "train": f"s3://{bucket}/{TRAIN_OBJECT_KEY}",
         "validation": f"s3://{bucket}/{VALIDATION_OBJECT_KEY}",
     }
+    if init_model_s3_uri:
+        channels[INIT_MODEL_CHANNEL_NAME] = init_model_s3_uri
+    return channels
+
+
+def _init_model_container_path(init_model_s3_uri: str) -> str:
+    """The container-side path an `init-model` channel resolves to, per
+    SageMaker's `/opt/ml/input/data/<channel>/<s3-object-basename>`
+    convention (see module docstring).
+    """
+    basename = init_model_s3_uri.rsplit("/", 1)[-1]
+    return f"/opt/ml/input/data/{INIT_MODEL_CHANNEL_NAME}/{basename}"
 
 
 def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
@@ -325,7 +356,7 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
     flag for the entry point script.
     """
     run_id = args.run_id or _generate_run_id()
-    return {
+    hyperparameters = {
         "train": TRAIN_CONTAINER_PATH,
         "validation": VALIDATION_CONTAINER_PATH,
         "corpus-version": args.corpus_version,
@@ -338,6 +369,9 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
         "max-length": args.max_length,
         "seed": args.seed,
     }
+    if args.init_model_s3_uri:
+        hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
+    return hyperparameters
 
 
 def build_job_config(
@@ -364,7 +398,7 @@ def build_job_config(
         "py_version": PY_VERSION,
         "hyperparameters": hyperparameters,
         "base_job_name": f"traductor-kaqchikel-{hyperparameters['run-id']}",
-        "channels": build_channel_uris(bucket),
+        "channels": build_channel_uris(bucket, init_model_s3_uri=args.init_model_s3_uri),
         "model_package_group_name": args.model_package_group_name,
         "approval_status": args.approval_status,
         "source_dir": source_dir,
@@ -393,11 +427,15 @@ def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None
     )
 
 
-def build_training_inputs(bucket: str) -> dict[str, TrainingInput]:
+def build_training_inputs(
+    bucket: str, *, init_model_s3_uri: str | None = None
+) -> dict[str, TrainingInput]:
     """`train`/`validation` channels pointing at the exact corpus object
-    keys (not the whole prefix) -- see module docstring.
+    keys (not the whole prefix) -- see module docstring. Includes the
+    optional `init-model` channel (issue #75) when `init_model_s3_uri` is
+    given.
     """
-    channels = build_channel_uris(bucket)
+    channels = build_channel_uris(bucket, init_model_s3_uri=init_model_s3_uri)
     return {name: TrainingInput(s3_data=uri) for name, uri in channels.items()}
 
 
@@ -599,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         estimator = build_estimator(config)
-        inputs = build_training_inputs(bucket)
+        inputs = build_training_inputs(bucket, init_model_s3_uri=args.init_model_s3_uri)
 
         submit_training_job(estimator, inputs, wait=not args.no_wait, logs=not args.no_logs)
     finally:

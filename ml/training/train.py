@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +141,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Hugging Face model id to fine-tune (ADR 0003).",
     )
     parser.add_argument(
+        "--init-model",
+        default=None,
+        help=(
+            "Path to a previously fine-tuned checkpoint to continue training "
+            "from, instead of --base-model. Accepts a local directory (an "
+            "already-extracted save_pretrained() output) or a local "
+            "model.tar.gz path (extracted automatically) -- e.g. a "
+            "SageMaker channel path pointing at a prior run's model "
+            "artifact. --base-model is still recorded in the model card for "
+            "traceability even when resuming; the tokenizer/vocab-extension "
+            "step becomes a no-op when the checkpoint's vocab already "
+            "covers everything (see extend_vocabulary_for_examples)."
+        ),
+    )
+    parser.add_argument(
         "--direction",
         choices=DIRECTION_CHOICES,
         default="both",
@@ -161,6 +177,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
 
     return parser.parse_args(argv)
+
+
+def resolve_model_source(source: str) -> str:
+    """If `source` is a local `.tar.gz` file, extract it to a fresh temp
+    directory and return that directory's path; otherwise return `source`
+    unchanged (a Hugging Face Hub model id, or an already-extracted local
+    directory).
+
+    Lets `--init-model` accept either shape: a SageMaker channel path
+    pointing directly at a previous run's `model.tar.gz` artifact (the
+    common case -- `submit_job.py` stages it as a channel exactly like the
+    train/validation corpus files), or a plain local directory (useful for
+    local testing/development without a real SageMaker channel).
+    """
+    if source.endswith(".tar.gz") and Path(source).is_file():
+        import tarfile
+
+        extract_dir = Path(tempfile.mkdtemp(prefix="init-model-"))
+        with tarfile.open(source, "r:gz") as tar:
+            tar.extractall(extract_dir, filter="data")
+        return str(extract_dir)
+    return source
 
 
 def load_base_model_and_tokenizer(base_model: str) -> tuple[Any, Any]:
@@ -397,7 +435,8 @@ def run_training_job(
     train_examples = build_direction_examples(train_pairs, args.direction)
     val_examples = build_direction_examples(val_pairs, args.direction)
 
-    tokenizer, model = model_loader(args.base_model)
+    model_source = resolve_model_source(args.init_model) if args.init_model else args.base_model
+    tokenizer, model = model_loader(model_source)
 
     added_tokens = extend_vocabulary_for_examples(
         tokenizer, model, train_examples, seed=args.seed
@@ -417,13 +456,21 @@ def run_training_job(
     predictions_path.write_text("\n".join(hypotheses) + "\n", encoding="utf-8")
     references_path.write_text("\n".join(references) + "\n", encoding="utf-8")
 
-    notes = None
+    notes_parts = []
     if args.direction == "both":
-        notes = (
+        notes_parts.append(
             "Single multilingual checkpoint trained with explicit direction "
             "tags for both es->cak and cak->es (see training/direction.py "
             "and ADR 0006) rather than two separate checkpoints."
         )
+    if args.init_model:
+        notes_parts.append(
+            f"Continued training from a previous checkpoint ({args.init_model}) "
+            "rather than starting from the base pretrained model -- "
+            "train_sentence_count/hyperparameters below describe only this "
+            "run's additional training, not the full cumulative history."
+        )
+    notes = " ".join(notes_parts) or None
 
     run_metadata = {
         "run_id": run_id,
@@ -439,6 +486,7 @@ def run_training_job(
             "max_length": args.max_length,
             "seed": args.seed,
             "new_tokens_added": len(added_tokens),
+            "resumed_from_checkpoint": bool(args.init_model),
         },
         "notes": notes,
     }

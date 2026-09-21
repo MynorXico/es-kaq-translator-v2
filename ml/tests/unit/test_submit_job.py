@@ -203,6 +203,51 @@ def test_build_hyperparameters_generates_run_id_when_not_given():
     assert hyperparameters["run-id"]  # non-empty, auto-generated
 
 
+def test_build_hyperparameters_omits_init_model_by_default():
+    args = submit_job.parse_args([])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert "init-model" not in hyperparameters
+
+
+def test_build_hyperparameters_includes_init_model_container_path_when_given():
+    args = submit_job.parse_args(
+        [
+            "--init-model-s3-uri",
+            "s3://fake-bucket/model-artifacts/prior-run/output/model.tar.gz",
+        ]
+    )
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["init-model"] == "/opt/ml/input/data/init-model/model.tar.gz"
+
+
+def test_build_channel_uris_includes_init_model_channel_when_given():
+    channels = submit_job.build_channel_uris(
+        "fake-bucket", init_model_s3_uri="s3://other-bucket/prior/model.tar.gz"
+    )
+
+    assert channels["init-model"] == "s3://other-bucket/prior/model.tar.gz"
+
+
+def test_build_channel_uris_omits_init_model_channel_by_default():
+    channels = submit_job.build_channel_uris("fake-bucket")
+
+    assert "init-model" not in channels
+
+
+def test_build_training_inputs_includes_init_model_channel_when_given():
+    inputs = submit_job.build_training_inputs(
+        "fake-bucket", init_model_s3_uri="s3://other-bucket/prior/model.tar.gz"
+    )
+
+    assert set(inputs.keys()) == {"train", "validation", "init-model"}
+    init_model_uri = inputs["init-model"].config["DataSource"]["S3DataSource"]["S3Uri"]
+    assert init_model_uri == "s3://other-bucket/prior/model.tar.gz"
+
+
 def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
     args = submit_job.parse_args(["--run-id", "run-test"])
 
