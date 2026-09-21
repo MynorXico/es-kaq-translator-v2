@@ -314,8 +314,22 @@ def generate_translations(
     Groups examples by target language so each batch uses the correct
     `forced_bos_token_id` (the direction tag token for that target
     language -- see `training.direction`), then generates greedily.
-    Deliberately never exercised directly by the automated test suite for
-    the same reason as `fine_tune` -- see that function's docstring.
+
+    Moves each batch's encoded tensors to `model.device` before calling
+    `generate` -- `tokenizer(..., return_tensors="pt")` always returns
+    CPU tensors regardless of where `model` lives, and `Seq2SeqTrainer`
+    only handles device placement for its own training batches, not for
+    a manually-written generation loop like this one. Missing this crashed
+    the third real training run (issue #66) after ~3 hours of otherwise-
+    successful training, on the very last step (validation-set generation
+    for the model card): `RuntimeError: Expected all tensors to be on the
+    same device, but got index is on cpu, different from other tensors on
+    cuda:0`. This is a GPU-only failure mode -- on the CPU-only CI runners
+    this repo's test suite runs on, `model.device` is always `cpu` too, so
+    no mismatch is possible there regardless of whether `.to(model.device)`
+    is called; the call itself is unit-tested directly instead (see
+    `tests/unit/test_generate_translations.py`) so this can't silently
+    regress even without real GPU hardware to reproduce the crash on.
     """
     hypotheses: list[str | None] = [None] * len(examples)
     indices_by_target_lang: dict[str, list[int]] = {}
@@ -335,7 +349,7 @@ def generate_translations(
                 padding=True,
                 truncation=True,
                 max_length=max_length,
-            )
+            ).to(model.device)
             generated_ids = model.generate(
                 **encoded, forced_bos_token_id=forced_bos_token_id, max_length=max_length
             )

@@ -236,6 +236,20 @@ fixture data, a duck-typed fake tokenizer/model (no download), and fake
 `fine_tune`/`generate_translations` functions — the same "duck-type and
 fixture" approach as the tokenizer-extension tests above.
 
+`generate_translations` moves each batch's encoded tensors to
+`model.device` before calling `model.generate(...)` —
+`tokenizer(..., return_tensors="pt")` always returns CPU tensors
+regardless of where the model lives, and this hand-written generation
+loop (unlike `Seq2SeqTrainer`'s own training batches) has to do that
+placement itself. Missing this crashed the 3rd real training run after
+~3 hours of otherwise-successful training, on the very last step, with
+`RuntimeError: ... but got index is on cpu, different from other tensors
+on cuda:0`. This is a GPU-only failure mode — CI's CPU-only runners can't
+reproduce the crash itself (`model.device` is always `"cpu"` there too),
+so `tests/unit/test_generate_translations.py` instead directly asserts
+the `.to(model.device)` call happened, via a spy on a fake encoding
+object, so this can't silently regress even without real GPU hardware.
+
 ### Direction handling: one multilingual model, tagged
 
 ADR 0001 left open whether to train one multilingual model (distinguishing
