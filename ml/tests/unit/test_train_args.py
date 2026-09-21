@@ -32,6 +32,25 @@ def test_parse_args_reads_required_and_default_values(monkeypatch):
     assert args.base_model == "facebook/m2m100_418M"
     assert args.epochs >= 1
     assert args.run_id is None
+    # Not resuming from a checkpoint by default (issue #75).
+    assert args.init_model is None
+
+
+def test_parse_args_reads_init_model_path():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--init-model",
+            "/opt/ml/input/data/init-model/model.tar.gz",
+        ]
+    )
+
+    assert args.init_model == "/opt/ml/input/data/init-model/model.tar.gz"
 
 
 def test_parse_args_defaults_model_dir_and_output_dir_from_sagemaker_env(monkeypatch):
