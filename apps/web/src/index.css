@@ -1,5 +1,6 @@
 :root {
   --primary: #0a6f68;
+  --primary-hover: #095e58;
   --primary-contrast: #ffffff;
   --error: #d0341f;
   --bg: #f7f8f7;
@@ -9,6 +10,7 @@
   --text-muted: #5b6360;
   --border: #dce3e1;
   --border-strong: #c2ccc9;
+  --accent-violet: #6a3e9e;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,6 +26,7 @@
     --primary-hover: #45d0c0;
     --primary-contrast: #0b1614;
     --error: #ff6b52;
+    --accent-violet: #b48be0;
   }
 }
 
@@ -123,6 +126,11 @@ button {
   cursor: pointer;
 }
 
+.nav-link:hover,
+.link-button:hover {
+  color: var(--primary-hover);
+}
+
 .nav-link:focus-visible,
 button:focus-visible,
 a:focus-visible {
@@ -157,8 +165,8 @@ a:focus-visible {
   height: 10px;
   margin: 0.5rem 0 1.5rem;
   background:
-    linear-gradient(135deg, #6a3e9e 25%, transparent 25%) 0 0,
-    linear-gradient(225deg, #6a3e9e 25%, transparent 25%) 0 0;
+    linear-gradient(135deg, var(--accent-violet) 25%, transparent 25%) 0 0,
+    linear-gradient(225deg, var(--accent-violet) 25%, transparent 25%) 0 0;
   background-size: 12px 10px;
   background-repeat: repeat-x;
   opacity: 0.9;
@@ -178,6 +186,12 @@ a:focus-visible {
   color: var(--primary);
   font-weight: 600;
   text-decoration: none;
+}
+
+.button--outline:hover {
+  border-color: var(--primary-hover);
+  background: var(--primary-hover);
+  color: var(--primary-contrast);
 }
 
 .link-button {
