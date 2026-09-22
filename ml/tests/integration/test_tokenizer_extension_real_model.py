@@ -9,13 +9,23 @@ first run (~1.9GB) and caches it under the Hugging Face Hub cache
 `.github/workflows/ci.yml` for how CI caches this across runs.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 
-from training.tokenizer_extension import extend_tokenizer_vocab, resize_embeddings_for_new_tokens
+from training.tokenizer_extension import (
+    extend_tokenizer_vocab,
+    extend_tokenizer_vocab_with_subwords,
+    resize_embeddings_for_new_tokens,
+)
 
 MODEL_NAME = "facebook/m2m100_418M"
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+SAMPLE_KAQCHIKEL_TEXTS = (
+    (FIXTURES / "sample_kaqchikel_text.txt").read_text(encoding="utf-8").splitlines() * 8
+)
 
 
 @pytest.fixture(scope="module")
@@ -66,6 +76,35 @@ def test_extend_and_resize_grows_vocab_and_embeddings_consistently(tokenizer, mo
     assert not np.allclose(new_rows, 0.0)
     if new_rows.shape[0] > 1:
         assert not np.allclose(new_rows[0], new_rows[1])
+
+
+def test_extend_tokenizer_vocab_with_subwords_finds_real_gaps_in_m2m100_vocab(tokenizer, model):
+    """Issue #82's core acceptance criterion: diff a Kaqchikel-only
+    SentencePiece vocabulary against the *real* M2M100 vocab, not a
+    synthetic fake dict, and confirm real high-value subwords are found
+    and merged in with correctly resized, warm-started embeddings.
+    """
+    old_vocab_size = len(tokenizer)
+    old_embedding_rows = model.get_input_embeddings().weight.shape[0]
+
+    added = extend_tokenizer_vocab_with_subwords(
+        tokenizer, SAMPLE_KAQCHIKEL_TEXTS, vocab_size=60
+    )
+    assert added, (
+        "expected at least one genuinely new high-value Kaqchikel subword "
+        "missing from the real facebook/m2m100_418M vocab"
+    )
+    for token in added:
+        assert len(token.removeprefix("▁")) >= 2
+
+    new_vocab_size = len(tokenizer)
+    assert new_vocab_size == old_vocab_size + len(added)
+
+    resize_embeddings_for_new_tokens(model, len(added), seed=42)
+
+    new_embeddings = model.get_input_embeddings().weight.detach().cpu().numpy()
+    expected_rows = old_embedding_rows + len(added)
+    assert new_embeddings.shape[0] == expected_rows
 
 
 def test_resize_embeddings_is_a_noop_when_num_new_tokens_is_zero(tokenizer, model):

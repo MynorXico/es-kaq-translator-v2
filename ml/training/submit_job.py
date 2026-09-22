@@ -98,6 +98,7 @@ from sagemaker.huggingface import HuggingFace
 from sagemaker.inputs import TrainingInput
 
 from training.direction import DIRECTION_CHOICES
+from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
 from training.train import DEFAULT_BASE_MODEL
 
 # --- Corpus location (ADR 0002: private ALMG corpus, versioned prefix) -----
@@ -225,6 +226,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument(
+        "--subword-vocab-size",
+        type=int,
+        default=DEFAULT_SUBWORD_VOCAB_SIZE,
+        help=(
+            "Target vocabulary size for the Kaqchikel-only SentencePiece/"
+            "Unigram subword vocabulary merged into the tokenizer (issue "
+            f"#82). Default: {DEFAULT_SUBWORD_VOCAB_SIZE}. See "
+            "train.py's --subword-vocab-size help for the full rationale."
+        ),
+    )
     parser.add_argument(
         "--model-package-group-name",
         default=DEFAULT_MODEL_PACKAGE_GROUP_NAME,
@@ -386,6 +398,7 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
         "weight-decay": args.weight_decay,
         "label-smoothing": args.label_smoothing,
         "gradient-accumulation-steps": args.gradient_accumulation_steps,
+        "subword-vocab-size": args.subword_vocab_size,
     }
     if args.init_model_s3_uri:
         hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
@@ -700,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
             "gradient_accumulation_steps": config["hyperparameters"][
                 "gradient-accumulation-steps"
             ],
+            "subword_vocab_size": config["hyperparameters"]["subword-vocab-size"],
         },
     }
 

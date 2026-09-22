@@ -41,6 +41,27 @@ def test_parse_args_reads_required_and_default_values(monkeypatch):
     # this transformers version -- see train.py's --label-smoothing help.
     assert args.label_smoothing == 0.0
     assert args.gradient_accumulation_steps == 4
+    # Target size for the Kaqchikel-only SentencePiece/Unigram subword
+    # vocabulary trained fresh each run (issue #82) -- matches
+    # training.subword_vocab.DEFAULT_VOCAB_SIZE.
+    assert args.subword_vocab_size == 8000
+
+
+def test_parse_args_reads_subword_vocab_size_override():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--subword-vocab-size",
+            "12000",
+        ]
+    )
+
+    assert args.subword_vocab_size == 12000
 
 
 def test_parse_args_reads_init_model_path():

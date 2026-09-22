@@ -151,13 +151,21 @@ as pure, unit-testable logic, separate from actually running a training job:
   existing rows plus a small amount of noise (a warm start, rather than
   zeros/random, so new tokens start in-distribution but can still diverge
   from each other during fine-tuning).
+- `training/subword_vocab.py` — trains a fresh, small SentencePiece/Unigram
+  model on the **Kaqchikel-only** side of the corpus and diffs its subword
+  pieces against a base tokenizer's vocab to find high-value multi-character
+  subwords it doesn't already have. See "Kaqchikel subword vocabulary
+  (`training/subword_vocab.py`)" below for the full rationale (issue #82).
 - `training/tokenizer_extension.py` — the thin integration layer wiring the
   above to a real `transformers.M2M100Tokenizer`/model.
-  `extend_tokenizer_vocab`, which only needs `get_vocab()`/`add_tokens()`,
-  is unit-tested against a fake tokenizer that duck-types those two
-  methods. `resize_embeddings_for_new_tokens` is exercised against the real
-  `facebook/m2m100_418M` checkpoint in
-  `tests/integration/test_tokenizer_extension_real_model.py`.
+  `extend_tokenizer_vocab` (character/whole-word gaps) and
+  `extend_tokenizer_vocab_with_subwords` (subword gaps), which only need
+  `get_vocab()`/`add_tokens()`, are unit-tested against a fake tokenizer
+  that duck-types those two methods. `resize_embeddings_for_new_tokens` is
+  exercised against the real `facebook/m2m100_418M` checkpoint in
+  `tests/integration/test_tokenizer_extension_real_model.py`, alongside a
+  real-vocab diff for the subword step too (see "Real-checkpoint
+  integration test" below).
 
 All fixtures here are a handful of hand-written Kaqchikel sentences
 (`tests/fixtures/sample_kaqchikel_text.txt`) — never the real private ALMG
@@ -188,6 +196,94 @@ entirely. This is exactly the class of bug the duck-typed fake in the unit
 tests can't catch, since a fake tokenizer/embedding pair has no reason to
 reproduce a real checkpoint's padding quirks.
 
+`tests/integration/test_tokenizer_extension_real_model.py` also covers
+`extend_tokenizer_vocab_with_subwords` against the real vocab: it confirms
+that a SentencePiece model trained on a handful of real Kaqchikel sentences
+finds genuine high-value subwords `facebook/m2m100_418M`'s actual
+pretrained vocabulary doesn't already have -- issue #82's core acceptance
+criterion, verified against the real checkpoint rather than assumed from a
+synthetic fake dict.
+
+## Kaqchikel subword vocabulary (`training/subword_vocab.py`)
+
+Three real training runs (#66, #76, and its continuation) showed BLEU
+gains shrinking sharply (+3.9, then +1.7 across two equal 5-epoch batches)
+while training loss kept dropping (4.45 → 1.97) -- the signature of a
+representational ceiling, not undertraining. The suspected cause (issue
+#82): run #66's whole-word extension
+(`training/vocab_gap.py`/`find_missing_words`, ~61,901 tokens) covers
+exact word-forms the model has seen, but says nothing about the *subword*
+structure underneath. Kaqchikel is agglutinative (ergative/absolutive
+person marking, noun incorporation), so a word-form the model hasn't
+memorized verbatim still gets fragmented by M2M100's generic multilingual
+SentencePiece model into long, awkward multi-token chains it has no reason
+to compose cleanly at inference.
+
+`training/subword_vocab.py` addresses this by training a **second**,
+small SentencePiece/Unigram model on the **Kaqchikel-only** side of the
+corpus (never mixed with Spanish, which M2M100 already tokenizes
+natively), then diffing its resulting subword pieces against the base
+tokenizer's vocab:
+
+- `train_subword_model(texts, vocab_size, model_type)` — trains fully in
+  memory (`io.BytesIO`, via SentencePiece's `sentence_iterator`/
+  `model_writer` kwargs), never writing the trained model proto to disk.
+  Passes `hard_vocab_limit=False`: the requested `vocab_size` is a
+  *target*, not a hard requirement -- SentencePiece's unigram trainer
+  otherwise raises a hard `RuntimeError` when the requested size can't be
+  reached from the given text (true for every small fixture this repo's
+  fast test suite uses, and a real risk on a real corpus too). With this
+  flag, an unreachable request is silently capped instead of crashing a
+  potentially multi-hour, billable job at the vocab-training step.
+- `extract_vocab_pieces(model_proto)` — every subword piece the trained
+  model knows, excluding SentencePiece's own reserved control tokens
+  (`<unk>`, `<s>`, `</s>`, `<pad>`).
+- `select_high_value_subwords(pieces, min_subword_length=2)` — filters out
+  pieces that are just a single character once SentencePiece's leading
+  word-boundary marker ("▁") is stripped -- single-character coverage is
+  already `training/vocab_gap.py`'s job, so re-adding single characters
+  here would be redundant, not "high value".
+- `compute_new_subword_tokens(texts, base_vocab, ...)` — orchestrates the
+  above, then diffs the high-value pieces against `base_vocab` using the
+  **same** `training/vocab_extension.py`'s `select_new_tokens` already
+  used for whole words/characters, rather than inventing a second diff
+  mechanism.
+
+`training/tokenizer_extension.py`'s `extend_tokenizer_vocab_with_subwords`
+wires this to a real tokenizer, mirroring `extend_tokenizer_vocab`'s shape
+exactly (compute new tokens against the tokenizer's current vocab, call
+`add_tokens`, return what was added). `training/train.py`'s
+`extend_vocabulary_for_examples` runs both extension steps in sequence --
+character/whole-word gaps first, then subword gaps (diffed against the
+vocab *after* step 1, so it never re-proposes something step 1 already
+added) -- and resizes the model's embeddings once for their combined
+total. The Kaqchikel-only text fed to the subword step comes from
+`training/direction.py`'s `collect_texts_for_language(examples,
+KAQCHIKEL)`, which reads from whichever side (source or target) of each
+direction-tagged example is actually Kaqchikel.
+
+Deliberately **not** a fully separate tokenizer: a separate tokenizer
+would sever M2M100's pretrained multilingual embedding alignment, which is
+the model's main transfer-learning advantage for a low-resource language
+like Kaqchikel. New subword tokens go through the exact same
+add-tokens-then-warm-start-embeddings mechanism as any other new token in
+this pipeline.
+
+`--subword-vocab-size` (default 8000, both `train.py` and
+`submit_job.py`) controls the target vocabulary size for this step and is
+recorded in the model card's hyperparameters (and in `submit_job.py`'s
+Model Registry metadata) for traceability (ADR 0001).
+
+**The real, controlled training run evaluating this change's BLEU/chrF
+impact is a deliberate follow-up, not part of this ticket (#82).** Per the
+project's process, every real (billable) SageMaker Training Job submission
+requires the project owner's explicit go-ahead -- this ticket is code +
+tests only. A "controlled" run should change *only* `--subword-vocab-size`
+(from effectively absent, pre-#82, to its new default) and nothing else,
+so any BLEU/chrF delta is cleanly attributable to the vocabulary change
+alone -- unlike #76's continuation run, which changed epoch count and
+regularization hyperparameters together.
+
 ## Training entrypoint (`training/train.py`)
 
 `training/train.py` is the SageMaker Training Job entrypoint that wires
@@ -206,8 +302,10 @@ everything above (`data/`, `training/tokenizer_extension.py`,
    (`training/direction.py`) — see "Direction handling" below.
 3. Loads `facebook/m2m100_418M` (ADR 0003), extends its vocabulary and
    resizes its embeddings for Kaqchikel plus the direction tag tokens,
-   using `training/tokenizer_extension.py` (#34/#62) against the actual
-   training corpus text.
+   using `training/tokenizer_extension.py`'s character/whole-word
+   extension (#34/#62) against the actual training corpus text, then its
+   Kaqchikel-only subword extension (#82, see "Kaqchikel subword
+   vocabulary" above).
 4. Fine-tunes via `transformers.Seq2SeqTrainer`.
 5. Saves the fine-tuned model + tokenizer to `SM_MODEL_DIR`
    (`--model-dir`) — this artifact is **never published**; it's only
@@ -315,6 +413,8 @@ see "Continuing training from a checkpoint" below), `--epochs`,
 `--warmup-ratio`, `--weight-decay`, `--label-smoothing`,
 `--gradient-accumulation-steps` (regularization/schedule settings, issue
 #79 -- see "Regularization and schedule settings" below),
+`--subword-vocab-size` (default 8000, issue #82 -- see "Kaqchikel subword
+vocabulary" above),
 `--model-package-group-name`, `--approval-status` (default
 `PendingManualApproval` -- a human reviews BLEU/chrF before approving),
 `--no-wait` (submit without blocking/monitoring; also skips registration,
@@ -401,7 +501,8 @@ These fixes are a config-only pass -- a separate, bigger redesign of the
 whole-word vocab-extension strategy (`ml/training/vocab_gap.py`, which
 adds entire Kaqchikel word-forms as atomic tokens rather than subwords,
 likely a bigger factor for an agglutinative language) was flagged as a
-follow-up, not addressed here.
+follow-up, not addressed here. **That follow-up is issue #82** -- see
+"Kaqchikel subword vocabulary (`training/subword_vocab.py`)" above.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call) and prints the full would-be job config --

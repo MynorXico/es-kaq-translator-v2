@@ -1,6 +1,7 @@
 """Thin integration layer wiring the pure vocab/embedding-extension logic in
-`training.vocab_gap` / `training.vocab_extension` to a real Hugging Face
-M2M100 tokenizer and model (`facebook/m2m100_418M`, per ADR 0003).
+`training.vocab_gap` / `training.vocab_extension` / `training.subword_vocab`
+to a real Hugging Face M2M100 tokenizer and model (`facebook/m2m100_418M`,
+per ADR 0003).
 
 This module is intentionally thin: all the actual decision logic (which
 characters/words are missing, how to dedupe against the existing vocab, how
@@ -25,6 +26,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Protocol
 
+from training.subword_vocab import (
+    DEFAULT_MIN_SUBWORD_LENGTH,
+    DEFAULT_MODEL_TYPE,
+    DEFAULT_VOCAB_SIZE,
+    compute_new_subword_tokens,
+)
 from training.vocab_extension import resize_embedding_matrix, select_new_tokens
 from training.vocab_gap import find_missing_characters, find_missing_words
 
@@ -69,6 +76,43 @@ def extend_tokenizer_vocab(tokenizer: TokenizerLike, sample_texts: Iterable[str]
     """
     base_vocab = tokenizer.get_vocab()
     new_tokens = compute_new_tokens_for_texts(sample_texts, base_vocab)
+    if new_tokens:
+        tokenizer.add_tokens(new_tokens)
+    return new_tokens
+
+
+def extend_tokenizer_vocab_with_subwords(
+    tokenizer: TokenizerLike,
+    kaqchikel_texts: Iterable[str],
+    *,
+    vocab_size: int = DEFAULT_VOCAB_SIZE,
+    model_type: str = DEFAULT_MODEL_TYPE,
+    min_subword_length: int = DEFAULT_MIN_SUBWORD_LENGTH,
+) -> list[str]:
+    """Extend `tokenizer`'s vocabulary in place with high-value Kaqchikel
+    subwords (issue #82), complementing `extend_tokenizer_vocab`'s
+    character/whole-word coverage.
+
+    Trains a fresh SentencePiece/Unigram model on `kaqchikel_texts` (the
+    Kaqchikel-only side of the corpus -- never mixed with Spanish, see
+    `training.subword_vocab`'s module docstring), diffs its vocabulary
+    against `tokenizer.get_vocab()`, and adds whatever high-value subwords
+    aren't already present. As with `extend_tokenizer_vocab`, the
+    corresponding model's embeddings must still be resized afterward (see
+    `resize_embeddings_for_new_tokens` below) -- this only touches the
+    tokenizer.
+
+    Returns the list of tokens this call attempted to add (empty if
+    `kaqchikel_texts` is already fully covered).
+    """
+    base_vocab = tokenizer.get_vocab()
+    new_tokens = compute_new_subword_tokens(
+        kaqchikel_texts,
+        base_vocab,
+        vocab_size=vocab_size,
+        model_type=model_type,
+        min_subword_length=min_subword_length,
+    )
     if new_tokens:
         tokenizer.add_tokens(new_tokens)
     return new_tokens

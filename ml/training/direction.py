@@ -46,6 +46,7 @@ with real experiment numbers, not assumed away.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 SPANISH = "es"
@@ -112,3 +113,26 @@ def build_direction_examples(
             TranslationExample(cak, es, KAQCHIKEL, SPANISH) for es, cak in pairs
         )
     return examples
+
+
+def collect_texts_for_language(
+    examples: Iterable[TranslationExample], language: str
+) -> list[str]:
+    """Return every text written in `language` across `examples` (its
+    source text where `source_lang == language`, its target text where
+    `target_lang == language`), in iteration order.
+
+    Used to isolate the Kaqchikel-only side of a direction-tagged example
+    set for training a Kaqchikel-specific subword vocabulary model (issue
+    #82, `training.subword_vocab`) -- deliberately never mixed with the
+    other language's text, since M2M100 already tokenizes Spanish natively
+    and mixing the two would dilute what the subword trainer learns about
+    Kaqchikel's own morphology.
+    """
+    texts: list[str] = []
+    for example in examples:
+        if example.source_lang == language:
+            texts.append(example.source_text)
+        if example.target_lang == language:
+            texts.append(example.target_text)
+    return texts
