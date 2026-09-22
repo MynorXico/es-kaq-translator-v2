@@ -103,9 +103,36 @@ per certificate, with no new persistent cross-account IAM trust.**
   (mirroring the one-time manual pipeline-stack deploy in
   `cdk-pipelines-bootstrap.md` step 6) rather than left to an unattended
   pipeline run -- someone needs to be available to add the validation
-  CNAME promptly, or the deploy sits blocked. Once validated, ordinary
-  pipeline runs that change unrelated parts of the same stack do not
-  re-trigger validation.
+  CNAME promptly, or the deploy sits blocked.
+- **This is enforced as a technical guard, not just a runbook reminder**:
+  any change that would make a stack create a *new* `acm.Certificate` for
+  a given environment must be paired with an explicit CDK context
+  acknowledgement, e.g. `--context newCertificateAck=true` (or an
+  equivalent prop threaded from `app-stage.ts`/`bin/app.ts`), meaning "I
+  know this deploy will block on manual DNS validation and I'm watching
+  it." Detection is **diff-based**, not "require the flag on every
+  deploy": `bin/app.ts`'s existing async `main()` (the same SSM-at-synth
+  pattern ADR 0004 already uses for account IDs and the GitHub connection
+  ARN) also fetches the *previously validated* domain name for each
+  stack/environment from a new SSM parameter (e.g.
+  `/traductor-kaqchikel/domains/{environmentName}-web-cert-domain`, and
+  an `-api-` counterpart later), and passes it into `WebStack`/`ApiStack`
+  as a plain string prop alongside the domain name itself -- so stack
+  construction stays a pure, synth-testable function per ADR 0004, with
+  no SSM lookups inside the stack construct. At synth time, the stack
+  compares its `domainName` prop against that previously-recorded value:
+  if they differ (a genuinely new certificate is about to be created)
+  and the flag is absent, synth throws; if they match, an ordinary
+  pipeline run proceeds without needing the flag. Once the human
+  completes the manual validation step, updating that SSM parameter to
+  the newly-validated domain is the **last step** of the runbook
+  procedure -- that's what lets the *next* ordinary deploy of the same
+  domain skip the flag. This diff-against-recorded-state design, and
+  where the state lives, is what this ADR commits to; only the exact
+  parameter name/shape is left to the follow-up implementation. This --
+  converting "hope someone remembers" into "the pipeline refuses to
+  wedge itself" -- is part of this ADR's decided mechanism, not an
+  optional nicety for the implementer to skip.
 - This mechanism is identical for `WebStack`'s CloudFront domain and the
   future API Gateway custom domain (#96) -- same pattern, same runbook
   section, only the final record's target type/value differs.
@@ -122,17 +149,32 @@ per certificate, with no new persistent cross-account IAM trust.**
   could rewrite `translator-prod`'s live `app.`/`api.` records, since all
   subdomains sit in one flat zone.
 - Toil is one-time per certificate/record, not recurring: six actions
-  total across this project's current scope (`app.`/`api.` x
-  dev/qa/prod), consistent with ACM's auto-renewal behavior. If that
-  changes (e.g. frequent full environment teardown/recreation), revisit
-  with option 1 -- ideally its record-name/type-scoped variant (see
-  "Alternatives considered") rather than full zone-wide access -- this
-  ADR is a judgment call on the current trade-off, not a permanent ban on
-  automating it.
+  across this project's current scope (`app.`/`api.` x dev/qa/prod) is an
+  illustrative **floor** for that scope, not a hard ceiling on real-world
+  operational churn -- a certificate recreated after a domain-name typo
+  or wrong SAN, a rebootstrapped `translator-dev`/`-qa`/`-prod` account
+  (already anticipated by `docs/runbooks/aws-account-bootstrap.md`), or a
+  future 4th environment/stage would each add more one-time actions on
+  top of that floor. None of this makes the actions recurring, though --
+  each one is still triggered by an explicit, infrequent event, and
+  every certificate keeps auto-renewing off its standing validation
+  record in between. If real-world churn grows enough that this stops
+  being occasional and becomes routine, revisit with option 1 -- ideally
+  its record-name/type-scoped variant (see "Alternatives considered")
+  rather than full zone-wide access -- this ADR is a judgment call on the
+  current trade-off, not a permanent ban on automating it.
 - `docs/runbooks/domain-and-dns.md` needs a new section with the exact
-  `acm describe-certificate` / validation-record / alias-record commands
-  and the pipeline-stall warning above. Done as part of this ADR (see
-  "What's not done yet").
+  `acm describe-certificate` / validation-record / alias-record commands,
+  the pipeline-stall warning above, and the `newCertificateAck` guard.
+  Done as part of this ADR (see "What's not done yet"), along with two
+  smaller notes: the validation CNAME must be marked **do not delete**
+  (ACM needs it to persist indefinitely for auto-renewal to keep
+  working, and it will otherwise look like stale zone clutter to a
+  future cleanup pass), and a cheap CloudWatch alarm on ACM's built-in
+  `DaysToExpiry` metric is called out as a nice-to-have follow-up to
+  catch a silent renewal failure (e.g. someone deletes the CNAME anyway)
+  before the certificate actually expires -- not required for this ADR's
+  acceptance, but worth tracking alongside the implementation follow-up.
 - Implementation follow-up (not done by this ADR): `infra/cdk/lib/web-stack.ts`
   gains a `domainName`/`certificate` prop and wires the CloudFront
   `Distribution`'s `domainNames`/`certificate`; `ApiStack` gains the
@@ -156,8 +198,9 @@ per certificate, with no new persistent cross-account IAM trust.**
   workload that this project's own usage pattern makes one-time-per-cert
   rather than recurring. Also more new infrastructure to build and
   maintain (a Lambda, a role, a trust policy per environment) for a
-  problem the project hits roughly six times total. Revisit if that
-  changes (see Consequences).
+  problem the project hits, per the illustrative floor in Consequences,
+  roughly six times to start with. Revisit if real-world churn changes
+  that (see Consequences).
 - **A finer-grained version of option 1, using Route 53's
   `route53:ChangeResourceRecordSetsNormalizedRecordNames` /
   `route53:ChangeResourceRecordSetsRecordTypes` IAM condition keys** to
@@ -171,12 +214,12 @@ per certificate, with no new persistent cross-account IAM trust.**
   mechanism, though, because the underlying cost/benefit doesn't change:
   it's still a Lambda, a role, and a trust policy (now per-environment
   condition-scoped, so slightly more of them, not less) to build and
-  maintain, for a workload that's one-time per certificate and roughly
-  six occurrences total across this project's life. Worth remembering as
-  the natural next step if this ADR is ever revisited under "Revisit if
-  toil changes" (see Consequences) -- at that point, this narrower
-  variant, not full zone-wide access, should be the default starting
-  point.
+  maintain, for a workload that's one-time per certificate and, per the
+  illustrative floor in Consequences, roughly six occurrences to start
+  with. Worth remembering as the natural next step if this ADR is ever
+  revisited under "Revisit if toil changes" (see Consequences) -- at
+  that point, this narrower variant, not full zone-wide access, should
+  be the default starting point.
 - **Per-account hosted zone delegation (subzones)**: already rejected in
   `domain-and-dns.md` and not reopened here -- no requirement for
   dev/qa/prod to manage DNS independently, and it would break the flat,
