@@ -57,3 +57,58 @@ test("shows a Spanish error message and a working retry button on a network fail
 
   await expect(page.getByLabel("Traducción")).toHaveValue("Utz");
 });
+
+test("clears the input, output, and error state via the clear button, and refocuses the input", async ({
+  page,
+}) => {
+  let requestCount = 0;
+  await page.route("**/v1/translate", (route) => {
+    requestCount += 1;
+    if (requestCount === 1) {
+      return route.abort("failed");
+    }
+    return route.fulfill({ json: { translation: "Utz" } });
+  });
+
+  await page.goto("/");
+  const input = page.getByLabel("Texto a traducir");
+  await input.fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+
+  await expect(
+    page.getByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "Borrar el texto de entrada" }).click();
+
+  await expect(input).toHaveValue("");
+  await expect(
+    page.getByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
+  ).toBeHidden();
+  await expect(input).toBeFocused();
+  await expect(page.getByRole("button", { name: "Borrar el texto de entrada" })).toBeHidden();
+});
+
+test("copies a successful translation to the clipboard with temporary confirmation", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.route("**/v1/translate", (route) =>
+    route.fulfill({ json: { translation: "Utz" } }),
+  );
+
+  await page.goto("/");
+  await page.getByLabel("Texto a traducir").fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+
+  const copyButton = page.getByRole("button", { name: "Copiar" });
+  await expect(copyButton).toBeVisible();
+  await copyButton.click();
+
+  await expect(page.getByRole("button", { name: "Copiado" })).toBeVisible();
+  const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboardText).toBe("Utz");
+
+  await expect(page.getByRole("button", { name: "Copiar" })).toBeVisible();
+});
