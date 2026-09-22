@@ -103,9 +103,27 @@ per certificate, with no new persistent cross-account IAM trust.**
   (mirroring the one-time manual pipeline-stack deploy in
   `cdk-pipelines-bootstrap.md` step 6) rather than left to an unattended
   pipeline run -- someone needs to be available to add the validation
-  CNAME promptly, or the deploy sits blocked. Once validated, ordinary
-  pipeline runs that change unrelated parts of the same stack do not
-  re-trigger validation.
+  CNAME promptly, or the deploy sits blocked.
+- **This is enforced as a technical guard, not just a runbook reminder**:
+  any change that would make a stack create a *new* `acm.Certificate` for
+  a given environment must be paired with an explicit CDK context
+  acknowledgement, e.g. `--context newCertificateAck=true` (or an
+  equivalent prop threaded from `app-stage.ts`/`bin/app.ts`), meaning "I
+  know this deploy will block on manual DNS validation and I'm watching
+  it." The stack construct checks for the new-certificate condition
+  (e.g. the `domainName` prop being newly set for that environment, or
+  a diff against a previously-recorded domain) at synth time and throws
+  if the flag is absent -- so a routine, unattended pipeline run that
+  would otherwise introduce a new certificate fails fast at synth/
+  `UpdatePipeline`, before CloudFormation ever creates the resource and
+  wedges, instead of silently blocking Dev/Qa on a validation record
+  nobody's watching for. The exact detection logic (unconditional
+  flag-required vs. diff-based) is left to the follow-up implementation,
+  but the flag-gate itself -- converting "hope someone remembers" into
+  "the pipeline refuses to wedge itself" -- is part of this ADR's decided
+  mechanism, not an optional nicety for the implementer to skip. Once
+  validated, ordinary pipeline runs that change unrelated parts of the
+  same stack do not re-trigger validation and don't need the flag.
 - This mechanism is identical for `WebStack`'s CloudFront domain and the
   future API Gateway custom domain (#96) -- same pattern, same runbook
   section, only the final record's target type/value differs.
@@ -122,17 +140,32 @@ per certificate, with no new persistent cross-account IAM trust.**
   could rewrite `translator-prod`'s live `app.`/`api.` records, since all
   subdomains sit in one flat zone.
 - Toil is one-time per certificate/record, not recurring: six actions
-  total across this project's current scope (`app.`/`api.` x
-  dev/qa/prod), consistent with ACM's auto-renewal behavior. If that
-  changes (e.g. frequent full environment teardown/recreation), revisit
-  with option 1 -- ideally its record-name/type-scoped variant (see
-  "Alternatives considered") rather than full zone-wide access -- this
-  ADR is a judgment call on the current trade-off, not a permanent ban on
-  automating it.
+  across this project's current scope (`app.`/`api.` x dev/qa/prod) is an
+  illustrative **floor** for that scope, not a hard ceiling on real-world
+  operational churn -- a certificate recreated after a domain-name typo
+  or wrong SAN, a rebootstrapped `translator-dev`/`-qa`/`-prod` account
+  (already anticipated by `docs/runbooks/aws-account-bootstrap.md`), or a
+  future 4th environment/stage would each add more one-time actions on
+  top of that floor. None of this makes the actions recurring, though --
+  each one is still triggered by an explicit, infrequent event, and
+  every certificate keeps auto-renewing off its standing validation
+  record in between. If real-world churn grows enough that this stops
+  being occasional and becomes routine, revisit with option 1 -- ideally
+  its record-name/type-scoped variant (see "Alternatives considered")
+  rather than full zone-wide access -- this ADR is a judgment call on the
+  current trade-off, not a permanent ban on automating it.
 - `docs/runbooks/domain-and-dns.md` needs a new section with the exact
-  `acm describe-certificate` / validation-record / alias-record commands
-  and the pipeline-stall warning above. Done as part of this ADR (see
-  "What's not done yet").
+  `acm describe-certificate` / validation-record / alias-record commands,
+  the pipeline-stall warning above, and the `newCertificateAck` guard.
+  Done as part of this ADR (see "What's not done yet"), along with two
+  smaller notes: the validation CNAME must be marked **do not delete**
+  (ACM needs it to persist indefinitely for auto-renewal to keep
+  working, and it will otherwise look like stale zone clutter to a
+  future cleanup pass), and a cheap CloudWatch alarm on ACM's built-in
+  `DaysToExpiry` metric is called out as a nice-to-have follow-up to
+  catch a silent renewal failure (e.g. someone deletes the CNAME anyway)
+  before the certificate actually expires -- not required for this ADR's
+  acceptance, but worth tracking alongside the implementation follow-up.
 - Implementation follow-up (not done by this ADR): `infra/cdk/lib/web-stack.ts`
   gains a `domainName`/`certificate` prop and wires the CloudFront
   `Distribution`'s `domainNames`/`certificate`; `ApiStack` gains the

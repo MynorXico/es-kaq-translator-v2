@@ -77,17 +77,27 @@ decided **against** adding that persistent trust, in favor of a one-time,
 scripted-but-manually-triggered step per certificate. Concretely, for
 each environment's `WebStack` (and later `ApiStack`) certificate:
 
-1. Create the certificate in-account with
+1. Any deploy that would create a *new* `acm.Certificate` for an
+   environment must pass `--context newCertificateAck=true` (or the
+   equivalent stack prop, wired from `app-stage.ts`) as an explicit
+   acknowledgement that this deploy will block on manual DNS validation.
+   The stack fails synth if it detects a new-certificate condition
+   without the flag — this is a hard technical guard, not just a
+   reminder to self, specifically so an unattended Dev/Qa pipeline run
+   can't wedge itself on `CREATE_IN_PROGRESS` waiting for a validation
+   record nobody's watching for. See [ADR 0007](../adr/0007-cross-account-domain-dns-validation.md)'s
+   Decision section for the full rationale.
+2. Create the certificate in-account with
    `acm.CertificateValidation.fromDns()` and **no** `hostedZone` argument
    — CDK/CloudFormation will not attempt any cross-account write, and the
    certificate resource will sit `CREATE_IN_PROGRESS` until validated.
-2. Look up the pending validation CNAME:
+3. Look up the pending validation CNAME:
    ```sh
    aws acm describe-certificate --profile <translator-dev|qa|prod> \
      --region us-east-1 --certificate-arn <arn> \
      --query 'Certificate.DomainValidationOptions'
    ```
-3. Create that CNAME once, by hand, in the tooling zone:
+4. Create that CNAME once, by hand, in the tooling zone:
    ```sh
    aws route53 change-resource-record-sets --profile translator-tooling \
      --hosted-zone-id <zone-id> --change-batch file://validation-record.json
@@ -99,7 +109,16 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    unattended pipeline run — so someone is available to add the record
    promptly. Once validated, ACM auto-renews using the same standing
    record; this is a one-time step per certificate, not recurring.
-4. Once the distribution/custom domain exists, create the final alias
+
+   **Do not delete this record once created**, even if it looks like
+   unused zone clutter during a future cleanup pass — ACM needs it to
+   persist indefinitely to keep auto-renewing the certificate. Deleting
+   it doesn't fail loudly; the certificate just silently stops renewing
+   until it expires. A cheap CloudWatch alarm on ACM's built-in
+   `DaysToExpiry` metric per certificate is a nice-to-have follow-up to
+   catch that failure mode early, before the certificate actually
+   expires.
+5. Once the distribution/custom domain exists, create the final alias
    record with the (to-be-written) helper script under `infra/scripts/`
    against the `translator-tooling` profile, rather than console
    clicking.
