@@ -46,7 +46,7 @@ h3 {
 }
 
 main {
-  max-width: 640px;
+  max-width: 480px;
   margin: 0 auto;
   padding: 2rem 1rem;
   display: flex;
@@ -65,11 +65,18 @@ textarea {
   min-height: 120px;
   padding: 0.75rem;
   font: inherit;
+  font-size: 16px;
   box-sizing: border-box;
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 12px;
+}
+
+@media (min-width: 600px) {
+  textarea {
+    min-height: 140px;
+  }
 }
 
 button {
@@ -82,6 +89,14 @@ button {
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
+}
+
+/* The primary CTA ("Traducir"): full-width at every breakpoint so it's
+   always reachable with a thumb, not a small right-aligned target. */
+.cta-button {
+  align-self: stretch;
+  width: 100%;
+  min-height: 48px;
 }
 
 .direction-row {
@@ -139,7 +154,7 @@ button {
 }
 
 .app-header {
-  max-width: 640px;
+  max-width: 480px;
   margin: 0 auto;
   padding: 1rem;
   display: flex;
