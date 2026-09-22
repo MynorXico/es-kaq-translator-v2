@@ -22,7 +22,11 @@ from pathlib import Path
 
 import torch
 
+import training.train as train_module
 from training.direction import DIRECTION_TAGS
+from training.tokenizer_extension import (
+    extend_tokenizer_vocab_with_subwords as real_extend_tokenizer_vocab_with_subwords,
+)
 from training.train import parse_args, run_training_job
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -211,17 +215,15 @@ def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
     assert "**Validation sentences**: 4" in card_text
 
 
-def test_run_training_job_extends_vocab_with_kaqchikel_subwords(tmp_path):
-    """Issue #82: alongside the existing whole-word/character extension,
-    run_training_job should also train+merge a Kaqchikel-only subword
-    vocabulary, and record it in the model card for traceability (ADR
-    0001) -- using the richer fixture corpus, which (unlike
-    sample_train.tsv's single-word pairs) has enough real Kaqchikel text
-    for SentencePiece to discover genuine multi-character subwords.
+def _run_training_job_for_vocab_size(tmp_path, subdir: str, run_id: str) -> tuple[int, str]:
+    """Run `run_training_job` against the richer fixture corpus and return
+    the saved tokenizer's vocab size plus the rendered model card text.
+    Shared by the subword-extension tests below, which each need a fresh
+    model/output dir and a fresh fake tokenizer per run.
     """
     fake_trainer.calls.clear()
-    model_dir = tmp_path / "model"
-    output_dir = tmp_path / "output"
+    model_dir = tmp_path / f"{subdir}-model"
+    output_dir = tmp_path / f"{subdir}-output"
 
     args = parse_args(
         [
@@ -236,7 +238,7 @@ def test_run_training_job_extends_vocab_with_kaqchikel_subwords(tmp_path):
             "--output-data-dir",
             str(output_dir),
             "--run-id",
-            "smoke-test-subword-run",
+            run_id,
             "--epochs",
             "1",
             "--subword-vocab-size",
@@ -251,18 +253,66 @@ def test_run_training_job_extends_vocab_with_kaqchikel_subwords(tmp_path):
         translator=fake_translator,
     )
 
-    saved_tokenizer_vocab_size = int(
-        (model_dir / "fake_tokenizer.txt").read_text().split("=")[1]
-    )
-    # Grows by more than the whole-word/character-only extension would --
-    # confirmed by the subword-specific unit/integration tests in
-    # tests/unit/test_subword_vocab.py and
-    # tests/integration/test_subword_vocab_pipeline.py; here we only need
-    # to confirm the pipeline actually calls into that step and records it.
-    assert saved_tokenizer_vocab_size > len(_base_vocab())
-
+    vocab_size = int((model_dir / "fake_tokenizer.txt").read_text().split("=")[1])
     card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    return vocab_size, card_text
+
+
+def test_run_training_job_subword_step_actually_contributes_vocab_growth(tmp_path, monkeypatch):
+    """Issue #82: the subword-extension step must make a real, verifiable
+    difference to the saved vocab -- not just "the vocab grew somehow",
+    which the pre-existing whole-word/character extension alone already
+    guarantees on this richer fixture regardless of whether the subword
+    step runs at all (a prior version of this test only checked that,
+    and stayed green even with the subword step short-circuited to a
+    no-op -- see PR #83 review). Comparing a real run against one where
+    the step is forced to contribute zero tokens is what actually fails
+    if the step is removed or no-op'd.
+    """
+    with_subwords, card_text = _run_training_job_for_vocab_size(
+        tmp_path, "with-subwords", "smoke-test-subword-run"
+    )
+
+    monkeypatch.setattr(
+        train_module,
+        "extend_tokenizer_vocab_with_subwords",
+        lambda tokenizer, kaqchikel_texts, **kwargs: [],
+    )
+    without_subwords, _ = _run_training_job_for_vocab_size(
+        tmp_path, "without-subwords", "smoke-test-no-subword-run"
+    )
+
+    assert with_subwords > without_subwords
     assert "8000" in card_text  # subword_vocab_size hyperparameter recorded
+
+
+def test_run_training_job_feeds_kaqchikel_only_text_to_subword_extension(tmp_path, monkeypatch):
+    """The texts handed to the subword step must be the Kaqchikel side of
+    the corpus only -- never the Spanish glosses, which M2M100 already
+    tokenizes natively (see training/subword_vocab.py's module docstring).
+    """
+    captured_calls: list[list[str]] = []
+
+    def spy(tokenizer, kaqchikel_texts, **kwargs):
+        kaqchikel_texts = list(kaqchikel_texts)
+        captured_calls.append(kaqchikel_texts)
+        return real_extend_tokenizer_vocab_with_subwords(tokenizer, kaqchikel_texts, **kwargs)
+
+    monkeypatch.setattr(train_module, "extend_tokenizer_vocab_with_subwords", spy)
+
+    _run_training_job_for_vocab_size(tmp_path, "spy-run", "smoke-test-spy-run")
+
+    assert len(captured_calls) == 1
+    texts = captured_calls[0]
+    assert texts  # the subword step actually received something to train on
+
+    spanish_only_words = ("Buenos", "pueblo", "niño", "trabajo", "maestro", "gente")
+    for text in texts:
+        assert not any(word in text for word in spanish_only_words)
+
+    # A real Kaqchikel word-form from the fixture, present on the
+    # Kaqchikel side only.
+    assert any("qatinamit" in text for text in texts)
 
 
 def test_run_training_job_single_direction_trains_half_the_examples(tmp_path):
