@@ -41,8 +41,9 @@ class SpyEncoding(dict):
 
 
 class FakeTokenizerForGeneration:
-    def __init__(self):
+    def __init__(self, decoded_texts: list[str] | None = None):
         self.last_encoding: SpyEncoding | None = None
+        self._decoded_texts = decoded_texts
 
     def convert_tokens_to_ids(self, token: str) -> int:
         return {"__es__": 100, "__cak__": 101}[token]
@@ -53,6 +54,8 @@ class FakeTokenizerForGeneration:
         return encoding
 
     def batch_decode(self, generated_ids, **kwargs) -> list[str]:
+        if self._decoded_texts is not None:
+            return self._decoded_texts
         return [f"decoded-{i}" for i in range(len(generated_ids))]
 
 
@@ -94,3 +97,53 @@ def test_generate_translations_passes_the_moved_encoding_to_generate():
 
     assert model.generate_called_with is not None
     assert model.generate_called_with["forced_bos_token_id"] == 101
+
+
+# ---------------------------------------------------------------------------
+# Direction-tag leak (issue #106): __cak__ is an ordinary added-vocab token
+# (not a real special token, unlike __es__ -- one of M2M100's own pretrained
+# language codes), so tokenizer.batch_decode(..., skip_special_tokens=True)
+# does not strip it, and it survived verbatim as the literal first word of
+# every es->cak hypothesis before this fix -- corrupting every real
+# training run's BLEU/chrF for that direction (see
+# training.direction.strip_leading_direction_tag's docstring, and
+# deployment/inference.py's test_inference.py, which caught the same bug
+# for the real-time serving path in issue #8).
+# ---------------------------------------------------------------------------
+
+
+def test_generate_translations_strips_a_literal_leading_cak_tag_from_decoded_output():
+    tokenizer = FakeTokenizerForGeneration(decoded_texts=["__cak__ Utz awäch?"])
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="Buenos días",
+            target_text="Utz awäch?",
+            source_lang="es",
+            target_lang="cak",
+        )
+    ]
+
+    hypotheses = generate_translations(model, tokenizer, examples)
+
+    assert hypotheses == ["Utz awäch?"]
+
+
+def test_generate_translations_leaves_es_target_output_without_a_leading_tag_untouched():
+    # __es__-target output already has the tag stripped by
+    # skip_special_tokens=True (it's a pretrained special token), so this is
+    # a control case: there's nothing left for the defensive strip to do.
+    tokenizer = FakeTokenizerForGeneration(decoded_texts=["Buenos días"])
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="Utz awäch?",
+            target_text="Buenos días",
+            source_lang="cak",
+            target_lang="es",
+        )
+    ]
+
+    hypotheses = generate_translations(model, tokenizer, examples)
+
+    assert hypotheses == ["Buenos días"]

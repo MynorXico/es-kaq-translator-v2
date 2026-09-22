@@ -212,7 +212,8 @@ def test_translate_strips_a_literal_leading_direction_tag_from_the_output():
     # one of M2M100's own pretrained *special* tokens), so
     # skip_special_tokens=True does not strip it, and it survives verbatim
     # as the literal first word of cak-target output -- see
-    # _strip_leading_direction_tag's own docstring for the full story.
+    # training.direction.strip_leading_direction_tag's own docstring for
+    # the full story.
     tokenizer = FakeTokenizer(decoded_texts=["__cak__ q'ij"])
     model = FakeModel()
     request = InferenceRequest(source_lang="es", target_lang="cak", text="Buenos días")

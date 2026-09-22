@@ -63,7 +63,13 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from training.direction import DIRECTION_TAGS, KAQCHIKEL, SPANISH, tag_source_text
+from training.direction import (
+    DIRECTION_TAGS,
+    KAQCHIKEL,
+    SPANISH,
+    strip_leading_direction_tag,
+    tag_source_text,
+)
 
 CONTENT_TYPE_JSON = "application/json"
 
@@ -177,42 +183,7 @@ def translate(
         **encoded, forced_bos_token_id=forced_bos_token_id, max_length=max_length
     )
     decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-    return _strip_leading_direction_tag(decoded[0], request.target_lang)
-
-
-def _strip_leading_direction_tag(text: str, target_lang: str) -> str:
-    """Defensively strip a literal leading direction-tag token from decoded
-    output.
-
-    `__es__` is one of M2M100's own pretrained language codes, already
-    registered as a special token in the base checkpoint's tokenizer, so
-    `tokenizer.batch_decode(..., skip_special_tokens=True)` already strips
-    it from `es`-target output. `__cak__`, however, was added by this
-    project's own `training.tokenizer_extension` (`add_tokens`, see
-    `ml/README.md`'s vocabulary-extension sections) as an ordinary
-    vocabulary token, *not* registered as a special token -- so
-    `skip_special_tokens=True` does not strip it, and it survives verbatim
-    as the literal first word of every `cak`-target generation (confirmed
-    against the real deployed endpoint for issue #8: an es->cak request
-    returned `"__cak__ q'ij"` instead of `"q'ij"` before this fix).
-
-    This is a real correctness gap in the shared tokenizer-extension
-    mechanism (`training/tokenizer_extension.py`), not something specific
-    to this inference handler -- the exact same contamination affects
-    `training.train.generate_translations`'s BLEU/chrF computation for
-    every es->cak example, meaning the model card's reported metrics (BLEU
-    8.9 / chrF 31.2 for the checkpoint served here) were very likely
-    computed against es->cak hypotheses with this same stray prefix, which
-    the reference translations never have. This strip is a serving-layer
-    safety net so real users get clean output; it does not retroactively
-    fix (or re-run) that evaluation -- flagged as a follow-up to fix at the
-    source (register direction tags as special tokens when added) and
-    re-evaluate, not silently absorbed here as if it never happened.
-    """
-    tag = DIRECTION_TAGS[target_lang]
-    if text.startswith(tag):
-        return text[len(tag) :].lstrip()
-    return text
+    return strip_leading_direction_tag(decoded[0], request.target_lang)
 
 
 def predict_fn(request: InferenceRequest, model_and_tokenizer: tuple[Any, Any]) -> dict[str, str]:

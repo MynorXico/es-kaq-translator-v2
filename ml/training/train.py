@@ -79,6 +79,7 @@ from training.direction import (
     TranslationExample,
     build_direction_examples,
     collect_texts_for_language,
+    strip_leading_direction_tag,
     tag_source_text,
 )
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
@@ -521,6 +522,18 @@ def generate_translations(
     is called; the call itself is unit-tested directly instead (see
     `tests/unit/test_generate_translations.py`) so this can't silently
     regress even without real GPU hardware to reproduce the crash on.
+
+    Strips a leftover leading direction-tag token from each decoded
+    hypothesis via `training.direction.strip_leading_direction_tag` (issue
+    #106): `skip_special_tokens=True` alone does not strip `__cak__` (an
+    ordinary added-vocab token, unlike the real special token `__es__`),
+    so every es->cak hypothesis previously came out as e.g. `"__cak__ Utz
+    awäch?"` instead of `"Utz awäch?"`, corrupting the BLEU/chrF this
+    function's output is used to compute for every real training run to
+    date -- see `strip_leading_direction_tag`'s docstring and
+    `ml/README.md` for the full history. This mirrors the fix already
+    applied to `deployment/inference.py`'s real-time serving path (issue
+    #8); both now share the one implementation.
     """
     hypotheses: list[str | None] = [None] * len(examples)
     indices_by_target_lang: dict[str, list[int]] = {}
@@ -546,7 +559,7 @@ def generate_translations(
             )
             decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             for i, text in zip(batch_indices, decoded, strict=True):
-                hypotheses[i] = text
+                hypotheses[i] = strip_leading_direction_tag(text, target_lang)
 
     assert all(h is not None for h in hypotheses)
     return hypotheses  # type: ignore[return-value]
