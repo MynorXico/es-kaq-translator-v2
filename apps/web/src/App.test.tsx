@@ -15,6 +15,16 @@ vi.mock("./api", async (importOriginal) => {
 
 const mockedTranslate = vi.mocked(translate);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("App", () => {
   it("renders the translator title and direction toggle", () => {
     render(<App />);
@@ -72,16 +82,6 @@ describe("App translate flow", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
-
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (reason: unknown) => void;
-    const promise = new Promise<T>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    return { promise, resolve, reject };
-  }
 
   it("shows the idle placeholder before any translation is submitted", () => {
     render(<App />);
@@ -225,5 +225,140 @@ describe("App translate flow", () => {
     // still be idle, not showing that translation.
     expect(screen.getByLabelText("Traducción")).toHaveValue("");
     expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
+  });
+});
+
+describe("App copy and clear affordances", () => {
+  beforeEach(() => {
+    mockedTranslate.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not show the clear button when the input is empty", () => {
+    render(<App />);
+    expect(
+      screen.queryByRole("button", { name: "Borrar el texto de entrada" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the clear button once the user types, and clicking it clears input, output, and error state, then refocuses the input", async () => {
+    mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
+    render(<App />);
+    const input = screen.getByLabelText("Texto a traducir");
+
+    fireEvent.change(input, { target: { value: "Hola" } });
+    expect(
+      screen.getByRole("button", { name: "Borrar el texto de entrada" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByRole("button", { name: "Reintentar" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Borrar el texto de entrada" }));
+
+    expect(input).toHaveValue("");
+    expect(
+      screen.queryByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(input).toHaveFocus();
+    expect(
+      screen.queryByRole("button", { name: "Borrar el texto de entrada" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale in-flight response after Borrar clears the fields mid-request", async () => {
+    const { promise, resolve } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByText("Traduciendo…");
+
+    fireEvent.click(screen.getByRole("button", { name: "Borrar el texto de entrada" }));
+
+    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("");
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+
+    await act(async () => {
+      resolve({ translation: "Utz" });
+    });
+
+    // The stale response belonged to the abandoned (now-cleared) request;
+    // the UI should still be idle, not showing that translation.
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
+  });
+
+  it("only shows the copy button after a successful translation", async () => {
+    render(<App />);
+    expect(screen.queryByRole("button", { name: "Copiar" })).not.toBeInTheDocument();
+
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    await screen.findByRole("button", { name: "Copiar" });
+  });
+
+  it("copies the translation to the clipboard and shows a temporary confirmation", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copiar" }));
+    });
+
+    expect(writeText).toHaveBeenCalledWith("Utz");
+    expect(screen.getByRole("button", { name: "Copiado" })).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByRole("button", { name: "Copiar" })).toBeInTheDocument();
+  });
+
+  it("shows a failure message if the clipboard write fails, then reverts", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.defineProperty(window.navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Copiar" }));
+    });
+
+    expect(screen.getByRole("button", { name: "No se pudo copiar" })).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(screen.getByRole("button", { name: "Copiar" })).toBeInTheDocument();
   });
 });

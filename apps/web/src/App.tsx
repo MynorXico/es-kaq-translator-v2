@@ -6,6 +6,7 @@ import {
   type TranslationDirection,
 } from "./api";
 import { AboutPage } from "./AboutPage";
+import { CheckIcon, CopyIcon, XCircleIcon } from "./icons";
 
 const DIRECTION_LABELS: Record<TranslationDirection, string> = {
   "es-to-cak": "Español → Kaqchikel",
@@ -22,7 +23,13 @@ const WARMING_UP_DELAY_MS = 4000;
 
 const OUTPUT_PLACEHOLDER = "La traducción aparecerá aquí.";
 
+// How long the "Copiado"/"No se pudo copiar" confirmation replaces the
+// "Copiar" label before reverting.
+const COPY_FEEDBACK_MS = 2000;
+
 type View = "translate" | "about";
+
+type CopyState = "idle" | "success" | "error";
 
 type TranslateErrorKind = "network" | "client" | "server" | "timeout";
 
@@ -55,10 +62,13 @@ export default function App() {
   const [direction, setDirection] = useState<TranslationDirection>("es-to-cak");
   const [input, setInput] = useState("");
   const [translateState, setTranslateState] = useState<TranslateState>({ status: "idle" });
+  const [copyState, setCopyState] = useState<CopyState>("idle");
   // Bumped whenever the current translate() call should be considered
   // abandoned (a new one starts, or the direction changes mid-request), so
   // a stale response can't clobber state that no longer belongs to it.
   const requestIdRef = useRef(0);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const copyRevertTimerRef = useRef<ReturnType<typeof setTimeout>>();
 
   const isOverLimit = input.length > MAX_INPUT_LENGTH;
   const isTranslating = translateState.status === "loading" || translateState.status === "warming";
@@ -71,6 +81,7 @@ export default function App() {
 
   async function runTranslate() {
     const requestId = ++requestIdRef.current;
+    setCopyState("idle");
     setTranslateState({ status: "loading" });
     const warmingTimer = setTimeout(() => {
       if (requestIdRef.current === requestId) {
@@ -90,6 +101,29 @@ export default function App() {
     } finally {
       clearTimeout(warmingTimer);
     }
+  }
+
+  function handleClear() {
+    requestIdRef.current += 1;
+    clearTimeout(copyRevertTimerRef.current);
+    setInput("");
+    setTranslateState({ status: "idle" });
+    setCopyState("idle");
+    inputRef.current?.focus();
+  }
+
+  async function handleCopy() {
+    if (translateState.status !== "success") {
+      return;
+    }
+    clearTimeout(copyRevertTimerRef.current);
+    try {
+      await navigator.clipboard.writeText(translateState.translation);
+      setCopyState("success");
+    } catch {
+      setCopyState("error");
+    }
+    copyRevertTimerRef.current = setTimeout(() => setCopyState("idle"), COPY_FEEDBACK_MS);
   }
 
   function toggleView() {
@@ -118,6 +152,9 @@ export default function App() {
           ? ERROR_MESSAGES[translateState.kind]
           : "";
 
+  const copyLabel =
+    copyState === "success" ? "Copiado" : copyState === "error" ? "No se pudo copiar" : "Copiar";
+
   return (
     <>
       <header className="app-header">
@@ -134,15 +171,30 @@ export default function App() {
         </button>
 
         <textarea
+          ref={inputRef}
           aria-label="Texto a traducir"
           placeholder="Escribe aquí..."
           value={input}
           onChange={(event) => setInput(event.target.value)}
         />
 
-        <p className={isOverLimit ? "char-counter char-counter--over-limit" : "char-counter"}>
-          {input.length} / {MAX_INPUT_LENGTH}
-        </p>
+        <div className="input-meta-row">
+          <p className={isOverLimit ? "char-counter char-counter--over-limit" : "char-counter"}>
+            {input.length} / {MAX_INPUT_LENGTH}
+          </p>
+
+          {input.length > 0 && (
+            <button
+              type="button"
+              className="text-button"
+              onClick={handleClear}
+              aria-label="Borrar el texto de entrada"
+            >
+              <XCircleIcon />
+              Borrar
+            </button>
+          )}
+        </div>
 
         {isOverLimit && (
           <p role="alert" className="over-limit-message">
@@ -158,34 +210,47 @@ export default function App() {
           Traducir
         </button>
 
-        <div className="output-panel" role="status" aria-live="polite">
-          {translateState.status === "loading" || translateState.status === "warming" ? (
-            <div className="output-status">
-              <span className="spinner" aria-hidden="true" />
-              <span>{statusMessage}</span>
-            </div>
-          ) : translateState.status === "error" ? (
-            <div className="output-status output-status--error">
-              <p className="output-error-message">
-                <span aria-hidden="true">⚠</span> <span>{statusMessage}</span>
-              </p>
-              <button
-                type="button"
-                className="button-outline"
-                onClick={runTranslate}
-                disabled={isTranslating}
-              >
-                Reintentar
+        <div className="output-card" role="status" aria-live="polite">
+          <div className="output-header">
+            <p className="eyebrow">Traducción</p>
+
+            {translateState.status === "success" && (
+              <button type="button" className="text-button" onClick={handleCopy}>
+                {copyState === "success" ? <CheckIcon /> : <CopyIcon />}
+                {copyLabel}
               </button>
-            </div>
-          ) : (
-            <textarea
-              aria-label="Traducción"
-              placeholder={OUTPUT_PLACEHOLDER}
-              value={translateState.status === "success" ? translateState.translation : ""}
-              readOnly
-            />
-          )}
+            )}
+          </div>
+
+          <div className="output-panel">
+            {translateState.status === "loading" || translateState.status === "warming" ? (
+              <div className="output-status">
+                <span className="spinner" aria-hidden="true" />
+                <span>{statusMessage}</span>
+              </div>
+            ) : translateState.status === "error" ? (
+              <div className="output-status output-status--error">
+                <p className="output-error-message">
+                  <span aria-hidden="true">⚠</span> <span>{statusMessage}</span>
+                </p>
+                <button
+                  type="button"
+                  className="button-outline"
+                  onClick={runTranslate}
+                  disabled={isTranslating}
+                >
+                  Reintentar
+                </button>
+              </div>
+            ) : (
+              <textarea
+                aria-label="Traducción"
+                placeholder={OUTPUT_PLACEHOLDER}
+                value={translateState.status === "success" ? translateState.translation : ""}
+                readOnly
+              />
+            )}
+          </div>
         </div>
       </main>
     </>
