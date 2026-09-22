@@ -214,7 +214,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--warmup-ratio", type=float, default=0.05)
     parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.0,
+        help=(
+            "Defaults to 0.0 (disabled) -- see train.py's --label-smoothing "
+            "help for why: a real crash confirmed against the actual "
+            "checkpoint, not assumed."
+        ),
+    )
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument(
         "--model-package-group-name",

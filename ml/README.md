@@ -360,10 +360,24 @@ rows from vocab extension, and there was no weight decay, label
 smoothing, or gradient accumulation at all (effective batch size 8 is
 small/noisy for a vocab this size). Issue #79 adds `--warmup-ratio`
 (default 0.05), `--weight-decay` (default 0.01), `--label-smoothing`
-(default 0.1), and `--gradient-accumulation-steps` (default 4, raising
-effective batch size to `--batch-size * this`) to close that gap.
-`fp16=True` is also now hardcoded in `build_training_arguments` (a fixed
-real-GPU speed/cost optimization, not a per-run experiment).
+(default **0.0**, disabled -- see below), and
+`--gradient-accumulation-steps` (default 4, raising effective batch size
+to `--batch-size * this`) to close that gap. `fp16=True` is also now
+hardcoded in `build_training_arguments` (a fixed real-GPU speed/cost
+optimization, not a per-run experiment).
+
+**`--label-smoothing` defaults to 0.0 (disabled), not the "cheap win"
+value it started as.** The first real run using these settings crashed
+immediately: `ValueError: You cannot specify both decoder_input_ids and
+decoder_inputs_embeds at the same time`, from `label_smoothing_factor >
+0`'s interaction with M2M100's forward signature under the installed
+`transformers` version -- reproduced locally against the real checkpoint
+with a tiny dataset (not assumed), isolated by testing each new setting
+independently: warmup/weight-decay/gradient-accumulation all work fine
+together, only label smoothing crashes.
+`tests/integration/test_fine_tune_real_checkpoint.py` guards against this
+regressing silently again. Cost of the real run that surfaced this: ~$0.08
+(371s billed, killed almost immediately).
 
 `--warmup-ratio` is converted to an absolute `warmup_steps` count inside
 `build_training_arguments` rather than passed straight through --

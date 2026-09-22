@@ -9,6 +9,8 @@ docstring) get real, direct coverage.
 
 from __future__ import annotations
 
+import torch
+
 from training.train import build_training_arguments, parse_args
 
 
@@ -39,9 +41,15 @@ def test_build_training_arguments_applies_regularization_and_schedule_defaults(t
     # ceil(1000 / (8 * 4)) * 3 epochs = 32 * 3 = 96 steps; 5% of that = 5.
     assert training_args.warmup_steps == 5
     assert training_args.weight_decay == 0.01
-    assert training_args.label_smoothing_factor == 0.1
+    # 0.0 (disabled): >0 crashes against the real M2M100 checkpoint with
+    # this transformers version -- see train.py's --label-smoothing help.
+    assert training_args.label_smoothing_factor == 0.0
     assert training_args.gradient_accumulation_steps == 4
-    assert training_args.fp16 is True
+    # Conditional on real CUDA availability, not hardcoded -- see
+    # build_training_arguments's docstring for why (fp16=True with no CUDA
+    # fails at Trainer.train() time, not construction, so this can't be
+    # left to callers to override).
+    assert training_args.fp16 is torch.cuda.is_available()
 
 
 def test_build_training_arguments_respects_cli_overrides(tmp_path):

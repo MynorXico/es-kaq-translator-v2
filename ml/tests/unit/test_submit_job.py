@@ -215,7 +215,9 @@ def test_build_hyperparameters_includes_regularization_defaults():
 
     assert hyperparameters["warmup-ratio"] == 0.05
     assert hyperparameters["weight-decay"] == 0.01
-    assert hyperparameters["label-smoothing"] == 0.1
+    # 0.0 (disabled): >0 crashes against the real M2M100 checkpoint with
+    # this transformers version -- see train.py's --label-smoothing help.
+    assert hyperparameters["label-smoothing"] == 0.0
     assert hyperparameters["gradient-accumulation-steps"] == 4
 
 

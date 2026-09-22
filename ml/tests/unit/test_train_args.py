@@ -37,7 +37,9 @@ def test_parse_args_reads_required_and_default_values(monkeypatch):
     # Regularization/schedule defaults (issue #79).
     assert args.warmup_ratio == 0.05
     assert args.weight_decay == 0.01
-    assert args.label_smoothing == 0.1
+    # 0.0 (disabled): >0 crashes against the real M2M100 checkpoint with
+    # this transformers version -- see train.py's --label-smoothing help.
+    assert args.label_smoothing == 0.0
     assert args.gradient_accumulation_steps == 4
 
 

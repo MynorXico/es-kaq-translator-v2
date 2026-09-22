@@ -199,8 +199,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--label-smoothing",
         type=float,
-        default=0.1,
-        help="Label smoothing factor for the cross-entropy loss (issue #79).",
+        default=0.0,
+        help=(
+            "Label smoothing factor for the cross-entropy loss (issue #79). "
+            "Defaults to 0.0 (disabled): setting this above 0 crashes the "
+            "real 5th real-hyperparameter training run with `ValueError: "
+            "You cannot specify both decoder_input_ids and "
+            "decoder_inputs_embeds at the same time`, a real incompatibility "
+            "between the installed transformers version's label-smoothing "
+            "loss path and M2M100's forward signature -- confirmed by "
+            "reproducing it locally against the real checkpoint with a tiny "
+            "dataset (see tests/integration/test_fine_tune_real_checkpoint.py, "
+            "which guards against this specific regression), not assumed. "
+            "Only override this if a transformers upgrade is confirmed to "
+            "have fixed the interaction."
+        ),
     )
     parser.add_argument(
         "--gradient-accumulation-steps",
@@ -351,6 +364,7 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
     (`ceil(num_train_examples / (batch_size * gradient_accumulation_steps))
     * epochs`) that the ratio is a fraction of.
     """
+    import torch
     from transformers import Seq2SeqTrainingArguments
 
     effective_batch_size = args.batch_size * args.gradient_accumulation_steps
@@ -368,11 +382,15 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
         warmup_steps=warmup_steps,
         weight_decay=args.weight_decay,
         label_smoothing_factor=args.label_smoothing,
-        # Fixed, not a CLI flag -- a real-GPU-only speed/cost optimization,
-        # not something to experiment with per run. Harmless to construct
-        # on CPU (this dataclass doesn't touch hardware), only relevant
-        # once `Seq2SeqTrainer.train()` actually runs on a real GPU job.
-        fp16=True,
+        # Not a CLI flag -- a real-GPU speed/cost optimization, not
+        # something to experiment with per run. Conditional on actual CUDA
+        # availability (rather than always True) so this same function
+        # works correctly for the real GPU training job *and* for a real
+        # local/CI CPU run (see tests/integration/test_fine_tune_real_checkpoint.py)
+        # -- fp16=True with no CUDA fails at Trainer.train() time, not at
+        # construction, so this can't just be hardcoded and left to callers
+        # to override.
+        fp16=torch.cuda.is_available(),
         seed=args.seed,
         save_strategy="no",
         report_to=[],
