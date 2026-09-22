@@ -33,4 +33,20 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(translateButton).toBeDisabled();
   });
+
+  it("navigates to the About page via the header nav link, and back via the same slot", () => {
+    render(<App />);
+
+    const aboutLink = screen.getByRole("button", { name: "Acerca de" });
+    fireEvent.click(aboutLink);
+
+    expect(
+      screen.getByRole("heading", { name: "Acerca de Traductor Kaqchikel" }),
+    ).toBeInTheDocument();
+
+    const translateLink = screen.getByRole("button", { name: "Traducir" });
+    fireEvent.click(translateLink);
+
+    expect(screen.getByText("Español → Kaqchikel")).toBeInTheDocument();
+  });
 });
