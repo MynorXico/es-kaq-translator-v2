@@ -251,6 +251,33 @@ test("moves focus to the output once a translation succeeds", async ({ page }) =
   await expect(output).toBeFocused();
 });
 
+test("does not steal focus from the input if the user is still typing when a translation resolves", async ({
+  page,
+}) => {
+  await page.route("**/v1/translate", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return route.fulfill({ json: { translation: "Utz" } });
+  });
+
+  await page.goto("/");
+  const input = page.getByLabel(/^Texto en /);
+  await input.fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+  await expect(page.getByText("Traduciendo…")).toBeVisible();
+
+  // The user keeps typing their next query while the request is in flight.
+  await input.focus();
+  await input.fill("Hola, ¿cómo estás?");
+  await expect(input).toBeFocused();
+
+  // Wait for the delayed response to resolve.
+  await expect(page.getByLabel(/^Traducción en /)).toHaveValue("Utz");
+
+  // Focus (and what the user typed) must stay on the input.
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("Hola, ¿cómo estás?");
+});
+
 test("keyboard tab order follows nav -> swap -> input -> clear -> translate -> copy -> output", async ({
   page,
 }) => {

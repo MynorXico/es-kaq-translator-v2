@@ -107,9 +107,13 @@ export default function App() {
 
   // Focus management (WCAG 2.4.3): once a translation resolves, move focus
   // to the result so a screen reader user lands on it immediately, rather
-  // than staying on the (now-disabled) "Traducir" button.
+  // than staying on the (now-disabled) "Traducir" button. Guarded on
+  // `document.activeElement`: the input is never disabled while a
+  // translation is in flight, so a user can start typing their *next*
+  // query before this one resolves -- don't yank focus/caret out of the
+  // input mid-sentence in that case (see issue #94).
   useEffect(() => {
-    if (translateState.status === "success") {
+    if (translateState.status === "success" && document.activeElement !== inputRef.current) {
       outputRef.current?.focus();
     }
   }, [translateState]);
