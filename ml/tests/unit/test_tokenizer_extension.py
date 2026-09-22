@@ -7,7 +7,18 @@ install or a downloaded M2M100 checkpoint -- neither is available in this
 sandbox. See the module docstring in `training/tokenizer_extension.py`.
 """
 
-from training.tokenizer_extension import compute_new_tokens_for_texts, extend_tokenizer_vocab
+from pathlib import Path
+
+from training.tokenizer_extension import (
+    compute_new_tokens_for_texts,
+    extend_tokenizer_vocab,
+    extend_tokenizer_vocab_with_subwords,
+)
+
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+SAMPLE_KAQCHIKEL_TEXTS = (
+    (FIXTURES / "sample_kaqchikel_text.txt").read_text(encoding="utf-8").splitlines() * 8
+)
 
 
 class FakeM2M100Tokenizer:
@@ -74,3 +85,31 @@ def test_extend_tokenizer_vocab_returns_empty_list_when_fully_covered():
     added = extend_tokenizer_vocab(tokenizer, ["utz"])
 
     assert added == []
+
+
+def test_extend_tokenizer_vocab_with_subwords_adds_high_value_pieces():
+    tokenizer = FakeM2M100Tokenizer(_base_vocab())
+
+    added = extend_tokenizer_vocab_with_subwords(
+        tokenizer, SAMPLE_KAQCHIKEL_TEXTS, vocab_size=60
+    )
+
+    assert added
+    updated_vocab = tokenizer.get_vocab()
+    for token in added:
+        assert token in updated_vocab
+        # Never re-adds a single character -- that's extend_tokenizer_vocab's
+        # (character-gap) job already, not this subword-diff step's.
+        assert len(token.removeprefix("▁")) >= 2
+
+
+def test_extend_tokenizer_vocab_with_subwords_is_idempotent_on_second_call():
+    tokenizer = FakeM2M100Tokenizer(_base_vocab())
+
+    first = extend_tokenizer_vocab_with_subwords(tokenizer, SAMPLE_KAQCHIKEL_TEXTS, vocab_size=60)
+    second = extend_tokenizer_vocab_with_subwords(
+        tokenizer, SAMPLE_KAQCHIKEL_TEXTS, vocab_size=60
+    )
+
+    assert first
+    assert second == []
