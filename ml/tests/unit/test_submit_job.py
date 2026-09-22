@@ -189,6 +189,8 @@ def test_build_hyperparameters_passes_through_cli_overridable_values():
             "0.2",
             "--gradient-accumulation-steps",
             "8",
+            "--subword-vocab-size",
+            "12000",
         ]
     )
 
@@ -206,6 +208,7 @@ def test_build_hyperparameters_passes_through_cli_overridable_values():
     assert hyperparameters["weight-decay"] == 0.02
     assert hyperparameters["label-smoothing"] == 0.2
     assert hyperparameters["gradient-accumulation-steps"] == 8
+    assert hyperparameters["subword-vocab-size"] == 12000
 
 
 def test_build_hyperparameters_includes_regularization_defaults():
@@ -219,6 +222,17 @@ def test_build_hyperparameters_includes_regularization_defaults():
     # this transformers version -- see train.py's --label-smoothing help.
     assert hyperparameters["label-smoothing"] == 0.0
     assert hyperparameters["gradient-accumulation-steps"] == 4
+
+
+def test_build_hyperparameters_includes_subword_vocab_size_default():
+    # Matches training.subword_vocab.DEFAULT_VOCAB_SIZE (issue #82) --
+    # every submitted job records this for traceability (ADR 0001) even
+    # when not explicitly overridden.
+    args = submit_job.parse_args([])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["subword-vocab-size"] == 8000
 
 
 def test_build_hyperparameters_generates_run_id_when_not_given():

@@ -75,11 +75,18 @@ from training.direction import (
     ALL_DIRECTION_TAG_TOKENS,
     DIRECTION_CHOICES,
     DIRECTION_TAGS,
+    KAQCHIKEL,
     TranslationExample,
     build_direction_examples,
+    collect_texts_for_language,
     tag_source_text,
 )
-from training.tokenizer_extension import extend_tokenizer_vocab, resize_embeddings_for_new_tokens
+from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
+from training.tokenizer_extension import (
+    extend_tokenizer_vocab,
+    extend_tokenizer_vocab_with_subwords,
+    resize_embeddings_for_new_tokens,
+)
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 
@@ -225,6 +232,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "without needing more GPU memory (issue #79)."
         ),
     )
+    parser.add_argument(
+        "--subword-vocab-size",
+        type=int,
+        default=DEFAULT_SUBWORD_VOCAB_SIZE,
+        help=(
+            "Target vocabulary size for the Kaqchikel-only SentencePiece/"
+            "Unigram subword model trained fresh from this run's training "
+            "corpus and diffed against the base tokenizer's vocab (issue "
+            "#82), to find high-value multi-character subwords that "
+            "M2M100's generic multilingual tokenizer fragments Kaqchikel's "
+            "agglutinative morphology into. This is a target, not a hard "
+            "requirement: SentencePiece caps to whatever the corpus "
+            "actually supports rather than failing (see "
+            "training/subword_vocab.py's hard_vocab_limit=False)."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -266,19 +289,53 @@ def load_base_model_and_tokenizer(base_model: str) -> tuple[Any, Any]:
 
 
 def extend_vocabulary_for_examples(
-    tokenizer: Any, model: Any, examples: list[TranslationExample], *, seed: int | None = None
+    tokenizer: Any,
+    model: Any,
+    examples: list[TranslationExample],
+    *,
+    seed: int | None = None,
+    subword_vocab_size: int = DEFAULT_SUBWORD_VOCAB_SIZE,
 ) -> list[str]:
     """Extend `tokenizer`/`model` to cover the Kaqchikel text in `examples`,
     plus this script's own direction tag tokens (`training.direction`), so
     they get real, warm-started embedding rows too rather than falling back
     to whatever `add_tokens` would leave uninitialized.
 
-    Returns the list of tokens actually added (may be empty).
+    Two complementary extension steps, run in sequence (issue #82):
+
+    1. `extend_tokenizer_vocab` -- character/whole-word gap coverage
+       (#34/#62), against every example's source *and* target text plus
+       the direction tags.
+    2. `extend_tokenizer_vocab_with_subwords` -- a Kaqchikel-only
+       SentencePiece/Unigram subword vocabulary (`training.subword_vocab`),
+       diffed against the tokenizer's vocab *after* step 1 (so it never
+       re-proposes a whole word/character already added there), trained
+       only on the Kaqchikel side of `examples`
+       (`training.direction.collect_texts_for_language`) -- never mixed
+       with Spanish, which M2M100 already tokenizes natively. This targets
+       the subword-fragmentation ceiling three real training runs'
+       diminishing BLEU-vs-loss returns pointed at (see
+       `training/subword_vocab.py`'s module docstring for the full
+       rationale).
+
+    A single `resize_embeddings_for_new_tokens` call at the end covers the
+    combined total from both steps, so the model's embedding matrix is
+    resized exactly once per run.
+
+    Returns the list of tokens actually added by either step (may be
+    empty).
     """
     sample_texts = [ex.source_text for ex in examples] + [ex.target_text for ex in examples]
     sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
 
     added_tokens = extend_tokenizer_vocab(tokenizer, sample_texts)
+
+    kaqchikel_texts = collect_texts_for_language(examples, KAQCHIKEL)
+    if kaqchikel_texts:
+        added_tokens = added_tokens + extend_tokenizer_vocab_with_subwords(
+            tokenizer, kaqchikel_texts, vocab_size=subword_vocab_size
+        )
+
     resize_embeddings_for_new_tokens(model, len(added_tokens), seed=seed)
     return added_tokens
 
@@ -535,7 +592,11 @@ def run_training_job(
     tokenizer, model = model_loader(model_source)
 
     added_tokens = extend_vocabulary_for_examples(
-        tokenizer, model, train_examples, seed=args.seed
+        tokenizer,
+        model,
+        train_examples,
+        seed=args.seed,
+        subword_vocab_size=args.subword_vocab_size,
     )
 
     model = trainer(model, tokenizer, train_examples, val_examples, args)
@@ -585,6 +646,7 @@ def run_training_job(
             "weight_decay": args.weight_decay,
             "label_smoothing": args.label_smoothing,
             "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "subword_vocab_size": args.subword_vocab_size,
             "new_tokens_added": len(added_tokens),
             "resumed_from_checkpoint": bool(args.init_model),
         },

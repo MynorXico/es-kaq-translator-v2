@@ -211,6 +211,60 @@ def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
     assert "**Validation sentences**: 4" in card_text
 
 
+def test_run_training_job_extends_vocab_with_kaqchikel_subwords(tmp_path):
+    """Issue #82: alongside the existing whole-word/character extension,
+    run_training_job should also train+merge a Kaqchikel-only subword
+    vocabulary, and record it in the model card for traceability (ADR
+    0001) -- using the richer fixture corpus, which (unlike
+    sample_train.tsv's single-word pairs) has enough real Kaqchikel text
+    for SentencePiece to discover genuine multi-character subwords.
+    """
+    fake_trainer.calls.clear()
+    model_dir = tmp_path / "model"
+    output_dir = tmp_path / "output"
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train_richer.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(output_dir),
+            "--run-id",
+            "smoke-test-subword-run",
+            "--epochs",
+            "1",
+            "--subword-vocab-size",
+            "8000",
+        ]
+    )
+
+    run_training_job(
+        args,
+        model_loader=fake_model_loader,
+        trainer=fake_trainer,
+        translator=fake_translator,
+    )
+
+    saved_tokenizer_vocab_size = int(
+        (model_dir / "fake_tokenizer.txt").read_text().split("=")[1]
+    )
+    # Grows by more than the whole-word/character-only extension would --
+    # confirmed by the subword-specific unit/integration tests in
+    # tests/unit/test_subword_vocab.py and
+    # tests/integration/test_subword_vocab_pipeline.py; here we only need
+    # to confirm the pipeline actually calls into that step and records it.
+    assert saved_tokenizer_vocab_size > len(_base_vocab())
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "8000" in card_text  # subword_vocab_size hyperparameter recorded
+
+
 def test_run_training_job_single_direction_trains_half_the_examples(tmp_path):
     fake_trainer.calls.clear()
 
