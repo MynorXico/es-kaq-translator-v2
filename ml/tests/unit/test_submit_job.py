@@ -181,6 +181,14 @@ def test_build_hyperparameters_passes_through_cli_overridable_values():
             "64",
             "--seed",
             "7",
+            "--warmup-ratio",
+            "0.1",
+            "--weight-decay",
+            "0.02",
+            "--label-smoothing",
+            "0.2",
+            "--gradient-accumulation-steps",
+            "8",
         ]
     )
 
@@ -194,6 +202,21 @@ def test_build_hyperparameters_passes_through_cli_overridable_values():
     assert hyperparameters["learning-rate"] == 0.0001
     assert hyperparameters["max-length"] == 64
     assert hyperparameters["seed"] == 7
+    assert hyperparameters["warmup-ratio"] == 0.1
+    assert hyperparameters["weight-decay"] == 0.02
+    assert hyperparameters["label-smoothing"] == 0.2
+    assert hyperparameters["gradient-accumulation-steps"] == 8
+
+
+def test_build_hyperparameters_includes_regularization_defaults():
+    args = submit_job.parse_args([])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["warmup-ratio"] == 0.05
+    assert hyperparameters["weight-decay"] == 0.01
+    assert hyperparameters["label-smoothing"] == 0.1
+    assert hyperparameters["gradient-accumulation-steps"] == 4
 
 
 def test_build_hyperparameters_generates_run_id_when_not_given():
