@@ -61,9 +61,25 @@ to manage their own DNS independently, which isn't a requirement here.
 
 ## What's not done yet
 
-No actual records exist for `app.`/`api.` (or their `-dev`/`-qa`
-variants) yet, since nothing is deployed to point them at — no
-CloudFront distribution, no API Gateway. Creating those records is part
-of the CDK work for the web/API stacks (tracked separately), not this
-ticket. This runbook documents the plan so that work has a target to
-build against.
+As of issue #84, `WebStack` deploys a real CloudFront distribution per
+environment (S3 origin via OAC, SPA-routing fallback, cache invalidation
+on deploy) — reachable today at its default `*.cloudfront.net` domain,
+already HTTPS. The custom `app.`/`app-dev.`/`app-qa.` records (and their
+`api.` counterparts once #96 lands) still don't exist, and can't be
+wired up as simply as this runbook originally assumed:
+
+- The hosted zone lives in `translator-tooling`, but each environment's
+  CloudFront distribution (and its required same-account ACM
+  certificate — a hard AWS constraint, not a CDK choice) lives in a
+  *different* AWS account (`translator-dev`/`-qa`/`-prod`).
+- Both ACM's DNS validation record and the final alias record need to be
+  **written** into the tooling account's zone from a stack deployed in a
+  different account. Route 53 hosted zones have no resource-based/
+  bucket-policy-style cross-account grant (unlike S3/KMS/SNS), so this
+  needs a real cross-account IAM mechanism that doesn't exist yet.
+
+This is tracked as its own decision in issue #99 (with candidate
+approaches: a new least-privilege cross-account IAM role + custom
+resource, vs. a manual one-time DNS step per environment mirroring the
+existing GitHub CodeStar connection OAuth-handshake precedent). Resolve
+that before wiring the actual `app.`/`api.` custom domains.
