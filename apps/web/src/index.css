@@ -115,19 +115,26 @@ button {
   }
 }
 
-.nav-link {
+.nav-link,
+.link-button,
+.text-button {
   align-self: auto;
   background: none;
   border: none;
   min-height: 44px;
-  padding: 0.5rem 0.75rem;
   color: var(--primary);
   font-weight: 600;
   cursor: pointer;
 }
 
+.nav-link,
+.text-button {
+  padding: 0.5rem 0.75rem;
+}
+
 .nav-link:hover,
-.link-button:hover {
+.link-button:hover,
+.text-button:hover {
   color: var(--primary-hover);
 }
 
@@ -195,14 +202,7 @@ a:focus-visible {
 }
 
 .link-button {
-  align-self: auto;
-  background: none;
-  border: none;
   padding: 0;
-  min-height: 44px;
-  color: var(--primary);
-  font-weight: 600;
-  cursor: pointer;
 }
 
 .input-meta-row {
@@ -243,18 +243,6 @@ a:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 0.375rem;
-  align-self: auto;
-  background: none;
-  border: none;
-  min-height: 44px;
-  padding: 0.5rem 0.75rem;
-  color: var(--primary);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.text-button:hover {
-  color: var(--primary-hover);
 }
 
 .output-panel {

@@ -15,6 +15,16 @@ vi.mock("./api", async (importOriginal) => {
 
 const mockedTranslate = vi.mocked(translate);
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("App", () => {
   it("renders the translator title and direction toggle", () => {
     render(<App />);
@@ -72,16 +82,6 @@ describe("App translate flow", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
-
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (reason: unknown) => void;
-    const promise = new Promise<T>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    return { promise, resolve, reject };
-  }
 
   it("shows the idle placeholder before any translation is submitted", () => {
     render(<App />);
@@ -268,6 +268,30 @@ describe("App copy and clear affordances", () => {
     expect(
       screen.queryByRole("button", { name: "Borrar el texto de entrada" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("ignores a stale in-flight response after Borrar clears the fields mid-request", async () => {
+    const { promise, resolve } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByText("Traduciendo…");
+
+    fireEvent.click(screen.getByRole("button", { name: "Borrar el texto de entrada" }));
+
+    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("");
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+
+    await act(async () => {
+      resolve({ translation: "Utz" });
+    });
+
+    // The stale response belonged to the abandoned (now-cleared) request;
+    // the UI should still be idle, not showing that translation.
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
   });
 
   it("only shows the copy button after a successful translation", async () => {

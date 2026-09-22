@@ -89,6 +89,32 @@ test("clears the input, output, and error state via the clear button, and refocu
   await expect(page.getByRole("button", { name: "Borrar el texto de entrada" })).toBeHidden();
 });
 
+test("ignores a stale in-flight response after Borrar clears the fields mid-request", async ({
+  page,
+}) => {
+  await page.route("**/v1/translate", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    return route.fulfill({ json: { translation: "Utz" } });
+  });
+
+  await page.goto("/");
+  const input = page.getByLabel("Texto a traducir");
+  await input.fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+
+  await expect(page.getByText("Traduciendo…")).toBeVisible();
+  await page.getByRole("button", { name: "Borrar el texto de entrada" }).click();
+
+  await expect(input).toHaveValue("");
+  await expect(page.getByLabel("Traducción")).toHaveValue("");
+
+  // Give the delayed (now-stale) response time to resolve, then confirm it
+  // never landed -- the field should still be idle/empty, not "Utz".
+  await page.waitForTimeout(700);
+  await expect(page.getByLabel("Traducción")).toHaveValue("");
+  await expect(page.getByText("Traduciendo…")).toBeHidden();
+});
+
 test("copies a successful translation to the clipboard with temporary confirmation", async ({
   page,
   context,

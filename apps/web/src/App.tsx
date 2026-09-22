@@ -105,6 +105,7 @@ export default function App() {
 
   function handleClear() {
     requestIdRef.current += 1;
+    clearTimeout(copyRevertTimerRef.current);
     setInput("");
     setTranslateState({ status: "idle" });
     setCopyState("idle");
