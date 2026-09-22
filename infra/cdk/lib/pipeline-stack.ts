@@ -25,9 +25,16 @@ export interface PipelineConfig {
    * the real `apps/api` deployment yet -- that's issue #96, being built in
    * parallel with no visibility into its exact CloudFormation output name
    * from here (see issue #84). Defaults to an empty string (a same-origin
-   * relative request that safely 404s, rather than silently pointing a
-   * deployed environment at a local dev server) until #96 lands, at which
-   * point wiring the real URL through here is a small follow-up.
+   * relative request against this environment's own CloudFront
+   * distribution, rather than silently pointing a deployed environment at
+   * a local dev server) until #96 lands, at which point wiring the real
+   * URL through here is a small follow-up. Note this doesn't actually
+   * fail with a 404: `WebStack`'s SPA-routing fallback (403/404 ->
+   * `index.html` with a 200) means the client gets a 200 with the app's
+   * own HTML body instead, which then fails harmlessly client-side
+   * (`response.json()` throws parsing HTML as JSON, surfaced to the user
+   * as a generic error by `apps/web/src/App.tsx`'s existing error
+   * handling) -- not a real HTTP 404.
    */
   webApiBaseUrl?: string;
 }

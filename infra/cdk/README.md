@@ -77,9 +77,12 @@ real, fresh Vite build to deploy — every environment currently gets the
 exact same build output (see the doc comment on `buildPipelineApp` for why
 that's fine for now). The build's `VITE_API_BASE_URL` (see
 `apps/web/README.md`) comes from `PipelineConfig.webApiBaseUrl` and
-defaults to an empty string — a same-origin relative request that safely
-404s — until issue #96 (`apps/api`'s own deployment) lands and that value
-can be wired to a real origin.
+defaults to an empty string — a same-origin relative request against the
+environment's own CloudFront distribution, which fails harmlessly and
+surfaces as a generic client-side error (not an actual HTTP 404 — see the
+doc comment on `PipelineConfig.webApiBaseUrl` for why) — until issue #96
+(`apps/api`'s own deployment) lands and that value can be wired to a real
+origin.
 
 A local `cdk synth`/`cdk deploy` needs `apps/web/dist` to already exist
 (run `pnpm --filter web build` first) unless you're using

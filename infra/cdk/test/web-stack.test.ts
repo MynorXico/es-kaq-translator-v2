@@ -115,9 +115,11 @@ describe("WebStack", () => {
     const deployments = template.findResources("Custom::CDKBucketDeployment");
     const [deployment] = Object.values(deployments);
     expect(deployment).toBeDefined();
-    // Non-empty invalidation paths prove a cache invalidation is wired to
-    // this deployment (rather than relying on a manual post-deploy step).
-    expect(deployment.Properties.DistributionPaths).toBeDefined();
+    // Asserts the actual invalidation paths, not just that the property is
+    // set -- a regression to `[]` (or omitting it) would silently
+    // invalidate nothing on deploy while still passing a `toBeDefined()`
+    // check.
+    expect(deployment.Properties.DistributionPaths).toEqual(["/*"]);
   });
 
   it("exposes the bucket name and CloudFront domain as stack outputs", () => {
