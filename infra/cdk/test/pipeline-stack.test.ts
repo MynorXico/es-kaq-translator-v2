@@ -1,3 +1,4 @@
+import path from "node:path";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -14,9 +15,12 @@ const FAKE_CONFIG: PipelineConfig = {
   repoString: "example-org/example-repo",
 };
 
+// A tiny committed fixture, not a real `apps/web` build -- see web-stack.test.ts.
+const FIXTURE_SITE_CONTENT_PATH = path.join(__dirname, "fixtures/site");
+
 function synthPipelineTemplate() {
   const app = new App();
-  const stack = buildPipelineApp(app, FAKE_CONFIG);
+  const stack = buildPipelineApp(app, FAKE_CONFIG, FIXTURE_SITE_CONTENT_PATH);
   app.synth();
   return Template.fromStack(stack);
 }
@@ -24,7 +28,7 @@ function synthPipelineTemplate() {
 describe("buildPipelineApp", () => {
   it("creates the pipeline stack in the tooling account/region", () => {
     const app = new App();
-    const stack = buildPipelineApp(app, FAKE_CONFIG);
+    const stack = buildPipelineApp(app, FAKE_CONFIG, FIXTURE_SITE_CONTENT_PATH);
     app.synth();
 
     expect(stack.account).toBe(FAKE_CONFIG.toolingAccount);

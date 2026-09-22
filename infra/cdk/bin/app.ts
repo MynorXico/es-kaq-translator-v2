@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import path from "node:path";
 import { App } from "aws-cdk-lib";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { buildPipelineApp, type PipelineConfig } from "../lib/pipeline-stack";
@@ -84,10 +85,28 @@ async function resolveConfig(app: App): Promise<PipelineConfig> {
   return realConfig();
 }
 
+/**
+ * `WebStack`'s `BucketDeployment` (lib/web-stack.ts) needs a real directory
+ * on disk at synth time. A real (`useMockAccounts` unset) synth always
+ * builds `apps/web` first in the pipeline's own CodeBuild synth step (see
+ * `lib/pipeline-stack.ts`) or must be built locally first for a manual
+ * `cdk synth`/`deploy` -- so the real `apps/web/dist` output is expected to
+ * exist by the time this runs. The mock-accounts path (CI's credential-free
+ * PR check, `test/mock-synth.test.ts`) instead points at a tiny committed
+ * fixture, so it never depends on a real Vite build having run.
+ */
+function resolveWebSiteContentPath(useMockAccounts: boolean): string {
+  return useMockAccounts
+    ? path.join(__dirname, "../test/fixtures/site")
+    : path.join(__dirname, "../../../apps/web/dist");
+}
+
 async function main(): Promise<void> {
   const app = new App();
+  const useMockAccounts = app.node.tryGetContext("useMockAccounts") === "true";
   const config = await resolveConfig(app);
-  buildPipelineApp(app, config);
+  const webSiteContentPath = resolveWebSiteContentPath(useMockAccounts);
+  buildPipelineApp(app, config, webSiteContentPath);
 }
 
 main().catch((error) => {

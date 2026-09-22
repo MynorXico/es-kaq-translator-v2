@@ -6,6 +6,8 @@ import { WebStack } from "./web-stack";
 
 export interface TranslatorStageProps extends StageProps {
   environmentName: string;
+  /** See `WebStackProps.siteContentPath`. */
+  webSiteContentPath: string;
 }
 
 /**
@@ -20,6 +22,7 @@ export class TranslatorStage extends Stage {
 
     new WebStack(this, "Web", {
       environmentName: props.environmentName,
+      siteContentPath: props.webSiteContentPath,
     });
 
     new DataStack(this, "Data", {
