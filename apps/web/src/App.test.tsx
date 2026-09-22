@@ -111,6 +111,20 @@ describe("App translate flow", () => {
     expect(await screen.findByLabelText(/^Traducción en /)).toHaveValue("Utz");
   });
 
+  it("shows a translation-quality disclaimer once a translation succeeds, but not before", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    const disclaimerText =
+      "Esta traducción fue generada automáticamente por un modelo en desarrollo y puede contener errores.";
+    expect(screen.queryByText(disclaimerText)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    expect(await screen.findByText(disclaimerText)).toBeInTheDocument();
+  });
+
   it("switches to a warming-up message if there's still no response after 4 seconds", async () => {
     vi.useFakeTimers();
     const { promise } = deferred<{ translation: string }>();
