@@ -81,11 +81,15 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    environment must pass `--context newCertificateAck=true` (or the
    equivalent stack prop, wired from `app-stage.ts`) as an explicit
    acknowledgement that this deploy will block on manual DNS validation.
-   The stack fails synth if it detects a new-certificate condition
-   without the flag — this is a hard technical guard, not just a
-   reminder to self, specifically so an unattended Dev/Qa pipeline run
-   can't wedge itself on `CREATE_IN_PROGRESS` waiting for a validation
-   record nobody's watching for. See [ADR 0007](../adr/0007-cross-account-domain-dns-validation.md)'s
+   Detection is diff-based: `bin/app.ts` reads the previously-validated
+   domain for that stack/environment from an SSM parameter (e.g.
+   `/traductor-kaqchikel/domains/{environmentName}-web-cert-domain`,
+   alongside the account-ID/connection-ARN parameters from ADR 0004) and
+   the stack fails synth if the requested `domainName` differs from that
+   recorded value and the flag is absent — a hard technical guard, not
+   just a reminder to self, specifically so an unattended Dev/Qa pipeline
+   run can't wedge itself on `CREATE_IN_PROGRESS` waiting for a
+   validation record nobody's watching for. See [ADR 0007](../adr/0007-cross-account-domain-dns-validation.md)'s
    Decision section for the full rationale.
 2. Create the certificate in-account with
    `acm.CertificateValidation.fromDns()` and **no** `hostedZone` argument
@@ -122,6 +126,11 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    record with the (to-be-written) helper script under `infra/scripts/`
    against the `translator-tooling` profile, rather than console
    clicking.
+6. **Update the SSM parameter from step 1** to the newly-validated
+   domain name. This is what lets the *next* ordinary deploy of the same
+   stack/environment skip the `newCertificateAck` flag — until this step
+   runs, the stack still thinks no certificate has been validated for
+   this domain yet.
 
 ## What's not done yet
 
