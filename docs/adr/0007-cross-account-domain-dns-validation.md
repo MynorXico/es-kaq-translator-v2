@@ -125,8 +125,10 @@ per certificate, with no new persistent cross-account IAM trust.**
   total across this project's current scope (`app.`/`api.` x
   dev/qa/prod), consistent with ACM's auto-renewal behavior. If that
   changes (e.g. frequent full environment teardown/recreation), revisit
-  with option 1 -- this ADR is a judgment call on the current trade-off,
-  not a permanent ban on automating it.
+  with option 1 -- ideally its record-name/type-scoped variant (see
+  "Alternatives considered") rather than full zone-wide access -- this
+  ADR is a judgment call on the current trade-off, not a permanent ban on
+  automating it.
 - `docs/runbooks/domain-and-dns.md` needs a new section with the exact
   `acm describe-certificate` / validation-record / alias-record commands
   and the pipeline-stall warning above. Done as part of this ADR (see
@@ -156,6 +158,25 @@ per certificate, with no new persistent cross-account IAM trust.**
   maintain (a Lambda, a role, a trust policy per environment) for a
   problem the project hits roughly six times total. Revisit if that
   changes (see Consequences).
+- **A finer-grained version of option 1, using Route 53's
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames` /
+  `route53:ChangeResourceRecordSetsRecordTypes` IAM condition keys** to
+  scope the cross-account role to only that environment's own record
+  names (e.g. `translator-dev`'s role could only ever touch
+  `app-dev.traductorkaqchikel.com`/`api-dev.traductorkaqchikel.com`,
+  CNAME/A only) instead of the whole zone: this would directly address
+  the blast-radius objection above -- a compromised `translator-dev`
+  custom resource would be structurally unable to touch `app.`/`api.`
+  (prod's records) even in the worst case. Still rejected as the primary
+  mechanism, though, because the underlying cost/benefit doesn't change:
+  it's still a Lambda, a role, and a trust policy (now per-environment
+  condition-scoped, so slightly more of them, not less) to build and
+  maintain, for a workload that's one-time per certificate and roughly
+  six occurrences total across this project's life. Worth remembering as
+  the natural next step if this ADR is ever revisited under "Revisit if
+  toil changes" (see Consequences) -- at that point, this narrower
+  variant, not full zone-wide access, should be the default starting
+  point.
 - **Per-account hosted zone delegation (subzones)**: already rejected in
   `domain-and-dns.md` and not reopened here -- no requirement for
   dev/qa/prod to manage DNS independently, and it would break the flat,
