@@ -9,8 +9,19 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
   (dev/qa/prod); the bucket name/ARN is only ever referenced via CDK
   cross-stack refs or `CfnOutput`, never hardcoded here. Composable
   functions:
-  - `data/normalize.py` — whitespace/Unicode (NFC) cleanup. Never
-    lowercases (see module docstring for why).
+  - `data/normalize.py` — whitespace/Unicode (NFC) cleanup, plus
+    glottal-stop/apostrophe look-alike normalization (`normalize_glottal_marks`,
+    issue #90): maps confirmed Unicode look-alike codepoints for the
+    Kaqchikel glottal stop/glottalized consonants to the plain ASCII
+    apostrophe (`'`, U+0027) that ALMG orthography and the corpus's
+    majority convention already use. An aggregate scan of the real
+    corpus (32,906 training sentences, counts only — ADR 0002) confirmed
+    U+02C8 (MODIFIER LETTER VERTICAL LINE, "ˈ") in active use as a
+    look-alike, almost certainly a font/OCR/typesetting artifact from
+    digitizing different source documents; U+02BC and U+2019 were also
+    checked as candidates but had **zero** occurrences, so — per the
+    issue's "verify before assuming" guidance — only U+02C8 is mapped.
+    Never lowercases (see module docstring for why).
   - `data/dedup.py` — exact-duplicate `(source, target)` pair removal.
   - `data/length_filter.py` — drops empty/too-short/too-long pairs and
     pairs with an outlier source/target length ratio (configurable
@@ -53,11 +64,39 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     losing data.
 
     The private ALMG corpus lives under a versioned prefix,
-    `s3://<training-bucket>/corpus/almg/v1/{train,val}.tsv` (bucket name
-    from `DataStack`, see above) — bump the version segment on any future
-    reprocessing of the raw source data, rather than overwriting `v1` in
-    place, so a given training run's corpus version stays traceable
-    (ADR 0001).
+    `s3://<training-bucket>/corpus/almg/{version}/{train,val}.tsv` (bucket
+    name from `DataStack`, see above) — bump the version segment on any
+    future reprocessing of the raw source data, rather than overwriting a
+    prior version in place, so a given training run's corpus version stays
+    traceable (ADR 0001). Current version: **`v2`** — `v1` with
+    `data/normalize.py`'s glottal-stop look-alike normalization (issue
+    #90, see above) applied to every pair via `normalize_pair`. This was a
+    normalization-only reprocessing: no dedup or length-filtering was run
+    (the `~19x` sentence-length/register gap between the two issue #51
+    clusters is a separate, explicitly out-of-scope question — running the
+    full `data/pipeline.py clean` pipeline here would have conflated the
+    two). Sentence counts are therefore identical to `v1` (32,906 train /
+    3,609 val); only text content changed, on ~21.5% of train pairs and
+    ~20.8% of val pairs. `validate-split` (below) was re-run against `v2`
+    and shows the same one-sided overlap counts as `v1` (977 source-side /
+    726 target-side, zero exact-pair leakage) — confirming the
+    normalization introduced no split-integrity regression. `v1` is left
+    in place, unmodified, for traceability of any run already registered
+    against it.
+
+    **`training/submit_job.py` still defaults to `v1`** (its
+    `CORPUS_PREFIX`/`CORPUS_VERSION` module constants, see below) — issue
+    #90 is a data-preparation ticket only, deliberately not switching the
+    training pipeline over. Note for whoever does that switchover next
+    (issue #90's documented follow-up sequence, step 2/3): `CORPUS_PREFIX`
+    (which S3 objects are actually read) and the `--corpus-version` CLI
+    flag/`CORPUS_VERSION` constant (the label recorded in the model card
+    and Model Registry) are two **independent** values today — bumping
+    only the CLI default without also updating `CORPUS_PREFIX` would train
+    against `v1` data while the model card claims `v2`, silently breaking
+    ADR 0001 traceability. Update both together (or derive `CORPUS_PREFIX`
+    from `--corpus-version` instead of hardcoding it) when that switchover
+    happens.
   - `data/pipeline.py` — chains the above into `clean_corpus_file` and
     `validate_split_files`, plus a CLI: `uv run python -m data.pipeline
     clean <input> <output>` or `... validate-split <train> <val>`. Never
@@ -92,11 +131,33 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     directly.
 
     Run against a real corpus file from an environment with S3 access:
-    `uv run python -m data.dialect_signal s3://<bucket>/corpus/almg/v1/train.tsv`
+    `uv run python -m data.dialect_signal s3://<bucket>/corpus/almg/v2/train.tsv`
     (or a local path). Never run this in CI/this repo's test suite against
     real data — `tests/unit/test_dialect_signal.py` and
     `tests/integration/test_dialect_signal_cli.py` only ever use tiny,
     hand-written synthetic fixtures with a designed two-group signal.
+
+    **Issue #90 update**: `analyze_dialect_signal` now runs
+    `data.normalize.normalize_text` over each Kaqchikel sentence before
+    computing any feature — previously it read raw corpus text directly,
+    so both the glottal-stop look-alike issue above and, in principle,
+    precomposed-vs-decomposed Unicode variants of the central-vowel-mark
+    characters could confound `glottal_apostrophe`/`central_vowel_marks`.
+    A real-corpus check found zero raw NFD-decomposed central-vowel-mark
+    sequences already present (so that particular confound wasn't actually
+    live in this corpus), but the glottal-stop one was: re-running against
+    the real corpus after this fix (both against `v1`, normalized
+    on-the-fly, and the new `v2` object, normalized at rest — identical
+    results either way, as expected) narrows the previously-reported
+    ~10x-looking `glottal_apostrophe` gap between the two issue #51
+    clusters (95.6 vs. 0.3 matches/1,000 chars using only the ASCII
+    apostrophe, before this fix) down to 87.79 vs. 52.02 matches/1,000
+    chars on `train.tsv` (87.39 vs. 51.85 on `val.tsv`) — in line with the
+    issue's predicted combined-density figure (~95.9 vs. ~52.3). Cluster
+    sizes are unchanged (train: 24,196/8,710, ~73.5%/26.5%; val:
+    2,677/932, ~74.2%/25.8%), confirming this was purely an
+    encoding-normalization fix, not a change to which sentences cluster
+    together.
 - `training/` — SageMaker training job entrypoint (`training/train.py`,
   see below), the code that submits/monitors a real training job and
   registers it in SageMaker Model Registry (`training/submit_job.py`, see

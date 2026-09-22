@@ -10,6 +10,8 @@ logic against a signal we know the answer to.
 
 from __future__ import annotations
 
+import unicodedata
+
 import pytest
 
 from data.dialect_signal import (
@@ -147,6 +149,48 @@ def test_analyze_dialect_signal_reports_aggregate_stats_only():
 def test_analyze_dialect_signal_requires_at_least_two_sentences():
     with pytest.raises(ValueError):
         analyze_dialect_signal([("hola", "utz")], ngram_n=3, top_k_ngrams=10)
+
+
+# Issue #90: `analyze_dialect_signal` must run `data.normalize.normalize_text`
+# over the Kaqchikel side before computing character-level features.
+# Without this, precomposed-vs-decomposed Unicode variants of central
+# vowel marks (a + combining diaeresis vs. a single precomposed "ä") and
+# glottal-stop look-alike codepoints (U+02C8 vs. the ASCII apostrophe)
+# would silently confound the `central_vowel_marks`/`glottal_apostrophe`
+# feature counts, exactly the same root-cause bug class `data.normalize`
+# already exists to fix everywhere else in the pipeline.
+def test_analyze_dialect_signal_normalizes_decomposed_central_vowel_marks():
+    precomposed = "Ri qawäch xuk'ïx ri k'öx."
+    decomposed = unicodedata.normalize("NFD", precomposed)
+    assert decomposed != precomposed  # sanity: fixture actually differs pre-normalization
+
+    pairs_precomposed = [("es a", precomposed), ("es b", "xyz xyz xyz.")]
+    pairs_decomposed = [("es a", decomposed), ("es b", "xyz xyz xyz.")]
+
+    report_precomposed = analyze_dialect_signal(pairs_precomposed, ngram_n=3, top_k_ngrams=50)
+    report_decomposed = analyze_dialect_signal(pairs_decomposed, ngram_n=3, top_k_ngrams=50)
+
+    assert (
+        report_precomposed.feature_frequencies_by_cluster
+        == report_decomposed.feature_frequencies_by_cluster
+    )
+
+
+def test_analyze_dialect_signal_normalizes_glottal_stop_lookalikes():
+    ascii_apostrophe = "Ri k'o' xtz'et jun ch'utin q'apoj."
+    lookalike = ascii_apostrophe.replace("'", "ˈ")
+    assert lookalike != ascii_apostrophe  # sanity: fixture actually differs pre-normalization
+
+    pairs_ascii = [("es a", ascii_apostrophe), ("es b", "xyz xyz xyz.")]
+    pairs_lookalike = [("es a", lookalike), ("es b", "xyz xyz xyz.")]
+
+    report_ascii = analyze_dialect_signal(pairs_ascii, ngram_n=3, top_k_ngrams=50)
+    report_lookalike = analyze_dialect_signal(pairs_lookalike, ngram_n=3, top_k_ngrams=50)
+
+    assert (
+        report_ascii.feature_frequencies_by_cluster
+        == report_lookalike.feature_frequencies_by_cluster
+    )
 
 
 def test_render_report_never_includes_raw_sentence_text():
