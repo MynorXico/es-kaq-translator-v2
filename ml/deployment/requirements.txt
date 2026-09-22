@@ -1,0 +1,10 @@
+# Extra dependencies for the SageMaker Hugging Face Inference Toolkit
+# container running deployment/inference.py (packaged as code/requirements.txt
+# inside the deployable model artifact -- see deployment/package_model.py).
+#
+# The inference DLC already provides transformers/torch; sentencepiece is
+# the one real gap -- M2M100Tokenizer requires it and it is not guaranteed
+# to already be present on the inference image (unlike the training DLC,
+# which this project's ml/training/requirements.txt already installs it
+# for explicitly, for the same reason).
+sentencepiece>=0.2

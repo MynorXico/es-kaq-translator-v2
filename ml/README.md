@@ -165,6 +165,9 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
   Kaqchikel (see below).
 - `evaluation/` — BLEU/chrF evaluation harness and model card generation
   (see below).
+- `deployment/` — custom SageMaker inference handler and the script that
+  registers a training run's artifact as a deployable Model Package
+  version (issue #8, see "Serving" below).
 
 This directory manages its own Python environment with
 [uv](https://docs.astral.sh/uv/):
@@ -623,3 +626,208 @@ the installed `3.x` line is an unrelated, incompatible rewrite) and how the
 (`4.56.2`/`2.8.0`/`py312`) was derived from the installed SDK's own
 HuggingFace DLC compatibility table rather than guessed by hand -- re-check
 that derivation after any future `sagemaker` upgrade.
+
+## Serving (`deployment/`)
+
+Issue #8 stands up the actual SageMaker Serverless Inference endpoint
+(ADR 0001) serving a fine-tuned checkpoint. Two things had to be solved
+that a default SageMaker Hugging Face deployment doesn't handle out of the
+box: (1) this model's translation *direction* is controlled by a custom
+tag mechanism (`training/direction.py`), not M2M100's built-in language
+codes, so a default `text2text-generation` pipeline deployment would
+silently ignore it; (2) SageMaker Model Registry model packages have no
+first-class "separate code location" field, unlike the `Estimator ->
+Model` flow's `source_dir`/`entry_point`, so a custom handler has to be
+bundled *inside* the deployed model artifact itself.
+
+### Request/response contract
+
+`deployment/inference.py` implements the SageMaker Inference Toolkit's
+`model_fn`/`input_fn`/`predict_fn`/`output_fn` hooks. This is the contract
+issue #9's `apps/api` codes against:
+
+Request (`Content-Type: application/json`):
+
+```json
+{"source_lang": "es", "target_lang": "cak", "text": "Buenos días"}
+```
+
+- `source_lang`/`target_lang`: `"es"` or `"cak"`, must differ from each
+  other.
+- `text`: non-empty string (surrounding whitespace is stripped) in the
+  language named by `source_lang`.
+
+Response (`Accept: application/json`):
+
+```json
+{"translated_text": "Utz sq'ij"}
+```
+
+Malformed/invalid requests (missing field, unsupported language code,
+empty text, same source/target, wrong content type) raise `ValueError`
+from `input_fn`/`parse_request`, which SageMaker surfaces as a client
+error response -- confirmed against the real deployed endpoint, not
+assumed (see "Real deployment verification" below).
+
+### Why the model artifact is repackaged (`deployment/package_model.py`)
+
+`sagemaker.huggingface.HuggingFaceModel`'s `entry_point`/`source_dir`
+kwargs are designed for the `Estimator -> Model` flow and upload a
+*separate* code tarball referenced via a `SAGEMAKER_SUBMIT_DIRECTORY`
+environment variable. A Model Registry model package's
+`InferenceSpecification.Containers[]` only has `Image`, `ModelDataUrl`,
+and `Environment` fields -- no first-class separate-code-location concept
+-- so this project's registry-based deployment instead bundles the
+inference code *inside* `ModelDataUrl`'s own tarball, under a top-level
+`code/` directory, which the SageMaker Hugging Face Inference Toolkit
+auto-detects. `build_inference_code_dir` assembles `code/inference.py`,
+`code/requirements.txt` (`sentencepiece`, the one real gap between the
+inference DLC and what `M2M100Tokenizer` needs), and `code/training/`
+(just `__init__.py` + `direction.py` -- the sibling package
+`inference.py` imports `DIRECTION_TAGS`/`tag_source_text` from, mirroring
+`training/submit_job.py`'s `build_source_bundle` reasoning exactly).
+`repackage_model_artifact` extracts the original training artifact, adds
+that `code/` directory, and re-tars everything -- the original
+`model-artifacts/<run>/output/model.tar.gz` (registered separately by
+`training/submit_job.py` against the *training* container image) is never
+modified; the repackaged, inference-ready artifact is uploaded to a
+distinct prefix, `s3://<bucket>/inference-artifacts/<run-id>/model.tar.gz`.
+
+### Registration (`deployment/deploy.py`)
+
+`deployment/deploy.py` ties the above together into a real (billable, but
+cheap -- only S3 transfer + a Model Registry API call, no compute) CLI:
+resolve the environment's `DataStack` bucket, resolve the real HuggingFace
+**inference** DLC image URI (see the module's own docstring for how the
+`transformers`/`pytorch`/`py_version` combination -- `4.49.0`/`2.6.0`/
+`py312`, CPU variant since Serverless Inference doesn't support GPU --
+was derived from the installed SDK's compatibility table, mirroring
+`submit_job.py`'s equivalent derivation for the *training* combination),
+download the source artifact, repackage it, upload it, and register it as
+a new Model Package version in the same
+`traductor-kaqchikel-es-cak` group `training/submit_job.py` already uses:
+
+```sh
+cd ml
+uv run python -m deployment.deploy --dry-run \
+  --source-model-data-url s3://<bucket>/model-artifacts/<run>/output/model.tar.gz
+uv run python -m deployment.deploy \
+  --source-model-data-url s3://<bucket>/model-artifacts/<run>/output/model.tar.gz
+```
+
+**Approval status defaults to `Approved`, not `PendingManualApproval`**
+(unlike `training/submit_job.py`'s training-container registration) --
+see `deploy.py`'s module docstring: the project owner explicitly
+authorized deploying the current best available model as an
+"experimental" release for issue #8, consciously overriding the
+originally planned BLEU>=10 quality gate (issue #76). A UI disclaimer
+communicating this to end users is being added in parallel (issue #43).
+Model Registry's versioning is exactly what makes this reversible at low
+effort: approving a better model's version later and bumping
+`infra/cdk/lib/ml-hosting-stack.ts`'s `DEV_MODEL_PACKAGE_VERSION` constant
+(in `app-stage.ts`) is the entire swap procedure.
+
+### Infrastructure (`infra/cdk/lib/ml-hosting-stack.ts`)
+
+`MlHostingStack` provisions the actual endpoint: a `AWS::SageMaker::Model`
+referencing the approved Model Package (by ARN, *constructed* at synth
+time from a hardcoded version number plus the stack's own account/region
+tokens -- never a literal ARN in source, since that would embed a real
+AWS account ID, forbidden by CLAUDE.md even in infra code), an
+`AWS::SageMaker::EndpointConfig` with a `ServerlessConfig` (6144MB memory
+-- the checkpoint's `model.safetensors` alone is ~2.1GB fp32 given the
+~196k-token extended vocabulary, so this uses Serverless Inference's
+maximum memory tier rather than risk cold-start OOM failures at a lower
+one; `MaxConcurrency: 2`, generous enough for this project's low, bursty
+traffic per ADR 0001's serverless rationale), and the
+`AWS::SageMaker::Endpoint` itself, plus a least-privilege execution role
+(read-only access to the environment's training-data bucket, CloudWatch
+Logs write scoped to `/aws/sagemaker/Endpoints/*` only). The endpoint name
+is exposed as a `CfnOutput` (`MlEndpointName`) for issue #9's `apps/api`
+to resolve at deploy time rather than hardcode.
+
+**Scoped to `dev` only, for now**: SageMaker Model Registry entries are
+account-scoped, and only the `dev` account has a trained, registered,
+approved model today (training only ever runs against `dev`'s corpus
+bucket). Promoting a model to `qa`/`prod` (separate AWS accounts under
+ADR 0001's per-environment-account layout) would need either a duplicated
+registration there or cross-account Model Registry sharing -- neither is
+addressed by ADR 0001, so `app-stage.ts` only instantiates `MlHostingStack`
+for `environmentName === "dev"`. This is a real, un-designed gap flagged
+for a follow-up ticket, not solved here.
+
+### Real deployment verification
+
+Because every environment's stacks are deployed exclusively through the
+self-mutating CDK Pipeline (`infra/cdk/lib/pipeline-stack.ts`, triggered
+by a push to `main` -- see `docs/runbooks/cdk-pipelines-bootstrap.md`),
+`MlHostingStack`'s endpoint cannot actually go live until this ticket's PR
+merges. To confirm the custom inference handler and the repackaged
+artifact genuinely work against the real fine-tuned weights *before*
+merging (per this project's "verify against real AWS, don't just assert
+CDK synth succeeds" convention -- see `training/submit_job.py`'s own
+real-run precedent), a temporary, manually-created SageMaker Serverless
+Inference endpoint (same Model Package, same execution role shape,
+distinct physical name so it can never collide with the one `MlHostingStack`
+creates on merge) was deployed directly via `boto3`/the AWS CLI.
+
+**This real verification found two real bugs**, both now fixed in
+`deployment/inference.py` (see its `output_fn`/`_strip_leading_direction_tag`
+docstrings for the full story) before registering the version this project
+actually deploys:
+
+1. `output_fn` originally returned a `(body, content_type)` tuple. The
+   real `sagemaker-huggingface-inference-toolkit` doesn't use that
+   convention -- it serializes whatever `output_fn` returns as the literal
+   response body -- so the first real invocation returned
+   `["{\"translated_text\": \"...\"}", "application/json"]` instead of the
+   documented `{"translated_text": "..."}` contract. Fixed by returning
+   just the serialized JSON string.
+2. An es->cak request returned `"__cak__ q'ij"` instead of `"q'ij"`.
+   `__es__` is one of M2M100's own pretrained special tokens (stripped
+   automatically by `skip_special_tokens=True`); `__cak__` was added by
+   this project's own vocabulary extension as an ordinary token, so it
+   survived verbatim as the first word of every `cak`-target translation.
+   Fixed with a defensive strip in `translate()`. **This same
+   contamination affects `training.train.generate_translations`'s BLEU/
+   chrF computation for every es->cak example** -- the model card's
+   reported BLEU 8.9 / chrF 31.2 for this checkpoint was very likely
+   computed against es->cak hypotheses with this same stray leading token,
+   which the reference translations never have. This is flagged as a real
+   follow-up (register direction tags as special tokens in
+   `training/tokenizer_extension.py`, then re-evaluate), not silently
+   fixed or re-measured here -- the serving-layer strip makes real user-
+   facing output correct, but the previously-reported metric should be
+   treated as a likely (if hard to quantify without re-running eval)
+   underestimate of a data/tooling artifact's effect, not a clean
+   measurement of translation quality.
+
+The first registered Model Package version (version 3) was rejected in
+Model Registry (`ModelApprovalStatus: Rejected`, with a description
+pointing at this section) once these bugs were found; version 4 --
+registered with the fixes above -- is the one `MlHostingStack` actually
+deploys.
+
+With the fixes in place, real `InvokeEndpoint` calls against the temporary
+verification endpoint confirmed:
+
+- `{"source_lang": "es", "target_lang": "cak", "text": "Buenos días"}` ->
+  `{"translated_text": "q'ij"}`
+- `{"source_lang": "cak", "target_lang": "es", "text": "La utz awäch?"}` ->
+  `{"translated_text": "bueno lado"}`
+- `{"source_lang": "es", "target_lang": "es", "text": "hola"}` (invalid:
+  same source/target) -> HTTP 400 with the `ValueError` message in the
+  body, confirming the documented error-handling contract holds for real,
+  not just in unit tests.
+
+Translation quality itself is poor by inspection (`"bueno lado"` for "La
+utz awäch?" is not a coherent Spanish translation) -- consistent with the
+low BLEU 8.9 / chrF 31.2 already reported and the explicit "experimental"
+framing this deployment ships under (issue #43's UI disclaimer). This
+verification confirms the *pipeline* works end-to-end (request in,
+direction-tag logic applied, real weights invoked, response out, matching
+the documented contract), not that the model translates well -- those are
+deliberately different claims (see `docs/testing.md`).
+
+The temporary verification endpoint, endpoint configs, and models were all
+deleted after this verification; nothing from it persists in AWS.
