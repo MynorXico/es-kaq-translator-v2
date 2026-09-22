@@ -4,10 +4,12 @@ export interface TranslateResult {
   translation: string;
 }
 
-// Matches apps/api's ALLOWED_ORIGINS default (see apps/api/app/config.py),
-// which assumes a locally-running FastAPI dev server on this port. Real
-// environments override this via VITE_API_BASE_URL, set at build/deploy
-// time once those origins exist (see apps/web/README.md).
+// uvicorn's default port for `apps/api`'s dev server (see apps/api/README.md
+// -- ALLOWED_ORIGINS there defaults to *this* app's dev origin,
+// http://localhost:5173, for the reverse direction: allowing apps/web to
+// call apps/api cross-origin). Real environments override this via
+// VITE_API_BASE_URL, set at build/deploy time once those origins exist
+// (see apps/web/README.md).
 const DEFAULT_API_BASE_URL = "http://localhost:8000";
 
 // apps/api's Serverless Inference-backed endpoint can have real cold-start

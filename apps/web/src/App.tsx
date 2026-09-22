@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   translate,
   TranslateHttpError,
@@ -55,26 +55,38 @@ export default function App() {
   const [direction, setDirection] = useState<TranslationDirection>("es-to-cak");
   const [input, setInput] = useState("");
   const [translateState, setTranslateState] = useState<TranslateState>({ status: "idle" });
+  // Bumped whenever the current translate() call should be considered
+  // abandoned (a new one starts, or the direction changes mid-request), so
+  // a stale response can't clobber state that no longer belongs to it.
+  const requestIdRef = useRef(0);
 
   const isOverLimit = input.length > MAX_INPUT_LENGTH;
   const isTranslating = translateState.status === "loading" || translateState.status === "warming";
 
   function toggleDirection() {
+    requestIdRef.current += 1;
     setDirection((current) => (current === "es-to-cak" ? "cak-to-es" : "es-to-cak"));
     setTranslateState({ status: "idle" });
   }
 
   async function runTranslate() {
+    const requestId = ++requestIdRef.current;
     setTranslateState({ status: "loading" });
     const warmingTimer = setTimeout(() => {
-      setTranslateState({ status: "warming" });
+      if (requestIdRef.current === requestId) {
+        setTranslateState({ status: "warming" });
+      }
     }, WARMING_UP_DELAY_MS);
 
     try {
       const result = await translate(input, direction);
-      setTranslateState({ status: "success", translation: result.translation });
+      if (requestIdRef.current === requestId) {
+        setTranslateState({ status: "success", translation: result.translation });
+      }
     } catch (error) {
-      setTranslateState({ status: "error", kind: classifyError(error) });
+      if (requestIdRef.current === requestId) {
+        setTranslateState({ status: "error", kind: classifyError(error) });
+      }
     } finally {
       clearTimeout(warmingTimer);
     }
@@ -157,7 +169,12 @@ export default function App() {
               <p className="output-error-message">
                 <span aria-hidden="true">⚠</span> <span>{statusMessage}</span>
               </p>
-              <button type="button" className="button-outline" onClick={runTranslate}>
+              <button
+                type="button"
+                className="button-outline"
+                onClick={runTranslate}
+                disabled={isTranslating}
+              >
                 Reintentar
               </button>
             </div>

@@ -202,4 +202,28 @@ describe("App translate flow", () => {
     expect(mockedTranslate).toHaveBeenLastCalledWith("Hola, buenos días", "es-to-cak");
     expect(await screen.findByLabelText("Traducción")).toHaveValue("Utz");
   });
+
+  it("ignores a stale in-flight response after the direction is switched mid-request", async () => {
+    const { promise, resolve } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByText("Traduciendo…");
+
+    fireEvent.click(screen.getByRole("button", { name: "Español → Kaqchikel" }));
+
+    expect(screen.getByRole("button", { name: "Kaqchikel → Español" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+
+    await act(async () => {
+      resolve({ translation: "Utz" });
+    });
+
+    // The stale response belonged to the abandoned request; the UI should
+    // still be idle, not showing that translation.
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
+  });
 });
