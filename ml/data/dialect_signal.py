@@ -45,6 +45,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from data.corpus_io import SentencePair, read_tsv_pairs
+from data.normalize import normalize_text
 
 # Regex patterns for orthographic features documented in the Kaqchikel
 # dialectology/orthography literature (see module docstring). Each is a
@@ -195,8 +196,16 @@ def analyze_dialect_signal(
     Raises:
         ValueError: if fewer than 2 non-blank Kaqchikel sentences are
             present -- a 2-way cluster split is meaningless below that.
+
+    Note (issue #90): each Kaqchikel sentence is run through
+    `data.normalize.normalize_text` before any character-level feature is
+    computed, so precomposed-vs-decomposed Unicode variants (e.g. "ä" vs.
+    "a" + combining diaeresis) and glottal-stop look-alike codepoints (e.g.
+    U+02C8 vs. the ASCII apostrophe) can't silently confound
+    `central_vowel_marks`/`glottal_apostrophe` -- the same root-cause bug
+    class `data.normalize` exists to fix everywhere else in the pipeline.
     """
-    kaqchikel_sentences = [cak for _, cak in pairs if cak.strip()]
+    kaqchikel_sentences = [normalize_text(cak) for _, cak in pairs if cak.strip()]
     if len(kaqchikel_sentences) < 2:
         raise ValueError(
             "analyze_dialect_signal requires at least 2 non-blank Kaqchikel "
