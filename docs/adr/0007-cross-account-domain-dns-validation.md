@@ -1,6 +1,6 @@
 # ADR 0007: Cross-account custom-domain DNS and ACM validation
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-22
 
 ## Context
