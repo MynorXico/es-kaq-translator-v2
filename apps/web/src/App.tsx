@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   translate,
   TranslateHttpError,
@@ -6,11 +6,11 @@ import {
   type TranslationDirection,
 } from "./api";
 import { AboutPage } from "./AboutPage";
-import { CheckIcon, CopyIcon, XCircleIcon } from "./icons";
+import { CheckIcon, CopyIcon, SwapIcon, XCircleIcon } from "./icons";
 
-const DIRECTION_LABELS: Record<TranslationDirection, string> = {
-  "es-to-cak": "Español → Kaqchikel",
-  "cak-to-es": "Kaqchikel → Español",
+const LANGUAGE_LABELS: Record<TranslationDirection, { source: string; target: string }> = {
+  "es-to-cak": { source: "Español", target: "Kaqchikel" },
+  "cak-to-es": { source: "Kaqchikel", target: "Español" },
 };
 
 // Mirrors apps/api's TranslateRequest.text max_length (apps/api/app/models.py).
@@ -63,20 +63,48 @@ export default function App() {
   const [input, setInput] = useState("");
   const [translateState, setTranslateState] = useState<TranslateState>({ status: "idle" });
   const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [announcement, setAnnouncement] = useState("");
   // Bumped whenever the current translate() call should be considered
-  // abandoned (a new one starts, or the direction changes mid-request), so
-  // a stale response can't clobber state that no longer belongs to it.
+  // abandoned (a new one starts, or the direction/input changes mid-request),
+  // so a stale response can't clobber state that no longer belongs to it.
   const requestIdRef = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const copyRevertTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  // Set by handleSwap when it carries text into the input, so the caret can
+  // be moved to the end once that new value has actually committed to the DOM.
+  const pendingCaretEndRef = useRef(false);
 
   const isOverLimit = input.length > MAX_INPUT_LENGTH;
   const isTranslating = translateState.status === "loading" || translateState.status === "warming";
 
-  function toggleDirection() {
+  useEffect(() => {
+    if (!pendingCaretEndRef.current) {
+      return;
+    }
+    pendingCaretEndRef.current = false;
+    const el = inputRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  }, [input]);
+
+  function handleSwap() {
     requestIdRef.current += 1;
-    setDirection((current) => (current === "es-to-cak" ? "cak-to-es" : "es-to-cak"));
+    clearTimeout(copyRevertTimerRef.current);
+
+    const nextDirection = direction === "es-to-cak" ? "cak-to-es" : "es-to-cak";
+    const nextLabels = LANGUAGE_LABELS[nextDirection];
+
+    if (translateState.status === "success") {
+      pendingCaretEndRef.current = true;
+      setInput(translateState.translation);
+    }
+
+    setDirection(nextDirection);
     setTranslateState({ status: "idle" });
+    setCopyState("idle");
+    setAnnouncement(`Dirección cambiada: ${nextLabels.source} a ${nextLabels.target}.`);
   }
 
   async function runTranslate() {
@@ -155,6 +183,8 @@ export default function App() {
   const copyLabel =
     copyState === "success" ? "Copiado" : copyState === "error" ? "No se pudo copiar" : "Copiar";
 
+  const { source: sourceLabel, target: targetLabel } = LANGUAGE_LABELS[direction];
+
   return (
     <>
       <header className="app-header">
@@ -166,9 +196,18 @@ export default function App() {
         <h1>Traductor Kaqchikel</h1>
         <p>Traducción español ↔ kaqchikel</p>
 
-        <button type="button" onClick={toggleDirection}>
-          {DIRECTION_LABELS[direction]}
-        </button>
+        <div className="direction-row">
+          <span className="direction-label direction-label--source">{sourceLabel}</span>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={handleSwap}
+            aria-label="Cambiar dirección"
+          >
+            <SwapIcon />
+          </button>
+          <span className="direction-label direction-label--target">{targetLabel}</span>
+        </div>
 
         <textarea
           ref={inputRef}
@@ -211,6 +250,8 @@ export default function App() {
         </button>
 
         <div className="output-card" role="status" aria-live="polite">
+          <span className="sr-only">{announcement}</span>
+
           <div className="output-header">
             <p className="eyebrow">Traducción</p>
 

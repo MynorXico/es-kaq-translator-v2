@@ -26,10 +26,11 @@ function deferred<T>() {
 }
 
 describe("App", () => {
-  it("renders the translator title and direction toggle", () => {
+  it("renders the translator title and the source/target direction labels", () => {
     render(<App />);
     expect(screen.getByText("Traductor Kaqchikel")).toBeInTheDocument();
-    expect(screen.getByText("Español → Kaqchikel")).toBeInTheDocument();
+    expect(screen.getByText("Español")).toBeInTheDocument();
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
   });
 
   it("shows a character counter that updates as the user types", () => {
@@ -70,7 +71,8 @@ describe("App", () => {
     const translateLink = screen.getByRole("button", { name: "Traducir" });
     fireEvent.click(translateLink);
 
-    expect(screen.getByText("Español → Kaqchikel")).toBeInTheDocument();
+    expect(screen.getByText("Español")).toBeInTheDocument();
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
   });
 });
 
@@ -203,7 +205,7 @@ describe("App translate flow", () => {
     expect(await screen.findByLabelText("Traducción")).toHaveValue("Utz");
   });
 
-  it("ignores a stale in-flight response after the direction is switched mid-request", async () => {
+  it("ignores a stale in-flight response after the direction is swapped mid-request", async () => {
     const { promise, resolve } = deferred<{ translation: string }>();
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
@@ -212,9 +214,13 @@ describe("App translate flow", () => {
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     await screen.findByText("Traduciendo…");
 
-    fireEvent.click(screen.getByRole("button", { name: "Español → Kaqchikel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
 
-    expect(screen.getByRole("button", { name: "Kaqchikel → Español" })).toBeInTheDocument();
+    // Nothing to carry over while a request is in flight (no successful
+    // translation yet), so the direction just flips and the input is left
+    // untouched, per spec.
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
+    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
     expect(screen.getByLabelText("Traducción")).toHaveValue("");
 
     await act(async () => {
@@ -360,5 +366,86 @@ describe("App copy and clear affordances", () => {
     });
 
     expect(screen.getByRole("button", { name: "Copiar" })).toBeInTheDocument();
+  });
+});
+
+describe("App direction swap", () => {
+  beforeEach(() => {
+    mockedTranslate.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("carries a successful translation into the input, flips direction, clears output, and moves the caret to the end", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    });
+    await screen.findByLabelText("Traducción");
+    expect(screen.getByLabelText("Traducción")).toHaveValue("Utz");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto a traducir");
+    expect(input).toHaveValue("Utz");
+    expect(input).toHaveFocus();
+    expect(input.selectionStart).toBe(input.value.length);
+    expect(input.selectionEnd).toBe(input.value.length);
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText("Traducción")).toHaveAttribute(
+      "placeholder",
+      "La traducción aparecerá aquí.",
+    );
+  });
+
+  it("leaves the input untouched when swapping from idle (nothing to carry over)", () => {
+    render(<App />);
+    const input = screen.getByLabelText("Texto a traducir");
+    fireEvent.change(input, { target: { value: "Hola" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    expect(input).toHaveValue("Hola");
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
+  });
+
+  it("clears an error and leaves the input untouched when swapping", async () => {
+    mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByRole("button", { name: "Reintentar" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
+    expect(
+      screen.queryByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("always flips direction, even with nothing to carry over", () => {
+    render(<App />);
+    expect(screen.getByText("Español")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+    expect(screen.getByText("Español")).toBeInTheDocument();
+  });
+
+  it("announces the direction change through the shared status region", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    expect(screen.getByText("Dirección cambiada: Kaqchikel a Español.")).toBeInTheDocument();
   });
 });

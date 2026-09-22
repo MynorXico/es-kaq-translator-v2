@@ -47,3 +47,14 @@ export function CheckIcon(props: SVGProps<SVGSVGElement>) {
     </IconBase>
   );
 }
+
+export function SwapIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase {...props}>
+      <polyline points="7 4 3 8 7 12" />
+      <line x1="3" y1="8" x2="21" y2="8" />
+      <polyline points="17 12 21 16 17 20" />
+      <line x1="21" y1="16" x2="3" y2="16" />
+    </IconBase>
+  );
+}
