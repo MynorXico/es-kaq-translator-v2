@@ -63,6 +63,40 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     clean <input> <output>` or `... validate-split <train> <val>`. Never
     run this against real corpus data in this repo/CI — only against S3
     paths from an authorized environment.
+  - `data/dialect_signal.py` — diagnostic tool for issue #51 (the ALMG
+    corpus mixes two unlabeled Kaqchikel dialectal variants, per
+    `docs/data-governance.md`/project memory). `analyze_dialect_signal`
+    computes two purely computational, aggregate-only signals over the
+    Kaqchikel side of a corpus: (1) an unsupervised 2-way cluster split
+    over character n-gram frequencies (`build_ngram_vectors` +
+    `kmeans_two_clusters`, deterministic k-means with a "farthest pair"
+    init), and (2) frequency counts for orthographic features known from
+    Kaqchikel dialectology to vary across dialects/orthographic eras
+    (`feature_frequencies`): tense/long vowel doubling ("aa", "ee", ...),
+    central vowel marks ("ä", "ë", "ï", "ö", "ü"), apostrophe-marked
+    glottalized consonants ("k'", "tz'", ...), and word-initial "h" (a
+    proxy for older Mayan-language orthographies that used "h" where the
+    modern ALMG standard uses "j"). **Every public function returns only
+    counts/frequencies/cluster sizes — never sentence text** (ADR 0002):
+    `render_report`'s output is safe to paste into a public GitHub issue
+    as-is, and `tests/integration/test_dialect_signal_cli.py` asserts this
+    holds for the real CLI output, not just by convention.
+
+    This is a diagnostic hypothesis-generator, not a labeling authority —
+    an n-gram cluster split can reflect topic/register/source-document
+    differences as easily as dialect, and the feature list is grounded in
+    general Kaqchikel dialectology literature (Kaqchikel has ~11
+    recognized regional dialects; see module docstring for sources), not
+    validated against this specific corpus. Treat its output as a starting
+    point for human/expert review, not a ground-truth split to act on
+    directly.
+
+    Run against a real corpus file from an environment with S3 access:
+    `uv run python -m data.dialect_signal s3://<bucket>/corpus/almg/v1/train.tsv`
+    (or a local path). Never run this in CI/this repo's test suite against
+    real data — `tests/unit/test_dialect_signal.py` and
+    `tests/integration/test_dialect_signal_cli.py` only ever use tiny,
+    hand-written synthetic fixtures with a designed two-group signal.
 - `training/` — SageMaker training job entrypoint (`training/train.py`,
   see below), the code that submits/monitors a real training job and
   registers it in SageMaker Model Registry (`training/submit_job.py`, see
