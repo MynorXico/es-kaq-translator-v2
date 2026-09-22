@@ -178,7 +178,7 @@ button {
 .nav-link:focus-visible,
 button:focus-visible,
 a:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 3px solid var(--primary);
   outline-offset: 2px;
 }
 

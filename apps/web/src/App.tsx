@@ -13,6 +13,14 @@ const LANGUAGE_LABELS: Record<TranslationDirection, { source: string; target: st
   "cak-to-es": { source: "Kaqchikel", target: "Español" },
 };
 
+// BCP-47-ish language tags for the `lang` attribute on the input/output
+// textareas (WCAG 3.1.2 Language of Parts). "cak" is Kaqchikel's ISO 639-3
+// code -- there's no ISO 639-1 two-letter code for it.
+const LANGUAGE_TAGS: Record<TranslationDirection, { source: string; target: string }> = {
+  "es-to-cak": { source: "es", target: "cak" },
+  "cak-to-es": { source: "cak", target: "es" },
+};
+
 // Mirrors apps/api's TranslateRequest.text max_length (apps/api/app/models.py).
 const MAX_INPUT_LENGTH = 2000;
 
@@ -70,6 +78,7 @@ export default function App() {
   // Not touched by ordinary typing.
   const requestIdRef = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const outputRef = useRef<HTMLTextAreaElement>(null);
   const copyRevertTimerRef = useRef<ReturnType<typeof setTimeout>>();
   // Bumped (unconditionally) by handleSwap whenever it carries text into the
   // input, to trigger the caret-to-end effect below exactly once per swap.
@@ -95,6 +104,15 @@ export default function App() {
       el.setSelectionRange(el.value.length, el.value.length);
     }
   }, [caretResetToken]);
+
+  // Focus management (WCAG 2.4.3): once a translation resolves, move focus
+  // to the result so a screen reader user lands on it immediately, rather
+  // than staying on the (now-disabled) "Traducir" button.
+  useEffect(() => {
+    if (translateState.status === "success") {
+      outputRef.current?.focus();
+    }
+  }, [translateState]);
 
   function handleSwap() {
     requestIdRef.current += 1;
@@ -191,6 +209,9 @@ export default function App() {
     copyState === "success" ? "Copiado" : copyState === "error" ? "No se pudo copiar" : "Copiar";
 
   const { source: sourceLabel, target: targetLabel } = LANGUAGE_LABELS[direction];
+  const { source: sourceLang, target: targetLang } = LANGUAGE_TAGS[direction];
+  const inputAriaLabel = `Texto en ${sourceLabel.toLowerCase()}`;
+  const outputAriaLabel = `Traducción en ${targetLabel.toLowerCase()}`;
 
   return (
     <>
@@ -218,7 +239,8 @@ export default function App() {
 
         <textarea
           ref={inputRef}
-          aria-label="Texto a traducir"
+          aria-label={inputAriaLabel}
+          lang={sourceLang}
           placeholder="Escribe aquí..."
           value={input}
           onChange={(event) => setInput(event.target.value)}
@@ -292,7 +314,9 @@ export default function App() {
               </div>
             ) : (
               <textarea
-                aria-label="Traducción"
+                ref={outputRef}
+                aria-label={outputAriaLabel}
+                lang={targetLang}
                 placeholder={OUTPUT_PLACEHOLDER}
                 value={translateState.status === "success" ? translateState.translation : ""}
                 readOnly
