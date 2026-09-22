@@ -212,6 +212,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    parser.add_argument("--weight-decay", type=float, default=0.01)
+    parser.add_argument("--label-smoothing", type=float, default=0.1)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument(
         "--model-package-group-name",
         default=DEFAULT_MODEL_PACKAGE_GROUP_NAME,
@@ -369,6 +373,10 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
         "learning-rate": args.learning_rate,
         "max-length": args.max_length,
         "seed": args.seed,
+        "warmup-ratio": args.warmup_ratio,
+        "weight-decay": args.weight_decay,
+        "label-smoothing": args.label_smoothing,
+        "gradient-accumulation-steps": args.gradient_accumulation_steps,
     }
     if args.init_model_s3_uri:
         hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
@@ -677,6 +685,12 @@ def main(argv: list[str] | None = None) -> int:
             "learning_rate": config["hyperparameters"]["learning-rate"],
             "max_length": config["hyperparameters"]["max-length"],
             "seed": config["hyperparameters"]["seed"],
+            "warmup_ratio": config["hyperparameters"]["warmup-ratio"],
+            "weight_decay": config["hyperparameters"]["weight-decay"],
+            "label_smoothing": config["hyperparameters"]["label-smoothing"],
+            "gradient_accumulation_steps": config["hyperparameters"][
+                "gradient-accumulation-steps"
+            ],
         },
     }
 

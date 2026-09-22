@@ -312,6 +312,9 @@ bill forever), `--corpus-version`, `--direction`, `--run-id`, `--base-model`,
 `--init-model-s3-uri` (continue training from a previous run's artifact --
 see "Continuing training from a checkpoint" below), `--epochs`,
 `--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
+`--warmup-ratio`, `--weight-decay`, `--label-smoothing`,
+`--gradient-accumulation-steps` (regularization/schedule settings, issue
+#79 -- see "Regularization and schedule settings" below),
 `--model-package-group-name`, `--approval-status` (default
 `PendingManualApproval` -- a human reviews BLEU/chrF before approving),
 `--no-wait` (submit without blocking/monitoring; also skips registration,
@@ -345,6 +348,46 @@ from, not literally what this run loaded. The model card's `notes` field
 flags when a run was a continuation, and its `train_sentence_count`/
 `hyperparameters` describe only that run's additional training, not the
 full cumulative history across every continuation.
+
+### Regularization and schedule settings
+
+Issue #66's first run (3 epochs, no regularization) scored BLEU 3.0/chrF
+20.4; issue #76's continuation (+5 epochs, same bare-minimum config)
+reached BLEU 6.9/chrF 28.6 -- clearly still undertrained, and a code
+review flagged the training config itself as a likely contributor: zero
+LR warmup interacts badly with the ~62K freshly cold-started embedding
+rows from vocab extension, and there was no weight decay, label
+smoothing, or gradient accumulation at all (effective batch size 8 is
+small/noisy for a vocab this size). Issue #79 adds `--warmup-ratio`
+(default 0.05), `--weight-decay` (default 0.01), `--label-smoothing`
+(default 0.1), and `--gradient-accumulation-steps` (default 4, raising
+effective batch size to `--batch-size * this`) to close that gap.
+`fp16=True` is also now hardcoded in `build_training_arguments` (a fixed
+real-GPU speed/cost optimization, not a per-run experiment).
+
+`--warmup-ratio` is converted to an absolute `warmup_steps` count inside
+`build_training_arguments` rather than passed straight through --
+the installed `transformers` version's `Seq2SeqTrainingArguments` no
+longer accepts a `warmup_ratio` kwarg at all, confirmed by a real
+`TypeError` when this was first written directly. `accelerate` was also
+added as a real dependency (`ml/pyproject.toml`,
+`training/requirements.txt`): this transformers version requires it even
+just to construct `TrainingArguments` with `fp16=True`, confirmed the
+same way.
+
+`build_training_arguments` (the `Seq2SeqTrainingArguments` construction,
+previously inline in `fine_tune`) is now its own function specifically so
+these settings have real, direct unit test coverage
+(`tests/unit/test_build_training_arguments.py`) -- constructing
+`Seq2SeqTrainingArguments` is cheap and CPU-safe, unlike the rest of
+`fine_tune`, which stays untestable in CI for the reasons documented in
+its own docstring.
+
+These fixes are a config-only pass -- a separate, bigger redesign of the
+whole-word vocab-extension strategy (`ml/training/vocab_gap.py`, which
+adds entire Kaqchikel word-forms as atomic tokens rather than subwords,
+likely a bigger factor for an agglutinative language) was flagged as a
+follow-up, not addressed here.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call) and prints the full would-be job config --

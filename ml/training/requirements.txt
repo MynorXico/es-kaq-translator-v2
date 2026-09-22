@@ -13,3 +13,4 @@ sentencepiece>=0.2
 sacrebleu>=2.4
 boto3>=1.34
 numpy>=1.26
+accelerate>=1.1.0

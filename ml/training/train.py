@@ -61,6 +61,7 @@ same "duck-type and fixture" approach as `training/tokenizer_extension.py`
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import tempfile
 from collections.abc import Callable, Sequence
@@ -175,6 +176,42 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=5e-5)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=0.05,
+        help=(
+            "Fraction of total training steps used to linearly warm up the "
+            "learning rate (issue #79). Zero warmup interacts badly with the "
+            "large fraction of freshly cold-started embedding rows from "
+            "vocab extension (see extend_vocabulary_for_examples). Converted "
+            "to an absolute warmup_steps count in build_training_arguments, "
+            "since the installed transformers version's "
+            "Seq2SeqTrainingArguments no longer accepts warmup_ratio directly."
+        ),
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.01,
+        help="L2 weight decay applied by the optimizer (issue #79).",
+    )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.1,
+        help="Label smoothing factor for the cross-entropy loss (issue #79).",
+    )
+    parser.add_argument(
+        "--gradient-accumulation-steps",
+        type=int,
+        default=4,
+        help=(
+            "Accumulate gradients over this many steps before an optimizer "
+            "update, raising the effective batch size (--batch-size * this) "
+            "without needing more GPU memory (issue #79)."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -292,6 +329,56 @@ class TranslationDataset:
         return model_inputs
 
 
+def build_training_arguments(args: argparse.Namespace, num_train_examples: int) -> Any:
+    """Build the `transformers.Seq2SeqTrainingArguments` for `fine_tune`.
+
+    Pulled out into its own function specifically so it's directly unit
+    testable (see `tests/unit/test_build_training_arguments.py`) without
+    needing a real model/tokenizer/forward pass -- `Seq2SeqTrainingArguments`
+    is a cheap, CPU-safe dataclass to construct on its own, unlike the rest
+    of `fine_tune`. This closes a real gap: before issue #79, the
+    regularization/schedule settings added here (warmup, weight decay,
+    label smoothing, gradient accumulation) had zero test coverage, since
+    `fine_tune` as a whole is never exercised directly by the CPU-only test
+    suite (see `fine_tune`'s own docstring).
+
+    `--warmup-ratio` is converted to an absolute `warmup_steps` count here
+    rather than passed straight through: the installed `transformers`
+    version's `Seq2SeqTrainingArguments` no longer accepts a `warmup_ratio`
+    kwarg at all (only `warmup_steps`) -- confirmed by a real `TypeError`
+    when this was first written directly, not assumed from documentation.
+    `num_train_examples` is needed to compute total optimizer steps
+    (`ceil(num_train_examples / (batch_size * gradient_accumulation_steps))
+    * epochs`) that the ratio is a fraction of.
+    """
+    from transformers import Seq2SeqTrainingArguments
+
+    effective_batch_size = args.batch_size * args.gradient_accumulation_steps
+    steps_per_epoch = math.ceil(num_train_examples / effective_batch_size)
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = round(args.warmup_ratio * total_steps)
+
+    return Seq2SeqTrainingArguments(
+        output_dir=str(Path(args.model_dir) / "checkpoints"),
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        per_device_eval_batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        warmup_steps=warmup_steps,
+        weight_decay=args.weight_decay,
+        label_smoothing_factor=args.label_smoothing,
+        # Fixed, not a CLI flag -- a real-GPU-only speed/cost optimization,
+        # not something to experiment with per run. Harmless to construct
+        # on CPU (this dataclass doesn't touch hardware), only relevant
+        # once `Seq2SeqTrainer.train()` actually runs on a real GPU job.
+        fp16=True,
+        seed=args.seed,
+        save_strategy="no",
+        report_to=[],
+    )
+
+
 def fine_tune(
     model: Any,
     tokenizer: Any,
@@ -307,25 +394,16 @@ def fine_tune(
     via `run_training_job`'s `trainer` parameter, since a real forward/
     backward pass is out of scope for a fast wiring test (and running a
     real multi-epoch fine-tune here would be issue #66's job, not this
-    one's).
+    one's). `build_training_arguments` above is tested directly instead.
     """
-    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer, Seq2SeqTrainingArguments
+    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer
 
     train_dataset = TranslationDataset(train_examples, tokenizer, args.max_length)
     eval_dataset = (
         TranslationDataset(eval_examples, tokenizer, args.max_length) if eval_examples else None
     )
 
-    training_args = Seq2SeqTrainingArguments(
-        output_dir=str(Path(args.model_dir) / "checkpoints"),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.batch_size,
-        per_device_eval_batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        seed=args.seed,
-        save_strategy="no",
-        report_to=[],
-    )
+    training_args = build_training_arguments(args, len(train_examples))
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
 
     trainer = Seq2SeqTrainer(
@@ -485,6 +563,10 @@ def run_training_job(
             "learning_rate": args.learning_rate,
             "max_length": args.max_length,
             "seed": args.seed,
+            "warmup_ratio": args.warmup_ratio,
+            "weight_decay": args.weight_decay,
+            "label_smoothing": args.label_smoothing,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
             "new_tokens_added": len(added_tokens),
             "resumed_from_checkpoint": bool(args.init_model),
         },
