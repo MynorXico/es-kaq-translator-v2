@@ -11,6 +11,7 @@ from training.direction import (
     SPANISH,
     TranslationExample,
     build_direction_examples,
+    collect_texts_for_language,
     tag_source_text,
 )
 
@@ -59,3 +60,33 @@ def test_build_direction_examples_both_doubles_the_examples_in_each_direction():
 def test_build_direction_examples_rejects_unknown_direction():
     with pytest.raises(ValueError):
         build_direction_examples(PAIRS, "en->fr")
+
+
+def test_collect_texts_for_language_extracts_kaqchikel_side_regardless_of_direction():
+    examples = build_direction_examples(PAIRS, "both")
+
+    kaqchikel_texts = collect_texts_for_language(examples, KAQCHIKEL)
+
+    # Both directions surface the same Kaqchikel sentences: once as the
+    # target (es->cak examples) and once as the source (cak->es examples).
+    assert sorted(kaqchikel_texts) == sorted(["Utz awäch", "Matyox", "Utz awäch", "Matyox"])
+    assert "Buenos días" not in kaqchikel_texts
+    assert "Gracias" not in kaqchikel_texts
+
+
+def test_collect_texts_for_language_reads_from_target_when_language_is_the_target():
+    examples = build_direction_examples(PAIRS, "es->cak")
+
+    assert collect_texts_for_language(examples, KAQCHIKEL) == ["Utz awäch", "Matyox"]
+
+
+def test_collect_texts_for_language_reads_from_source_when_language_is_the_source():
+    examples = build_direction_examples(PAIRS, "cak->es")
+
+    assert collect_texts_for_language(examples, KAQCHIKEL) == ["Utz awäch", "Matyox"]
+
+
+def test_collect_texts_for_language_returns_empty_list_when_language_not_present():
+    examples = build_direction_examples(PAIRS, "es->cak")
+
+    assert collect_texts_for_language(examples, "fr") == []
