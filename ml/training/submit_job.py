@@ -93,6 +93,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import botocore.exceptions
 from sagemaker.huggingface import HuggingFace
 from sagemaker.inputs import TrainingInput
 
@@ -512,8 +513,18 @@ def parse_model_card_metrics(model_card_text: str) -> dict[str, str]:
 
 def ensure_model_package_group(sm_client: Any, group_name: str, description: str) -> None:
     """Create the Model Package Group if it doesn't already exist.
-    Idempotent: a `ResourceInUse` error (AWS's response when the group
-    already exists) is treated as success.
+
+    Idempotent: treats "already exists" as success. This was assumed to
+    surface as a `ResourceInUse` error, and unit tests mocked exactly
+    that -- but the real `CreateModelPackageGroup` API actually raises a
+    generic `ValidationException` with the message "Model Package Group
+    already exists" for this case, which the original `except
+    sm_client.exceptions.ResourceInUse` clause never caught. This wasn't
+    caught by tests because the mock matched the assumption, not the real
+    API -- it only surfaced on the second-ever real registration call for
+    this project (issue #76's continuation run), once the group already
+    existed from #66's first registration. Catching `ResourceInUse` too,
+    in case some other AWS SDK version or code path does use it.
     """
     try:
         sm_client.create_model_package_group(
@@ -522,6 +533,13 @@ def ensure_model_package_group(sm_client: Any, group_name: str, description: str
         )
     except sm_client.exceptions.ResourceInUse:
         pass
+    except botocore.exceptions.ClientError as error:
+        error_info = error.response.get("Error", {})
+        is_already_exists = error_info.get(
+            "Code"
+        ) == "ValidationException" and "already exists" in error_info.get("Message", "")
+        if not is_already_exists:
+            raise
 
 
 def _build_customer_metadata(run_metadata: dict[str, Any], metrics: dict[str, str]) -> dict[str, str]:
