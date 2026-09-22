@@ -553,4 +553,30 @@ describe("App accessibility", () => {
     expect(output).toHaveValue("Utz");
     expect(output).toHaveFocus();
   });
+
+  it("does not steal focus from the input if the user is still typing when a translation resolves", async () => {
+    const { promise, resolve } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    render(<App />);
+
+    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto en español");
+    fireEvent.change(input, { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByText("Traduciendo…");
+
+    // The user keeps typing their next query while the previous request is
+    // still in flight -- the input isn't disabled while translating.
+    input.focus();
+    fireEvent.change(input, { target: { value: "Hola, ¿cómo estás?" } });
+    expect(input).toHaveFocus();
+
+    await act(async () => {
+      resolve({ translation: "Utz" });
+    });
+
+    // Focus (and whatever the user was typing) must stay on the input --
+    // it must not get yanked into the now-populated output textarea.
+    expect(input).toHaveFocus();
+    expect(input).toHaveValue("Hola, ¿cómo estás?");
+  });
 });
