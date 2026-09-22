@@ -64,30 +64,37 @@ export default function App() {
   const [translateState, setTranslateState] = useState<TranslateState>({ status: "idle" });
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [announcement, setAnnouncement] = useState("");
-  // Bumped whenever the current translate() call should be considered
-  // abandoned (a new one starts, or the direction/input changes mid-request),
-  // so a stale response can't clobber state that no longer belongs to it.
+  // Bumped by runTranslate (a new request starting) and by handleSwap/
+  // handleClear (abandoning whatever request is in flight), so a response
+  // for a request that's no longer current can't clobber later state.
+  // Not touched by ordinary typing.
   const requestIdRef = useRef(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const copyRevertTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  // Set by handleSwap when it carries text into the input, so the caret can
-  // be moved to the end once that new value has actually committed to the DOM.
-  const pendingCaretEndRef = useRef(false);
+  // Bumped (unconditionally) by handleSwap whenever it carries text into the
+  // input, to trigger the caret-to-end effect below exactly once per swap.
+  // Deliberately not keyed off `input` itself: if the carried-over
+  // translation happens to equal the current input by value, setInput()
+  // becomes a no-op React update that never changes `input`, which would
+  // leave an `[input]`-keyed effect permanently "armed" to hijack focus/
+  // caret on some later, unrelated edit.
+  const [caretResetToken, setCaretResetToken] = useState(0);
+  const isInitialCaretEffectRef = useRef(true);
 
   const isOverLimit = input.length > MAX_INPUT_LENGTH;
   const isTranslating = translateState.status === "loading" || translateState.status === "warming";
 
   useEffect(() => {
-    if (!pendingCaretEndRef.current) {
+    if (isInitialCaretEffectRef.current) {
+      isInitialCaretEffectRef.current = false;
       return;
     }
-    pendingCaretEndRef.current = false;
     const el = inputRef.current;
     if (el) {
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
     }
-  }, [input]);
+  }, [caretResetToken]);
 
   function handleSwap() {
     requestIdRef.current += 1;
@@ -97,8 +104,8 @@ export default function App() {
     const nextLabels = LANGUAGE_LABELS[nextDirection];
 
     if (translateState.status === "success") {
-      pendingCaretEndRef.current = true;
       setInput(translateState.translation);
+      setCaretResetToken((token) => token + 1);
     }
 
     setDirection(nextDirection);

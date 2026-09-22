@@ -232,6 +232,42 @@ describe("App translate flow", () => {
     expect(screen.getByLabelText("Traducción")).toHaveValue("");
     expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
   });
+
+  it("ignores a stale in-flight response after the direction is swapped mid-warming", async () => {
+    vi.useFakeTimers();
+    const { promise, resolve } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(
+      screen.getByText("Calentando el modelo. Puede tardar hasta un minuto."),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    // Same as swapping mid-loading: nothing to carry over yet, so the
+    // direction just flips and the input is left untouched.
+    expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
+    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+
+    await act(async () => {
+      resolve({ translation: "Utz" });
+    });
+
+    // The stale response belonged to the abandoned request; the UI should
+    // still be idle, not showing that translation.
+    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(
+      screen.queryByText("Calentando el modelo. Puede tardar hasta un minuto."),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("App copy and clear affordances", () => {
@@ -401,6 +437,35 @@ describe("App direction swap", () => {
       "placeholder",
       "La traducción aparecerá aquí.",
     );
+  });
+
+  it("does not re-steal focus on a later, unrelated edit when the carried-over text equals the current input", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Hola" });
+    render(<App />);
+    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto a traducir");
+    const swapButton = screen.getByRole("button", { name: "Cambiar dirección" });
+
+    fireEvent.change(input, { target: { value: "Hola" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    });
+    expect(screen.getByLabelText("Traducción")).toHaveValue("Hola");
+
+    // The carried-over translation ("Hola") is identical by value to the
+    // current input ("Hola"): setInput() is a no-op React update here.
+    fireEvent.click(swapButton);
+    expect(input).toHaveFocus();
+
+    // Move focus elsewhere (simulating the user clicking away), then make
+    // an unrelated edit to the input.
+    swapButton.focus();
+    expect(swapButton).toHaveFocus();
+    fireEvent.change(input, { target: { value: "Holaa" } });
+
+    // A same-value carry-over must not leave the caret-reset behavior
+    // "armed" for the next unrelated edit -- focus should stay wherever it
+    // was, not jump back to the input.
+    expect(swapButton).toHaveFocus();
   });
 
   it("leaves the input untouched when swapping from idle (nothing to carry over)", () => {

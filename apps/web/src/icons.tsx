@@ -1,7 +1,16 @@
-// Minimal stroke-icon placeholders (per #52's design spec) used alongside a
-// text label -- never icon-only, so an infrequent digital-tool user isn't
-// left guessing. Decorative only: the visible label is what conveys meaning,
-// so these are always aria-hidden.
+// Minimal stroke-icon placeholders (per #52's design spec). Decorative only
+// (always aria-hidden): meaning is conveyed by a visible text label, or by
+// an aria-label on the button itself for the one sanctioned icon-only
+// exception below.
+//
+// Default pattern: icon + visible text label, never icon-only, so an
+// infrequent digital-tool user isn't left guessing (see the Borrar/Copiar
+// buttons, #38).
+//
+// Sanctioned exception: the direction-swap button (#39) is icon-only by
+// design -- #52's spec places it as a compact control between the two
+// direction labels, Google-Translate-style, with an `aria-label` carrying
+// its accessible name instead of visible text.
 import type { SVGProps } from "react";
 
 function IconBase(props: SVGProps<SVGSVGElement>) {

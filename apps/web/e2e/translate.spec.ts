@@ -37,6 +37,36 @@ test("swapping carries a successful translation into the input", async ({ page }
   await expect(page.getByLabel("Traducción")).toHaveValue("");
 });
 
+test("does not force the caret to the end on a later edit when the carried-over text equals the current input", async ({
+  page,
+}) => {
+  await page.route("**/v1/translate", (route) =>
+    route.fulfill({ json: { translation: "Hola" } }),
+  );
+
+  await page.goto("/");
+  const input = page.getByLabel("Texto a traducir");
+  await input.fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+  await expect(page.getByLabel("Traducción")).toHaveValue("Hola");
+
+  // The carried-over translation ("Hola") equals the current input value.
+  await page.getByRole("button", { name: "Cambiar dirección" }).click();
+  await expect(input).toHaveValue("Hola");
+  await expect(input).toBeFocused();
+
+  // Move the caret to right after "Ho" and type a character there.
+  await input.press("Home");
+  await input.press("ArrowRight");
+  await input.press("ArrowRight");
+  await input.pressSequentially("X");
+
+  // If the caret-reset behavior were still "armed" from the same-value
+  // swap, it would force the caret to the end on this keystroke, landing
+  // "X" at the end ("HolaX") instead of where it was actually typed.
+  await expect(input).toHaveValue("HoXla");
+});
+
 test("translate button is disabled until text is entered", async ({ page }) => {
   await page.goto("/");
   const translateButton = page.getByRole("button", { name: "Traducir" });
