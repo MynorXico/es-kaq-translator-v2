@@ -84,6 +84,43 @@ button {
   color: var(--text);
 }
 
+.direction-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.direction-label {
+  font-weight: 600;
+}
+
+.direction-label--source {
+  color: var(--primary);
+}
+
+.direction-label--target {
+  color: var(--text-muted);
+}
+
+.icon-button {
+  align-self: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.icon-button:hover {
+  color: var(--primary-hover);
+  border-color: var(--primary);
+}
+
 .char-counter {
   margin: -0.5rem 0 0;
   font-size: 0.875rem;
