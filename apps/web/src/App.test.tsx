@@ -35,7 +35,7 @@ describe("App", () => {
 
   it("shows a character counter that updates as the user types", () => {
     render(<App />);
-    const input = screen.getByLabelText("Texto a traducir");
+    const input = screen.getByLabelText(/^Texto en /);
 
     expect(screen.getByText("0 / 2000")).toBeInTheDocument();
 
@@ -46,7 +46,7 @@ describe("App", () => {
 
   it("disables translation and explains why once the input exceeds 2000 characters", () => {
     render(<App />);
-    const input = screen.getByLabelText("Texto a traducir");
+    const input = screen.getByLabelText(/^Texto en /);
     const translateButton = screen.getByRole("button", { name: "Traducir" });
 
     fireEvent.change(input, { target: { value: "a".repeat(2001) } });
@@ -87,7 +87,7 @@ describe("App translate flow", () => {
 
   it("shows the idle placeholder before any translation is submitted", () => {
     render(<App />);
-    expect(screen.getByLabelText("Traducción")).toHaveAttribute(
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveAttribute(
       "placeholder",
       "La traducción aparecerá aquí.",
     );
@@ -98,7 +98,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(await screen.findByText("Traduciendo…")).toBeInTheDocument();
@@ -108,7 +108,7 @@ describe("App translate flow", () => {
       resolve({ translation: "Utz" });
     });
 
-    expect(await screen.findByLabelText("Traducción")).toHaveValue("Utz");
+    expect(await screen.findByLabelText(/^Traducción en /)).toHaveValue("Utz");
   });
 
   it("switches to a warming-up message if there's still no response after 4 seconds", async () => {
@@ -117,7 +117,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(screen.getByText("Traduciendo…")).toBeInTheDocument();
@@ -135,7 +135,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(
@@ -150,7 +150,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateHttpError(400));
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(
@@ -164,7 +164,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateHttpError(500));
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(
@@ -176,7 +176,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateTimeoutError());
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     expect(
@@ -191,18 +191,18 @@ describe("App translate flow", () => {
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     await screen.findByRole("button", { name: "Reintentar" });
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), {
+    fireEvent.change(screen.getByLabelText(/^Texto en /), {
       target: { value: "Hola, buenos días" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
 
     await waitFor(() => expect(mockedTranslate).toHaveBeenCalledTimes(2));
     expect(mockedTranslate).toHaveBeenLastCalledWith("Hola, buenos días", "es-to-cak");
-    expect(await screen.findByLabelText("Traducción")).toHaveValue("Utz");
+    expect(await screen.findByLabelText(/^Traducción en /)).toHaveValue("Utz");
   });
 
   it("ignores a stale in-flight response after the direction is swapped mid-request", async () => {
@@ -210,7 +210,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     await screen.findByText("Traduciendo…");
 
@@ -220,8 +220,8 @@ describe("App translate flow", () => {
     // translation yet), so the direction just flips and the input is left
     // untouched, per spec.
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
-    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Texto en /)).toHaveValue("Hola");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
 
     await act(async () => {
       resolve({ translation: "Utz" });
@@ -229,7 +229,7 @@ describe("App translate flow", () => {
 
     // The stale response belonged to the abandoned request; the UI should
     // still be idle, not showing that translation.
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
     expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
   });
 
@@ -239,7 +239,7 @@ describe("App translate flow", () => {
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     await act(async () => {
@@ -254,8 +254,8 @@ describe("App translate flow", () => {
     // Same as swapping mid-loading: nothing to carry over yet, so the
     // direction just flips and the input is left untouched.
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
-    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Texto en /)).toHaveValue("Hola");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
 
     await act(async () => {
       resolve({ translation: "Utz" });
@@ -263,7 +263,7 @@ describe("App translate flow", () => {
 
     // The stale response belonged to the abandoned request; the UI should
     // still be idle, not showing that translation.
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
     expect(
       screen.queryByText("Calentando el modelo. Puede tardar hasta un minuto."),
     ).not.toBeInTheDocument();
@@ -289,7 +289,7 @@ describe("App copy and clear affordances", () => {
   it("shows the clear button once the user types, and clicking it clears input, output, and error state, then refocuses the input", async () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
     render(<App />);
-    const input = screen.getByLabelText("Texto a traducir");
+    const input = screen.getByLabelText(/^Texto en /);
 
     fireEvent.change(input, { target: { value: "Hola" } });
     expect(
@@ -305,7 +305,7 @@ describe("App copy and clear affordances", () => {
     expect(
       screen.queryByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
     ).not.toBeInTheDocument();
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
     expect(input).toHaveFocus();
     expect(
       screen.queryByRole("button", { name: "Borrar el texto de entrada" }),
@@ -317,14 +317,14 @@ describe("App copy and clear affordances", () => {
     mockedTranslate.mockReturnValue(promise);
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     await screen.findByText("Traduciendo…");
 
     fireEvent.click(screen.getByRole("button", { name: "Borrar el texto de entrada" }));
 
-    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("");
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Texto en /)).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
 
     await act(async () => {
       resolve({ translation: "Utz" });
@@ -332,7 +332,7 @@ describe("App copy and clear affordances", () => {
 
     // The stale response belonged to the abandoned (now-cleared) request;
     // the UI should still be idle, not showing that translation.
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
     expect(screen.queryByText("Traduciendo…")).not.toBeInTheDocument();
   });
 
@@ -341,7 +341,7 @@ describe("App copy and clear affordances", () => {
     expect(screen.queryByRole("button", { name: "Copiar" })).not.toBeInTheDocument();
 
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
 
     await screen.findByRole("button", { name: "Copiar" });
@@ -357,7 +357,7 @@ describe("App copy and clear affordances", () => {
 
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     });
@@ -386,7 +386,7 @@ describe("App copy and clear affordances", () => {
 
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
     render(<App />);
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     });
@@ -418,22 +418,22 @@ describe("App direction swap", () => {
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     });
-    await screen.findByLabelText("Traducción");
-    expect(screen.getByLabelText("Traducción")).toHaveValue("Utz");
+    await screen.findByLabelText(/^Traducción en /);
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("Utz");
 
     fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
 
-    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto a traducir");
+    const input = screen.getByLabelText<HTMLTextAreaElement>(/^Texto en /);
     expect(input).toHaveValue("Utz");
     expect(input).toHaveFocus();
     expect(input.selectionStart).toBe(input.value.length);
     expect(input.selectionEnd).toBe(input.value.length);
-    expect(screen.getByLabelText("Traducción")).toHaveValue("");
-    expect(screen.getByLabelText("Traducción")).toHaveAttribute(
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveAttribute(
       "placeholder",
       "La traducción aparecerá aquí.",
     );
@@ -442,14 +442,14 @@ describe("App direction swap", () => {
   it("does not re-steal focus on a later, unrelated edit when the carried-over text equals the current input", async () => {
     mockedTranslate.mockResolvedValueOnce({ translation: "Hola" });
     render(<App />);
-    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto a traducir");
+    const input = screen.getByLabelText<HTMLTextAreaElement>(/^Texto en /);
     const swapButton = screen.getByRole("button", { name: "Cambiar dirección" });
 
     fireEvent.change(input, { target: { value: "Hola" } });
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     });
-    expect(screen.getByLabelText("Traducción")).toHaveValue("Hola");
+    expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("Hola");
 
     // The carried-over translation ("Hola") is identical by value to the
     // current input ("Hola"): setInput() is a no-op React update here.
@@ -470,7 +470,7 @@ describe("App direction swap", () => {
 
   it("leaves the input untouched when swapping from idle (nothing to carry over)", () => {
     render(<App />);
-    const input = screen.getByLabelText("Texto a traducir");
+    const input = screen.getByLabelText(/^Texto en /);
     fireEvent.change(input, { target: { value: "Hola" } });
 
     fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
@@ -483,13 +483,13 @@ describe("App direction swap", () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
     render(<App />);
 
-    fireEvent.change(screen.getByLabelText("Texto a traducir"), { target: { value: "Hola" } });
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
     fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
     await screen.findByRole("button", { name: "Reintentar" });
 
     fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
 
-    expect(screen.getByLabelText("Texto a traducir")).toHaveValue("Hola");
+    expect(screen.getByLabelText(/^Texto en /)).toHaveValue("Hola");
     expect(
       screen.queryByText("No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo."),
     ).not.toBeInTheDocument();
@@ -512,5 +512,45 @@ describe("App direction swap", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
 
     expect(screen.getByText("Dirección cambiada: Kaqchikel a Español.")).toBeInTheDocument();
+  });
+});
+
+describe("App accessibility", () => {
+  beforeEach(() => {
+    mockedTranslate.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("gives the input and output distinct, direction-matching accessible names and lang attributes", () => {
+    render(<App />);
+
+    const input = screen.getByLabelText<HTMLTextAreaElement>("Texto en español");
+    const output = screen.getByLabelText<HTMLTextAreaElement>("Traducción en kaqchikel");
+    expect(input).toHaveAttribute("lang", "es");
+    expect(output).toHaveAttribute("lang", "cak");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+
+    const swappedInput = screen.getByLabelText<HTMLTextAreaElement>("Texto en kaqchikel");
+    const swappedOutput = screen.getByLabelText<HTMLTextAreaElement>("Traducción en español");
+    expect(swappedInput).toHaveAttribute("lang", "cak");
+    expect(swappedOutput).toHaveAttribute("lang", "es");
+  });
+
+  it("moves focus to the output textarea once a translation succeeds", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText("Texto en español"), { target: { value: "Hola" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    });
+
+    const output = screen.getByLabelText("Traducción en kaqchikel");
+    expect(output).toHaveValue("Utz");
+    expect(output).toHaveFocus();
   });
 });
