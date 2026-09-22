@@ -13,6 +13,7 @@ import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import botocore.exceptions
 import pytest
 
 from training import submit_job
@@ -429,6 +430,35 @@ def test_ensure_model_package_group_is_idempotent_when_already_exists():
 
     # Should not raise.
     submit_job.ensure_model_package_group(fake_sm, "traductor-kaqchikel", "desc")
+
+
+def test_ensure_model_package_group_is_idempotent_on_the_real_validation_exception():
+    # Reproduces the actual bug found in production (issue #76): the real
+    # CreateModelPackageGroup API raises a generic ValidationException with
+    # this message when the group already exists, not ResourceInUse.
+    fake_sm = MagicMock()
+    fake_sm.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm.create_model_package_group.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "Model Package Group already exists"}},
+        "CreateModelPackageGroup",
+    )
+
+    # Should not raise.
+    submit_job.ensure_model_package_group(fake_sm, "traductor-kaqchikel", "desc")
+
+
+def test_ensure_model_package_group_reraises_other_validation_exceptions():
+    # A ValidationException for a genuinely different reason must not be
+    # swallowed -- only "already exists" is safe to ignore.
+    fake_sm = MagicMock()
+    fake_sm.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm.create_model_package_group.side_effect = botocore.exceptions.ClientError(
+        {"Error": {"Code": "ValidationException", "Message": "Some other real problem"}},
+        "CreateModelPackageGroup",
+    )
+
+    with pytest.raises(botocore.exceptions.ClientError):
+        submit_job.ensure_model_package_group(fake_sm, "traductor-kaqchikel", "desc")
 
 
 def test_register_model_creates_model_package_with_metadata(monkeypatch):
