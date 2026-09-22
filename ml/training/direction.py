@@ -84,6 +84,42 @@ def tag_source_text(source_text: str, target_lang: str) -> str:
     return f"{DIRECTION_TAGS[target_lang]} {source_text}"
 
 
+def strip_leading_direction_tag(text: str, target_lang: str) -> str:
+    """Defensively strip a literal leading direction-tag token from decoded
+    generation output.
+
+    `__es__` is one of M2M100's own pretrained language codes, already
+    registered as a special token in the base checkpoint's tokenizer, so
+    `tokenizer.batch_decode(..., skip_special_tokens=True)` already strips
+    it from `es`-target output. `__cak__`, however, was added by this
+    project's own `training.tokenizer_extension` (`add_tokens`, see
+    `ml/README.md`'s vocabulary-extension sections) as an ordinary
+    vocabulary token, *not* registered as a special token -- so
+    `skip_special_tokens=True` does not strip it, and it survives verbatim
+    as the literal first word of every `cak`-target generation.
+
+    This is a real correctness gap in the shared tokenizer-extension
+    mechanism (`training/tokenizer_extension.py`), not something specific
+    to any one caller. It was first found (and fixed, as a serving-layer
+    safety net) in `deployment/inference.py`'s real-time translation path
+    for issue #8: an es->cak request returned `"__cak__ q'ij"` instead of
+    `"q'ij"` before that fix. It turned out to affect
+    `training.train.generate_translations`'s BLEU/chrF computation too
+    (issue #106) -- every real training run's reported es->cak
+    hypotheses were generated with this same stray prefix, which the
+    reference translations never have, biasing every combined-direction
+    BLEU/chrF number reported so far downward (a spurious non-matching
+    leading token can only ever hurt n-gram precision / character-level
+    match, never inflate it). Both callers now share this single
+    implementation so they can't drift apart again -- see `ml/README.md`'s
+    note on this bug for the full history.
+    """
+    tag = DIRECTION_TAGS[target_lang]
+    if text.startswith(tag):
+        return text[len(tag) :].lstrip()
+    return text
+
+
 def build_direction_examples(
     pairs: list[tuple[str, str]], direction: str
 ) -> list[TranslationExample]:

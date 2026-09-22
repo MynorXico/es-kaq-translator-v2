@@ -224,6 +224,32 @@ that the wrapper calls `sacrebleu` correctly (identical hypothesis/
 reference scores near 100, an unrelated hypothesis scores low), not that
 the model itself translates well.
 
+**Known bug affecting every real BLEU/chrF number reported before issue
+#106 (fixed): es->cak hypotheses were contaminated by a leaked direction
+tag.** `training.train.generate_translations` — the function that
+generates the hypotheses these metrics are computed against for every
+real training run (#66, #76, the hyperparameter run, #82) — had the same
+`__cak__`-leak bug independently found and fixed in
+`deployment/inference.py`'s real-time serving path for issue #8 (see
+"Real deployment verification" below): every es->cak hypothesis came out
+as e.g. `"__cak__ Utz awäch?"` instead of `"Utz awäch?"`, because
+`__cak__` is an ordinary added-vocab token (not a real special token like
+`__es__`), so `tokenizer.batch_decode(..., skip_special_tokens=True)`
+never stripped it. cak->es was unaffected. A spurious non-matching
+leading token can only ever hurt n-gram precision (BLEU) / character-level
+match (chrF), never inflate them, so **every combined-direction score
+reported so far (BLEU 3.0/6.9/8.6/8.9, chrF 20.4/28.6/31.2/31.2 — see
+"Regularization and schedule settings" and "Real deployment verification"
+below) is a likely underestimate for the es->cak-contributed half of that
+number, not an overestimate.** True model quality is probably somewhat
+higher than recorded. The fix
+(`training.direction.strip_leading_direction_tag`, shared by both
+`generate_translations` and `deployment/inference.py`'s `translate()` so
+they can't drift apart again) is a pure bugfix, applied without
+retraining — **none of the numbers above have been re-measured with the
+fix applied**; re-evaluating the current best checkpoint's true BLEU/chrF
+is a separate, tracked follow-up, not done as part of #106.
+
 See [`docs/adr/0001-initial-architecture.md`](../docs/adr/0001-initial-architecture.md)
 for the modeling approach and
 [`docs/adr/0003-base-model-license-verification.md`](../docs/adr/0003-base-model-license-verification.md)
@@ -551,7 +577,10 @@ full cumulative history across every continuation.
 
 Issue #66's first run (3 epochs, no regularization) scored BLEU 3.0/chrF
 20.4; issue #76's continuation (+5 epochs, same bare-minimum config)
-reached BLEU 6.9/chrF 28.6 -- clearly still undertrained, and a code
+reached BLEU 6.9/chrF 28.6 -- clearly still undertrained (and, per the
+"Known bug" note under "Evaluation harness" above, computed before issue
+#106's direction-tag-leak fix, so the es->cak half of each of these
+numbers is a likely underestimate), and a code
 review flagged the training config itself as a likely contributor: zero
 LR warmup interacts badly with the ~62K freshly cold-started embedding
 rows from vocab extension, and there was no weight decay, label
@@ -772,9 +801,10 @@ distinct physical name so it can never collide with the one `MlHostingStack`
 creates on merge) was deployed directly via `boto3`/the AWS CLI.
 
 **This real verification found two real bugs**, both now fixed in
-`deployment/inference.py` (see its `output_fn`/`_strip_leading_direction_tag`
-docstrings for the full story) before registering the version this project
-actually deploys:
+`deployment/inference.py` (see its `output_fn` docstring, and
+`training.direction.strip_leading_direction_tag`'s docstring for the
+direction-tag leak, for the full story) before registering the version
+this project actually deploys:
 
 1. `output_fn` originally returned a `(body, content_type)` tuple. The
    real `sagemaker-huggingface-inference-toolkit` doesn't use that
@@ -789,18 +819,21 @@ actually deploys:
    this project's own vocabulary extension as an ordinary token, so it
    survived verbatim as the first word of every `cak`-target translation.
    Fixed with a defensive strip in `translate()`. **This same
-   contamination affects `training.train.generate_translations`'s BLEU/
+   contamination affected `training.train.generate_translations`'s BLEU/
    chrF computation for every es->cak example** -- the model card's
    reported BLEU 8.9 / chrF 31.2 for this checkpoint was very likely
    computed against es->cak hypotheses with this same stray leading token,
-   which the reference translations never have. This is flagged as a real
-   follow-up (register direction tags as special tokens in
-   `training/tokenizer_extension.py`, then re-evaluate), not silently
-   fixed or re-measured here -- the serving-layer strip makes real user-
-   facing output correct, but the previously-reported metric should be
-   treated as a likely (if hard to quantify without re-running eval)
-   underestimate of a data/tooling artifact's effect, not a clean
-   measurement of translation quality.
+   which the reference translations never have. At the time this was
+   found (issue #8), fixing the training-side leak and re-evaluating was
+   flagged as a follow-up rather than done immediately. **That follow-up
+   is issue #106**: `generate_translations` now shares the exact same fix
+   (`training.direction.strip_leading_direction_tag`, extracted so
+   `deployment/inference.py` and `training/train.py` can't drift apart on
+   this again) rather than a second independent implementation. #106 was
+   a pure bugfix + regression test, deliberately **not** a retrain or
+   re-evaluation -- see the "Known bug" note under "Evaluation harness"
+   above for what is/isn't fixed as of that ticket. Every BLEU/chrF number
+   in this README predates the fix and should be read with that caveat.
 
 The first registered Model Package version (version 3) was rejected in
 Model Registry (`ModelApprovalStatus: Rejected`, with a description

@@ -12,6 +12,7 @@ from training.direction import (
     TranslationExample,
     build_direction_examples,
     collect_texts_for_language,
+    strip_leading_direction_tag,
     tag_source_text,
 )
 
@@ -90,3 +91,30 @@ def test_collect_texts_for_language_returns_empty_list_when_language_not_present
     examples = build_direction_examples(PAIRS, "es->cak")
 
     assert collect_texts_for_language(examples, "fr") == []
+
+
+# ---------------------------------------------------------------------------
+# strip_leading_direction_tag (issue #106): shared by training.train.
+# generate_translations and deployment.inference.translate, so both callers
+# can't drift apart on this again -- see the function's own docstring for
+# the real bug this guards against (__cak__ is an ordinary added-vocab
+# token, not a real special token like __es__, so
+# tokenizer.batch_decode(..., skip_special_tokens=True) never strips it).
+# ---------------------------------------------------------------------------
+
+
+def test_strip_leading_direction_tag_strips_a_literal_leading_cak_tag():
+    assert strip_leading_direction_tag("__cak__ Utz awäch?", KAQCHIKEL) == "Utz awäch?"
+
+
+def test_strip_leading_direction_tag_strips_a_literal_leading_es_tag():
+    # __es__ already gets stripped by skip_special_tokens=True in practice
+    # (it's a real pretrained special token), but the shared helper must
+    # still strip it correctly if it were ever present, so a future
+    # regression in either direction is caught here directly.
+    assert strip_leading_direction_tag("__es__ Buenos días", SPANISH) == "Buenos días"
+
+
+def test_strip_leading_direction_tag_leaves_text_without_a_leading_tag_untouched():
+    assert strip_leading_direction_tag("Utz awäch?", KAQCHIKEL) == "Utz awäch?"
+    assert strip_leading_direction_tag("Buenos días", SPANISH) == "Buenos días"
