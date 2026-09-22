@@ -9,11 +9,17 @@ on every push to `main`, with a manual approval gate before `Prod`. See
 design and [ADR 0001](../../docs/adr/0001-initial-architecture.md) for the
 overall AWS layout.
 
-Per-environment infrastructure (currently just `WebStack`, an S3 bucket
-placeholder for the future SPA hosting) is defined once in
-`lib/app-stage.ts`'s `TranslatorStage` and instantiated per stage inside the
-pipeline — adding a new stack to every environment means adding it there,
-not writing new per-environment deploy scripts.
+Per-environment infrastructure is defined once in `lib/app-stage.ts`'s
+`TranslatorStage` and instantiated per stage inside the pipeline — adding a
+new stack to every environment means adding it there, not writing new
+per-environment deploy scripts. Currently:
+
+- `WebStack` — an S3 bucket placeholder for the future SPA hosting.
+- `DataStack` — private training data bucket + SageMaker execution role.
+- `ApiStack` — `apps/api` (FastAPI) deployed as a Lambda container image
+  behind an API Gateway HTTP API (see its doc comment in
+  `lib/api-stack.ts` for the environment-variable contract used to wire in
+  the SageMaker Serverless Inference endpoint from issue #8/#9).
 
 ## Setup
 
