@@ -85,6 +85,11 @@ test("submitting a translation shows a result", async ({ page }) => {
   await page.getByLabel(/^Texto en /).fill("Hola");
   await page.getByRole("button", { name: "Traducir" }).click();
   await expect(page.getByLabel(/^Traducción en /)).not.toHaveValue("");
+  await expect(
+    page.getByText(
+      "Esta traducción fue generada automáticamente por un modelo en desarrollo y puede contener errores.",
+    ),
+  ).toBeVisible();
 });
 
 test("shows a Spanish error message and a working retry button on a network failure", async ({
