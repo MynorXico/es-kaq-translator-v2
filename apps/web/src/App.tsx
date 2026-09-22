@@ -31,6 +31,14 @@ const WARMING_UP_DELAY_MS = 4000;
 
 const OUTPUT_PLACEHOLDER = "La traducción aparecerá aquí.";
 
+// Always shown alongside a successful translation (issue #43): the model is
+// fine-tuned on a low-resource language and won't be perfect at launch, so
+// results shouldn't be presented without a caveat. Deliberately generic
+// about "Kaqchikel" -- the training corpus mixes two unlabeled dialectal
+// variants, so no variant-specific claim can be made honestly (see #51/#90).
+const QUALITY_DISCLAIMER =
+  "Esta traducción fue generada automáticamente por un modelo en desarrollo y puede contener errores.";
+
 // How long the "Copiado"/"No se pudo copiar" confirmation replaces the
 // "Copiar" label before reverting.
 const COPY_FEEDBACK_MS = 2000;
@@ -328,6 +336,10 @@ export default function App() {
               />
             )}
           </div>
+
+          {translateState.status === "success" && (
+            <p className="output-disclaimer">{QUALITY_DISCLAIMER}</p>
+          )}
         </div>
       </main>
     </>
