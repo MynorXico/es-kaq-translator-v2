@@ -36,6 +36,18 @@ describe("App", () => {
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
   });
 
+  it("renders the #52 app-shell structure (stripe, app-bar, field-cards)", () => {
+    const { container } = render(<App />);
+
+    const stripe = container.querySelector(".stripe");
+    expect(stripe).not.toBeNull();
+    expect(stripe).toHaveAttribute("aria-hidden", "true");
+
+    expect(container.querySelector(".app-shell")).not.toBeNull();
+    expect(container.querySelector(".appbar")).not.toBeNull();
+    expect(container.querySelectorAll(".field-card").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("shows a character counter that updates as the user types", () => {
     render(<App />);
     const input = screen.getByLabelText(/^Texto en /);
@@ -62,7 +74,7 @@ describe("App", () => {
   });
 
   it("navigates to the About page via the header nav link, and back via the same slot", () => {
-    render(<App />);
+    const { container } = render(<App />);
 
     const aboutLink = screen.getByRole("button", { name: "Acerca de" });
     fireEvent.click(aboutLink);
@@ -70,6 +82,10 @@ describe("App", () => {
     expect(
       screen.getByRole("heading", { name: "Acerca de Traductor Kaqchikel" }),
     ).toBeInTheDocument();
+    // The About view gets the same app-shell/app-bar treatment as the
+    // translator view (#111's acceptance criteria).
+    expect(container.querySelector(".app-shell")).not.toBeNull();
+    expect(container.querySelector(".appbar")).not.toBeNull();
 
     const translateLink = screen.getByRole("button", { name: "Traducir" });
     fireEvent.click(translateLink);
