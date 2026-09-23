@@ -166,7 +166,8 @@ per certificate, with no new persistent cross-account IAM trust.**
 - `docs/runbooks/domain-and-dns.md` needs a new section with the exact
   `acm describe-certificate` / validation-record / alias-record commands,
   the pipeline-stall warning above, and the `newCertificateAck` guard.
-  Done as part of this ADR (see "What's not done yet"), along with two
+  Done as part of this ADR (see the "Cross-account ACM validation and
+  record creation" section), along with two
   smaller notes: the validation CNAME must be marked **do not delete**
   (ACM needs it to persist indefinitely for auto-renewal to keep
   working, and it will otherwise look like stale zone clutter to a

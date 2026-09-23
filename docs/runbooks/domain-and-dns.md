@@ -169,10 +169,15 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
 
    ```sh
    aws cloudformation describe-stacks --profile translator-dev \
-     --region us-east-1 --stack-name TraductorKaqchikel-Pipeline-Dev-Web \
+     --region us-east-1 --stack-name Dev-Web \
      --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" \
      --output text
    ```
+
+   (`Dev-Web` is the actual CloudFormation stack name here — confirmed
+   against a real deploy; this is a plain `aws cloudformation` call, so it
+   takes the CloudFormation-side name, not the CDK construct path from
+   step 2 above.)
 
    Then:
 
