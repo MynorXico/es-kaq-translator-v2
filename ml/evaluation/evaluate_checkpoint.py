@@ -52,14 +52,14 @@ reported BLEU/chrF numbers), this script:
 ## Testing
 
 Same "duck-type and fixture" approach as `tests/integration/
-test_train_pipeline.py`: `tests/integration/test_evaluate_checkpoint.py`
+test_train_pipeline.py`: `tests/integration/test_evaluate_checkpoint_pipeline.py`
 exercises the wiring (checkpoint resolution -> tokenizer/model loading ->
 direction-tagged example building -> translation -> evaluation -> model
 card) against tiny fixture data and duck-typed fakes, never a real
 checkpoint download or a real `model.generate()` call.
 `resolve_checkpoint_source`'s S3-download + tar-extraction logic is
 unit-tested directly against a fake S3 client
-(`tests/unit/test_evaluate_checkpoint.py`), mirroring
+(`tests/unit/test_evaluate_checkpoint_source.py`), mirroring
 `training.train.resolve_model_source`'s local-only equivalent.
 """
 
@@ -237,7 +237,7 @@ def run_checkpoint_evaluation(
     `training.train.extend_vocabulary_for_examples` -- see this module's
     own docstring for why. `resolve_source`/`model_loader`/`translator`
     default to the real implementations above; tests inject fakes in
-    their place (see `tests/integration/test_evaluate_checkpoint.py`).
+    their place (see `tests/integration/test_evaluate_checkpoint_pipeline.py`).
     """
     run_id = args.run_id or datetime.now(UTC).strftime("reeval-%Y%m%dT%H%M%SZ")
 
