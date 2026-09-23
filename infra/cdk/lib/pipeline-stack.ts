@@ -37,6 +37,24 @@ export interface PipelineConfig {
    * handling) -- not a real HTTP 404.
    */
   webApiBaseUrl?: string;
+  /**
+   * Per-environment domain name that had a successfully DNS-validated ACM
+   * certificate as of the last runbook update (ADR 0007), fetched by
+   * `bin/app.ts` from `/traductor-kaqchikel/domains/{env}-web-cert-domain`
+   * SSM parameters. An absent entry for a given environment means "no
+   * certificate has ever been validated for it yet" -- `WebStack`'s
+   * synth-time guard (`assertCertificateChangeAcknowledged`) treats that
+   * the same as a mismatch, not an automatic match.
+   */
+  previouslyValidatedWebCertDomains?: Partial<Record<"dev" | "qa" | "prod", string>>;
+  /**
+   * Mirrors CDK context `newCertificateAck` (ADR 0007): an explicit human
+   * acknowledgement that this synth is expected to introduce a new/changed
+   * ACM certificate for at least one environment, and that a human will
+   * watch the resulting isolated `cdk deploy` for the manual DNS
+   * validation step it will block on. Defaults to `false`.
+   */
+  newCertificateAck?: boolean;
 }
 
 // Every SSM parameter this project owns lives under this path (ADR 0004).
@@ -99,6 +117,8 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
   const devStage = new TranslatorStage(stack, "Dev", {
     environmentName: "dev",
     webSiteContentPath,
+    previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.dev,
+    newCertificateAck: config.newCertificateAck,
     env: { account: config.devAccount, region: config.region },
   });
   pipeline.addStage(devStage);
@@ -106,6 +126,8 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
   const qaStage = new TranslatorStage(stack, "Qa", {
     environmentName: "qa",
     webSiteContentPath,
+    previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.qa,
+    newCertificateAck: config.newCertificateAck,
     env: { account: config.qaAccount, region: config.region },
   });
   pipeline.addStage(qaStage);
@@ -113,6 +135,8 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
   const prodStage = new TranslatorStage(stack, "Prod", {
     environmentName: "prod",
     webSiteContentPath,
+    previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.prod,
+    newCertificateAck: config.newCertificateAck,
     env: { account: config.prodAccount, region: config.region },
   });
   pipeline.addStage(prodStage, {

@@ -123,36 +123,81 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    catch that failure mode early, before the certificate actually
    expires.
 5. Once the distribution/custom domain exists, create the final alias
-   record with the (to-be-written) helper script under `infra/scripts/`
-   against the `translator-tooling` profile, rather than console
-   clicking.
+   record with `infra/scripts/upsert-domain-record.sh` against the
+   `translator-tooling` profile, rather than console clicking. Get the
+   CloudFront distribution's domain from `WebStack`'s own
+   `DistributionDomainName` output:
+
+   ```sh
+   aws cloudformation describe-stacks --profile translator-dev \
+     --region us-east-1 --stack-name TraductorKaqchikel-Pipeline-Dev-Web \
+     --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" \
+     --output text
+   ```
+
+   Then:
+
+   ```sh
+   PROFILE=translator-tooling \
+   RECORD_NAME=app-dev.traductorkaqchikel.com \
+   TARGET_DNS_NAME=<distribution-domain-from-above> \
+   ./infra/scripts/upsert-domain-record.sh
+   ```
+
+   The script is idempotent (Route 53 `UPSERT`) — safe to re-run any time
+   the target changes (e.g. the distribution was replaced). It only
+   touches the final alias record, never the validation CNAME from step 4.
+   The future `ApiStack` custom domain (#96) reuses the same script with
+   an explicit `TARGET_HOSTED_ZONE_ID` (API Gateway's regional alias-target
+   zone ID, which — unlike CloudFront's single fixed one — varies by
+   region); see the script's own header comment for that invocation.
 6. **Update the SSM parameter from step 1** to the newly-validated
-   domain name. This is what lets the *next* ordinary deploy of the same
+   domain name, e.g.:
+
+   ```sh
+   aws ssm put-parameter --profile translator-tooling --region us-east-1 \
+     --name "/traductor-kaqchikel/domains/dev-web-cert-domain" --type String \
+     --value "app-dev.traductorkaqchikel.com" --overwrite
+   ```
+
+   This is what lets the *next* ordinary deploy of the same
    stack/environment skip the `newCertificateAck` flag — until this step
    runs, the stack still thinks no certificate has been validated for
    this domain yet.
 
 ## What's not done yet
 
-As of issue #84, `WebStack` deploys a real CloudFront distribution per
-environment (S3 origin via OAC, SPA-routing fallback, cache invalidation
-on deploy) — reachable today at its default `*.cloudfront.net` domain,
-already HTTPS. The future API Gateway custom domain (#96) is deferred the
-same way, at its default `execute-api.amazonaws.com` domain. No actual
-`app.`/`api.` records (or their `-dev`/`-qa` variants) exist yet — they
-can't be wired up as simply as this runbook originally assumed, because
-each environment's CloudFront distribution/API Gateway custom domain
-(and its required same-account ACM certificate — a hard AWS constraint,
-not a CDK choice) lives in a *different* AWS account
-(`translator-dev`/`-qa`/`-prod`) than the hosted zone
-(`translator-tooling`), and Route 53 hosted zones have no resource-based/
-bucket-policy-style cross-account grant (unlike S3/KMS/SNS) for writing
-the DNS validation record or the final alias record cross-account.
+As of issue #99, `WebStack` creates its own per-environment ACM
+certificate (`acm.CertificateValidation.fromDns()`, no `hostedZone`
+argument) and attaches it + the real `app[-<env>].traductorkaqchikel.com`
+domain name to its CloudFront distribution (see the "Cross-account ACM
+validation and record creation" section above and ADR 0007). `bin/app.ts`
+enforces the `newCertificateAck` guard at synth time, and
+`infra/scripts/upsert-domain-record.sh` is checked in for the final alias
+record.
 
-**This is now decided**, not just tracked as open candidates: see
-[ADR 0007](../adr/0007-cross-account-domain-dns-validation.md) and the
-"Cross-account ACM validation and record creation" section above. Actually
-wiring the per-environment certificate + CloudFront `domainNames`/API
-Gateway custom domain + alias record (and writing the `infra/scripts/`
-helper referenced above) is tracked as a follow-up implementation step on
-issue #99, not done yet.
+**None of the actual DNS work has been performed yet, though** — this was
+implemented as code/tests/docs only (see issue #99's PR description). The
+first real deploy of this `WebStack` version, per environment, still needs
+a human to:
+
+1. Run it as an isolated, watched `cdk deploy` (with `--context
+   newCertificateAck=true`, since no environment has a previously-recorded
+   domain in SSM yet — every environment's first cert counts as "new").
+2. Complete the manual DNS validation step (steps 3–4 above) while that
+   deploy is blocked on `CREATE_IN_PROGRESS`.
+3. Run `infra/scripts/upsert-domain-record.sh` (step 5) once the
+   distribution exists.
+4. Update the SSM parameter (step 6) so future ordinary pipeline runs for
+   that environment don't need the flag again.
+
+This is tracked as the maintainer's manual follow-up after issue #99
+merges, not something this PR could safely do itself (it would require
+real AWS credentials and a live, watched deploy against real accounts).
+
+The future API Gateway custom domain (`ApiStack`, issue #96) is
+deliberately **not** part of this implementation — #96's `ApiStack` needs
+to settle further first — and is deferred to its own explicit follow-up
+issue, reusing this exact same pattern (same guard shape, same runbook
+section, same `infra/scripts/upsert-domain-record.sh`, only the final
+record's target type/value differing, per ADR 0007's Decision section).
