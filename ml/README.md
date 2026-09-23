@@ -248,12 +248,81 @@ higher than recorded. The fix
 they can't drift apart again) is a pure bugfix, applied without
 retraining — **none of the numbers above have been re-measured with the
 fix applied**; re-evaluating the current best checkpoint's true BLEU/chrF
-is a separate, tracked follow-up, not done as part of #106.
+is a separate, tracked follow-up (issue #108's real run, see "Eval-only
+checkpoint scoring" below), not done as part of #106.
 
 See [`docs/adr/0001-initial-architecture.md`](../docs/adr/0001-initial-architecture.md)
 for the modeling approach and
 [`docs/adr/0003-base-model-license-verification.md`](../docs/adr/0003-base-model-license-verification.md)
 for the base model choice (M2M100).
+
+## Eval-only checkpoint scoring (`evaluation/evaluate_checkpoint.py`)
+
+`evaluation/evaluate_checkpoint.py` scores an *already-trained* checkpoint's
+BLEU/chrF against a validation set, without running any training step
+(issue #108). It exists because `training.train.run_training_job`
+unconditionally calls `fine_tune()` before evaluating — there was
+previously no way to re-score an existing checkpoint (e.g. after a bugfix
+to `generate_translations()` itself, like issue #106's direction-tag-leak
+fix above) without paying for a full, billable retrain.
+
+It reuses the exact same, already-tested pieces `run_training_job`
+composes for its own post-training evaluation step
+(`training.direction.build_direction_examples`,
+`training.train.generate_translations`, `evaluation.run.run_evaluation`),
+minus everything training-only:
+
+- **No `fine_tune()` call** — this script never touches the model's weights.
+- **No `extend_vocabulary_for_examples()` call** — a checkpoint saved by a
+  prior training run already has its *post-extension* tokenizer saved
+  alongside it, so re-running vocabulary extension here would be wrong (at
+  best a no-op, at worst redundant tokens with cold, never-trained
+  embeddings). It's a training-time-only step by construction — its whole
+  purpose is to warm-start embeddings *before* fine-tuning trains them,
+  which doesn't apply to an eval-only run.
+- **No new SageMaker Model Registry model package is registered** — this
+  re-scores the same already-registered weights, it doesn't produce new ones.
+
+`--checkpoint` accepts a local directory, a local `model.tar.gz`, or an
+`s3://` URI to a `model.tar.gz` (downloaded via `resolve_checkpoint_source`,
+then extracted the same way `training.train.resolve_model_source` extracts
+a local one — the one piece of genuinely new logic here, unit-tested
+against a fake S3 client in `tests/unit/test_evaluate_checkpoint_source.py`
+without ever touching real AWS).
+
+**Provenance**: a model card produced by this script is *not* a new
+training run's own eval, and is marked as such so it can't be confused
+with one — `--source-run-id` (required) names the training run whose
+checkpoint is being re-scored, and the rendered model card records
+`reevaluation: True` plus `source_run_id`/`source_checkpoint` in its
+hyperparameters section, a `reeval-<UTC timestamp>` run-id prefix (instead
+of `training.train`'s `run-<UTC timestamp>`) if `--run-id` is omitted, and
+a `train_sentence_count` of `0` with a note pointing back at the original
+run's own model card for that number, since no training happened here.
+
+Example (run from `ml/`, once a checkpoint exists in S3 — see the module's
+own `--help` for every flag):
+
+```sh
+uv run python -m evaluation.evaluate_checkpoint \
+  --checkpoint s3://<training-data-bucket>/model-artifacts/<run-id>/output/model.tar.gz \
+  --validation s3://<training-data-bucket>/corpus/almg/v1/val.tsv \
+  --corpus-version almg-v1 \
+  --source-run-id <run-id> \
+  --output-dir ./eval-output
+```
+
+Test coverage follows this project's "duck-type and fixture" convention
+(`tests/integration/test_evaluate_checkpoint_pipeline.py`, mirroring
+`tests/integration/test_train_pipeline.py`): a fake checkpoint loader and a
+fake `generate_translations` stand in for the real (heavy) model
+load/generate calls, and one test asserts the fake tokenizer's `add_tokens`
+is never called, guarding against vocabulary extension being reintroduced
+here by mistake. **No real checkpoint is downloaded and no real
+SageMaker job is submitted in this repo's test suite** — actually running
+this against the real checkpoint is a separate, maintainer-run action
+(issue #108's follow-up), same as `training/submit_job.py`'s real training
+job submission.
 
 ## Tokenizer/vocabulary extension for Kaqchikel (`training/`)
 
