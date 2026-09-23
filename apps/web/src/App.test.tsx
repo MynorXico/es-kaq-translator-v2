@@ -28,7 +28,10 @@ function deferred<T>() {
 describe("App", () => {
   it("renders the translator title and the source/target direction labels", () => {
     render(<App />);
-    expect(screen.getByText("Traductor Kaqchikel")).toBeInTheDocument();
+    // Two nodes now carry this text (the app-bar wordmark and the page
+    // heading, per #111's app-shell/app-bar structure) -- assert via the
+    // heading role so the query stays unambiguous.
+    expect(screen.getByRole("heading", { name: "Traductor Kaqchikel" })).toBeInTheDocument();
     expect(screen.getByText("Español")).toBeInTheDocument();
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
   });
