@@ -91,10 +91,49 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    run can't wedge itself on `CREATE_IN_PROGRESS` waiting for a
    validation record nobody's watching for. See [ADR 0007](../adr/0007-cross-account-domain-dns-validation.md)'s
    Decision section for the full rationale.
-2. Create the certificate in-account with
+2. Create the certificate with an isolated, watched deploy. Find the
+   exact CDK stack path if unsure (`npx cdk list --context
+   newCertificateAck=true` from `infra/cdk`) — it's the slash-separated
+   construct path, e.g. `TraductorKaqchikel-Pipeline/Dev/Web`, **not**
+   the CloudFormation stack name (`Dev-Web`) used elsewhere in this doc.
+   The two look similar but only the construct path works as a `cdk
+   deploy`/`cdk diff` argument:
+   ```sh
+   cd infra/cdk
+   AWS_PROFILE=translator-tooling npx cdk diff "TraductorKaqchikel-Pipeline/Dev/Web" \
+     --context newCertificateAck=true
+   # review the diff, then:
+   AWS_PROFILE=translator-tooling npx cdk deploy "TraductorKaqchikel-Pipeline/Dev/Web" \
+     --context newCertificateAck=true --require-approval never
+   ```
+   Use `translator-tooling` credentials for the whole command, not
+   `translator-<env>` — CDK resolves the target account's stacks through
+   the existing cross-account bootstrap trust (ADR 0004), the same way
+   the pipeline itself deploys cross-account, so there's no need to
+   switch profiles mid-command. The stack creates its certificate with
    `acm.CertificateValidation.fromDns()` and **no** `hostedZone` argument
    — CDK/CloudFormation will not attempt any cross-account write, and the
-   certificate resource will sit `CREATE_IN_PROGRESS` until validated.
+   certificate resource sits `CREATE_IN_PROGRESS` (blocking this `cdk
+   deploy`) until step 4 below completes.
+
+   **Two gotchas, discovered doing this for real across dev/qa/prod:**
+   - `cdk synth` builds the *entire* pipeline app (Dev+Qa+Prod stacks) in
+     one pass, and this guard fires once per environment, independently.
+     The pipeline's automated `Build` stage will fail three separate
+     times in a row as each environment's certificate gets validated in
+     turn (dev, then qa, then prod, each naming its own domain in the
+     error) — that's expected sequencing, not three different bugs or a
+     retry that silently failed to take effect.
+   - Because the pipeline's automatic Dev/Qa deploy stages can't run
+     while `Build` is failing, doing each environment's one-off deploy
+     from a different point in `main`'s history leaves that environment
+     serving a stale site bundle relative to the others until the
+     pipeline finally catches up (this happened in practice: `dev`
+     briefly served an older build than `qa` for exactly this reason).
+     Rebuild `apps/web` (`pnpm --filter web build`) from the same latest
+     `main` commit immediately before each environment's one-off deploy,
+     or do all three environments back-to-back from one checkout, to
+     avoid this.
 3. Look up the pending validation CNAME:
    ```sh
    aws acm describe-certificate --profile <translator-dev|qa|prod> \
@@ -130,10 +169,15 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
 
    ```sh
    aws cloudformation describe-stacks --profile translator-dev \
-     --region us-east-1 --stack-name TraductorKaqchikel-Pipeline-Dev-Web \
+     --region us-east-1 --stack-name Dev-Web \
      --query "Stacks[0].Outputs[?OutputKey=='DistributionDomainName'].OutputValue" \
      --output text
    ```
+
+   (`Dev-Web` is the actual CloudFormation stack name here — confirmed
+   against a real deploy; this is a plain `aws cloudformation` call, so it
+   takes the CloudFormation-side name, not the CDK construct path from
+   step 2 above.)
 
    Then:
 
@@ -165,35 +209,43 @@ each environment's `WebStack` (and later `ApiStack`) certificate:
    runs, the stack still thinks no certificate has been validated for
    this domain yet.
 
-## What's not done yet
+## Current status: web custom domains
 
-As of issue #99, `WebStack` creates its own per-environment ACM
-certificate (`acm.CertificateValidation.fromDns()`, no `hostedZone`
-argument) and attaches it + the real `app[-<env>].traductorkaqchikel.com`
-domain name to its CloudFront distribution (see the "Cross-account ACM
-validation and record creation" section above and ADR 0007). `bin/app.ts`
-enforces the `newCertificateAck` guard at synth time, and
+As of issue #99 (mechanism) and its dev/qa/prod rollout, `WebStack`
+creates its own per-environment ACM certificate
+(`acm.CertificateValidation.fromDns()`, no `hostedZone` argument) and
+attaches it + the real `app[-<env>].traductorkaqchikel.com` domain name
+to its CloudFront distribution (see the "Cross-account ACM validation and
+record creation" section above and ADR 0007). `bin/app.ts` enforces the
+`newCertificateAck` guard at synth time, and
 `infra/scripts/upsert-domain-record.sh` is checked in for the final alias
 record.
 
-**None of the actual DNS work has been performed yet, though** — this was
-implemented as code/tests/docs only (see issue #99's PR description). The
-first real deploy of this `WebStack` version, per environment, still needs
-a human to:
+**All three environments are live** on their real custom domains, each
+validated via the process above:
 
-1. Run it as an isolated, watched `cdk deploy` (with `--context
-   newCertificateAck=true`, since no environment has a previously-recorded
-   domain in SSM yet — every environment's first cert counts as "new").
-2. Complete the manual DNS validation step (steps 3–4 above) while that
-   deploy is blocked on `CREATE_IN_PROGRESS`.
-3. Run `infra/scripts/upsert-domain-record.sh` (step 5) once the
-   distribution exists.
-4. Update the SSM parameter (step 6) so future ordinary pipeline runs for
-   that environment don't need the flag again.
+| Environment | Domain | Status |
+|---|---|---|
+| dev | `app-dev.traductorkaqchikel.com` | Live, validated |
+| qa | `app-qa.traductorkaqchikel.com` | Live, validated |
+| prod | `app.traductorkaqchikel.com` | Live, validated |
 
-This is tracked as the maintainer's manual follow-up after issue #99
-merges, not something this PR could safely do itself (it would require
-real AWS credentials and a live, watched deploy against real accounts).
+Each environment's `/traductor-kaqchikel/domains/{environmentName}-web-cert-domain`
+SSM parameter is set, so ordinary pipeline runs no longer need
+`newCertificateAck` for the web certificate in any environment — the flag
+is only needed again if a certificate is ever recreated (a domain rename,
+a rebootstrapped account, etc. — see ADR 0007's Consequences section).
+
+Note that `prod`'s `WebStack` didn't exist at all before this rollout
+(unlike dev/qa, which already had their S3 bucket/CloudFront distribution
+from issue #84 and only needed the domain added) — its one-off deploy
+created the entire stack from scratch, including a new S3 bucket,
+CloudFront distribution, Origin Access Control, and deployment IAM roles,
+in addition to the certificate. This also happened outside the pipeline's
+normal `PromoteToProd` manual-approval gate, the same way dev/qa's
+one-off deploys bypass their own auto-deploy stage — by design, per
+ADR 0007, since the pipeline can't safely run a deploy that blocks on
+human DNS validation unattended.
 
 The future API Gateway custom domain (`ApiStack`, issue #96) is
 deliberately **not** part of this implementation — #96's `ApiStack` needs
