@@ -38,7 +38,19 @@ rather than implementing ML pipeline changes yourself.
    spec exists yet, get one from the `ux` agent first rather than
    inventing layout/copy/visual decisions yourself — implement to the
    spec it hands you (exact Spanish copy, spacing, states) rather than
-   improvising.
+   improvising. If a ticket references a design produced by a published
+   artifact (e.g. "implement against the design produced by #52") but
+   your task prompt only describes it in prose — colors, spacing numbers,
+   interaction rules — without the artifact's actual HTML/CSS attached,
+   **ask whoever delegated the ticket for the literal markup/CSS rather
+   than reproducing your own interpretation of the description**. You
+   don't have access to the `Artifact` tool and can't fetch a published
+   design yourself; six merged PRs (#85/#86/#87/#88/#91/#93) each got the
+   functional spec right this way but silently lost structural/decorative
+   fidelity (a decorative stripe, card backgrounds, a pill-shaped
+   control, an app-bar treatment) because none of them had the literal
+   markup to work from — see `docs/workflow.md`'s "Design fidelity"
+   section and issue #111.
 
 ## What you do
 
