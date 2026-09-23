@@ -77,20 +77,24 @@ test.describe("mobile layout (#41)", () => {
     }
   });
 
-  test("Traducir is full-width (matches the input) and at least 48px tall, at mobile and wider viewports", async ({
+  test("Traducir is full-width (matches the surrounding field-card) and at least 48px tall, at mobile and wider viewports", async ({
     page,
   }) => {
     await page.goto("/");
-    const input = page.getByLabel(/^Texto en /);
+    // Since #111, the input textarea sits inside a .field-card (its own
+    // border/padding), so it's no longer the same width as the full-bleed
+    // cta-button -- compare against the field-card itself, which (like the
+    // button) spans the full width of .app-body.
+    const inputFieldCard = page.locator(".field-card").first();
     const translateButton = page.getByRole("button", { name: "Traducir" });
 
     for (const viewport of [MOBILE_VIEWPORT, DESKTOP_VIEWPORT]) {
       await page.setViewportSize(viewport);
       const buttonBox = await translateButton.boundingBox();
-      const inputBox = await input.boundingBox();
+      const fieldCardBox = await inputFieldCard.boundingBox();
 
       expect(buttonBox!.height).toBeGreaterThanOrEqual(48);
-      expect(Math.abs(buttonBox!.width - inputBox!.width)).toBeLessThan(1);
+      expect(Math.abs(buttonBox!.width - fieldCardBox!.width)).toBeLessThan(1);
     }
   });
 

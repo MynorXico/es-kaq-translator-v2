@@ -6,7 +6,7 @@ import {
   type TranslationDirection,
 } from "./api";
 import { AboutPage } from "./AboutPage";
-import { CheckIcon, CopyIcon, SwapIcon, XCircleIcon } from "./icons";
+import { CheckIcon, CopyIcon, GlobeIcon, SwapIcon, XCircleIcon } from "./icons";
 
 const LANGUAGE_LABELS: Record<TranslationDirection, { source: string; target: string }> = {
   "es-to-cak": { source: "Español", target: "Kaqchikel" },
@@ -30,6 +30,8 @@ const MAX_INPUT_LENGTH = 2000;
 const WARMING_UP_DELAY_MS = 4000;
 
 const OUTPUT_PLACEHOLDER = "La traducción aparecerá aquí.";
+
+const APP_NAME = "Traductor Kaqchikel";
 
 // Always shown alongside a successful translation (issue #43): the model is
 // fine-tuned on a low-resource language and won't be perfect at launch, so
@@ -71,6 +73,34 @@ function classifyError(error: unknown): TranslateErrorKind {
     return error.status >= 500 ? "server" : "client";
   }
   return "network";
+}
+
+// Decorative marigold/violet/blue top stripe (#52's design spec).
+function Stripe() {
+  return (
+    <div className="stripe" aria-hidden="true">
+      <span className="b1" />
+      <span className="b2" />
+      <span className="b3" />
+    </div>
+  );
+}
+
+// Shared app-bar for both the translator and About views: wordmark + globe
+// icon on the left, a single nav link (whose label/handler flips depending
+// on which view is currently showing) on the right.
+function AppBar({ navLabel, onNavClick }: { navLabel: string; onNavClick: () => void }) {
+  return (
+    <header className="appbar">
+      <span className="wordmark">
+        <GlobeIcon />
+        {APP_NAME}
+      </span>
+      <button type="button" className="nav-link" onClick={onNavClick}>
+        {navLabel}
+      </button>
+    </header>
+  );
 }
 
 export default function App() {
@@ -197,14 +227,11 @@ export default function App() {
 
   if (view === "about") {
     return (
-      <>
-        <header className="app-header">
-          <button type="button" className="nav-link" onClick={toggleView}>
-            Traducir
-          </button>
-        </header>
+      <div className="app-shell">
+        <Stripe />
+        <AppBar navLabel="Traducir" onNavClick={toggleView} />
         <AboutPage onNavigateToTranslate={toggleView} />
-      </>
+      </div>
     );
   }
 
@@ -226,61 +253,64 @@ export default function App() {
   const outputAriaLabel = `Traducción en ${targetLabel.toLowerCase()}`;
 
   return (
-    <>
-      <header className="app-header">
-        <button type="button" className="nav-link" onClick={toggleView}>
-          Acerca de
-        </button>
-      </header>
-      <main>
-        <h1>Traductor Kaqchikel</h1>
+    <div className="app-shell">
+      <Stripe />
+      <AppBar navLabel="Acerca de" onNavClick={toggleView} />
+      <main className="app-body">
+        <h1>{APP_NAME}</h1>
         <p>Traducción español ↔ kaqchikel</p>
 
-        <div className="direction-row">
-          <span className="direction-label direction-label--source">{sourceLabel}</span>
+        <div className="direction-switch">
+          <span className="dir-label is-source">{sourceLabel}</span>
           <button
             type="button"
-            className="icon-button"
+            className="swap-btn"
             onClick={handleSwap}
             aria-label="Cambiar dirección"
           >
             <SwapIcon />
           </button>
-          <span className="direction-label direction-label--target">{targetLabel}</span>
+          <span className="dir-label">{targetLabel}</span>
         </div>
 
-        <textarea
-          ref={inputRef}
-          aria-label={inputAriaLabel}
-          lang={sourceLang}
-          placeholder="Escribe aquí..."
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-        />
+        <div className="field-card">
+          <div className="field-label-row">
+            <span className="field-eyebrow">{inputAriaLabel}</span>
+          </div>
 
-        <div className="input-meta-row">
-          <p className={isOverLimit ? "char-counter char-counter--over-limit" : "char-counter"}>
-            {input.length} / {MAX_INPUT_LENGTH}
-          </p>
+          <textarea
+            ref={inputRef}
+            aria-label={inputAriaLabel}
+            lang={sourceLang}
+            placeholder="Escribe aquí..."
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+          />
 
-          {input.length > 0 && (
-            <button
-              type="button"
-              className="text-button"
-              onClick={handleClear}
-              aria-label="Borrar el texto de entrada"
-            >
-              <XCircleIcon />
-              Borrar
-            </button>
+          <div className="input-meta-row">
+            <p className={isOverLimit ? "char-counter char-counter--over-limit" : "char-counter"}>
+              {input.length} / {MAX_INPUT_LENGTH}
+            </p>
+
+            {input.length > 0 && (
+              <button
+                type="button"
+                className="text-button"
+                onClick={handleClear}
+                aria-label="Borrar el texto de entrada"
+              >
+                <XCircleIcon />
+                Borrar
+              </button>
+            )}
+          </div>
+
+          {isOverLimit && (
+            <p role="alert" className="over-limit-message">
+              El texto supera el límite de {MAX_INPUT_LENGTH} caracteres.
+            </p>
           )}
         </div>
-
-        {isOverLimit && (
-          <p role="alert" className="over-limit-message">
-            El texto supera el límite de {MAX_INPUT_LENGTH} caracteres.
-          </p>
-        )}
 
         <button
           type="button"
@@ -291,11 +321,11 @@ export default function App() {
           Traducir
         </button>
 
-        <div className="output-card" role="status" aria-live="polite">
+        <div className="field-card" role="status" aria-live="polite">
           <span className="sr-only">{announcement}</span>
 
-          <div className="output-header">
-            <p className="eyebrow">Traducción</p>
+          <div className="field-label-row">
+            <span className="field-eyebrow">Traducción</span>
 
             {translateState.status === "success" && (
               <button type="button" className="text-button" onClick={handleCopy}>
@@ -342,6 +372,6 @@ export default function App() {
           )}
         </div>
       </main>
-    </>
+    </div>
   );
 }

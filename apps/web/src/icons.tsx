@@ -67,3 +67,16 @@ export function SwapIcon(props: SVGProps<SVGSVGElement>) {
     </IconBase>
   );
 }
+
+// The wordmark's globe icon (#111): decorative, alongside the always-visible
+// "Traductor Kaqchikel" text in the app-bar, so it stays aria-hidden like the
+// other icons here rather than carrying its own accessible name.
+export function GlobeIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase width={20} height={20} {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <path d="M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9S9.5 5.5 12 3Z" />
+    </IconBase>
+  );
+}

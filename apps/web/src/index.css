@@ -2,6 +2,7 @@
   --primary: #0a6f68;
   --primary-hover: #095e58;
   --primary-contrast: #ffffff;
+  --primary-tint: rgba(10, 111, 104, 0.12);
   --error: #d0341f;
   --bg: #f7f8f7;
   --surface: #ffffff;
@@ -10,7 +11,10 @@
   --text-muted: #5b6360;
   --border: #dce3e1;
   --border-strong: #c2ccc9;
+  --accent-amber: #e0a726;
   --accent-violet: #6a3e9e;
+  --accent-blue: #2f6fb0;
+  --font-display: "Fraunces", Georgia, serif;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -25,8 +29,11 @@
     --primary: #2dbfae;
     --primary-hover: #45d0c0;
     --primary-contrast: #0b1614;
+    --primary-tint: rgba(45, 191, 174, 0.18);
     --error: #ff6b52;
+    --accent-amber: #f2c14e;
     --accent-violet: #b48be0;
+    --accent-blue: #6fa8dc;
   }
 }
 
@@ -40,7 +47,7 @@ body {
 h1,
 h2,
 h3 {
-  font-family: "Fraunces", Georgia, serif;
+  font-family: var(--font-display);
   font-weight: 600;
   color: var(--text);
 }
@@ -99,41 +106,51 @@ button {
   min-height: 48px;
 }
 
-.direction-row {
+.direction-switch {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-alt);
+  border-radius: 999px;
+  padding: 6px 6px;
 }
 
-.direction-label {
+.dir-label {
+  flex: 1;
+  text-align: center;
+  font-size: 0.9375rem;
   font-weight: 600;
+  color: var(--text-muted);
+  padding: 8px 4px;
 }
 
-.direction-label--source {
+.dir-label.is-source {
   color: var(--primary);
 }
 
-.direction-label--target {
-  color: var(--text-muted);
-}
-
-.icon-button {
-  align-self: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 44px;
-  min-height: 44px;
-  padding: 0.5rem;
-  border-radius: 999px;
+.swap-btn {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: 50%;
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 
-.icon-button:hover {
-  color: var(--primary-hover);
-  border-color: var(--primary);
+.swap-btn:hover {
+  background: var(--primary-tint);
+}
+
+.swap-btn:active {
+  transform: scale(0.96);
 }
 
 .char-counter {
@@ -153,18 +170,68 @@ button {
   font-size: 0.875rem;
 }
 
-.app-header {
+.app-shell {
+  width: 100%;
   max-width: 480px;
   margin: 0 auto;
-  padding: 1rem;
-  display: flex;
-  justify-content: flex-end;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: 20px;
+  background: var(--bg);
+  box-shadow: 0 4px 18px rgba(30, 36, 34, 0.1);
+  overflow: hidden;
 }
 
-@media (min-width: 600px) {
-  .app-header {
-    padding: 1rem 1.5rem;
-  }
+.stripe {
+  height: 6px;
+  display: flex;
+}
+
+.stripe span {
+  flex: 1 1 0;
+}
+
+.stripe .b1 {
+  background: var(--accent-amber);
+}
+
+.stripe .b2 {
+  background: var(--accent-violet);
+}
+
+.stripe .b3 {
+  background: var(--accent-blue);
+}
+
+.appbar {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.0625rem;
+  color: var(--text);
+}
+
+.wordmark svg {
+  color: var(--primary);
+}
+
+.app-body {
+  padding: 20px 16px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .nav-link,
@@ -269,26 +336,30 @@ a:focus-visible {
   margin: 0;
 }
 
-.output-card {
+.field-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 8px;
 }
 
-.output-header {
+.field-label-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  min-height: 22px;
 }
 
-.eyebrow {
-  margin: 0;
-  font-size: 0.75rem;
+.field-eyebrow {
+  font-size: 0.8125rem;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   color: var(--text-muted);
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
 }
 
 .text-button {
