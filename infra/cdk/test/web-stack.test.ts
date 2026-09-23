@@ -2,7 +2,8 @@ import path from "node:path";
 import { App } from "aws-cdk-lib";
 import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { WebStack } from "../lib/web-stack";
+import { webHostName } from "../lib/config";
+import { assertCertificateChangeAcknowledged, WebStack, type WebStackProps } from "../lib/web-stack";
 
 // Fake, obviously-non-real account ID (CLAUDE.md never allows a real one in tests).
 const FAKE_ENV = { account: "222222222222", region: "us-east-1" };
@@ -13,12 +14,20 @@ const FAKE_ENV = { account: "222222222222", region: "us-east-1" };
 // actual build output in.
 const FIXTURE_SITE_CONTENT_PATH = path.join(__dirname, "fixtures/site");
 
-function synthWebStack() {
+// "test" environment's expected domain, per lib/config.ts's webHostName().
+const TEST_DOMAIN_NAME = webHostName("test");
+
+function synthWebStack(extraProps: Partial<WebStackProps> = {}) {
   const app = new App();
   const stack = new WebStack(app, "TestWebStack", {
     environmentName: "test",
     siteContentPath: FIXTURE_SITE_CONTENT_PATH,
     env: FAKE_ENV,
+    // Defaults to the "already validated, nothing new" case so every
+    // existing test below keeps synthesizing without needing the ack --
+    // the guard itself is exercised by its own dedicated tests below.
+    previouslyValidatedDomainName: TEST_DOMAIN_NAME,
+    ...extraProps,
   });
   const template = Template.fromStack(stack);
   return { stack, template };
@@ -127,5 +136,106 @@ describe("WebStack", () => {
 
     template.hasOutput("SiteBucketName", {});
     template.hasOutput("DistributionDomainName", {});
+  });
+
+  describe("custom domain / ACM certificate (ADR 0007)", () => {
+    it("creates a DNS-validated ACM certificate for the environment's webHostName, with no hosted zone (no cross-account write)", () => {
+      const { template } = synthWebStack();
+
+      template.resourceCountIs("AWS::CertificateManager::Certificate", 1);
+      template.hasResourceProperties("AWS::CertificateManager::Certificate", {
+        DomainName: TEST_DOMAIN_NAME,
+        ValidationMethod: "DNS",
+      });
+    });
+
+    it("attaches the certificate and domain name to the CloudFront distribution", () => {
+      const { template } = synthWebStack();
+
+      template.hasResourceProperties("AWS::CloudFront::Distribution", {
+        DistributionConfig: Match.objectLike({
+          Aliases: [TEST_DOMAIN_NAME],
+          ViewerCertificate: Match.objectLike({
+            AcmCertificateArn: Match.anyValue(),
+          }),
+        }),
+      });
+    });
+
+    it("exposes the certificate ARN as a stack output, for the runbook's `aws acm describe-certificate` step", () => {
+      const { template } = synthWebStack();
+
+      template.hasOutput("CertificateArn", {});
+    });
+
+    it("synthesizes without needing newCertificateAck when the domain matches the previously-validated one", () => {
+      expect(() =>
+        synthWebStack({ previouslyValidatedDomainName: TEST_DOMAIN_NAME, newCertificateAck: false }),
+      ).not.toThrow();
+    });
+
+    it("throws at synth time when the domain differs from the previously-validated one and there is no ack", () => {
+      expect(() =>
+        synthWebStack({ previouslyValidatedDomainName: "app-other.traductorkaqchikel.com", newCertificateAck: false }),
+      ).toThrow(/newCertificateAck/);
+    });
+
+    it("proceeds when the domain differs but newCertificateAck is explicitly given", () => {
+      expect(() =>
+        synthWebStack({ previouslyValidatedDomainName: "app-other.traductorkaqchikel.com", newCertificateAck: true }),
+      ).not.toThrow();
+    });
+
+    it("treats a missing previously-validated domain (first-ever cert) as a mismatch, fail-safe, not an automatic match", () => {
+      expect(() =>
+        synthWebStack({ previouslyValidatedDomainName: undefined, newCertificateAck: false }),
+      ).toThrow(/newCertificateAck/);
+
+      expect(() =>
+        synthWebStack({ previouslyValidatedDomainName: undefined, newCertificateAck: true }),
+      ).not.toThrow();
+    });
+  });
+});
+
+describe("assertCertificateChangeAcknowledged", () => {
+  it("does not throw when the domain name matches the previously-validated one", () => {
+    expect(() =>
+      assertCertificateChangeAcknowledged({
+        domainName: "app-dev.traductorkaqchikel.com",
+        previouslyValidatedDomainName: "app-dev.traductorkaqchikel.com",
+        newCertificateAck: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it("throws when the domain name differs and there is no ack", () => {
+    expect(() =>
+      assertCertificateChangeAcknowledged({
+        domainName: "app-dev.traductorkaqchikel.com",
+        previouslyValidatedDomainName: "app-dev-old.traductorkaqchikel.com",
+        newCertificateAck: false,
+      }),
+    ).toThrow(/newCertificateAck/);
+  });
+
+  it("does not throw when the domain name differs but newCertificateAck is true", () => {
+    expect(() =>
+      assertCertificateChangeAcknowledged({
+        domainName: "app-dev.traductorkaqchikel.com",
+        previouslyValidatedDomainName: "app-dev-old.traductorkaqchikel.com",
+        newCertificateAck: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it("treats an undefined previously-validated domain as a mismatch requiring the ack", () => {
+    expect(() =>
+      assertCertificateChangeAcknowledged({
+        domainName: "app-dev.traductorkaqchikel.com",
+        previouslyValidatedDomainName: undefined,
+        newCertificateAck: false,
+      }),
+    ).toThrow(/newCertificateAck/);
   });
 });

@@ -13,6 +13,10 @@ const FAKE_CONFIG: PipelineConfig = {
   region: "us-east-1",
   connectionArn: "arn:aws:codeconnections:us-east-1:111111111111:connection/fake-connection-id",
   repoString: "example-org/example-repo",
+  // This suite is about pipeline/stage structure, not ADR 0007's new-cert
+  // guard (see web-stack.test.ts for that) -- ack unconditionally so every
+  // stage's WebStack synthesizes regardless of its domain name.
+  newCertificateAck: true,
 };
 
 // A tiny committed fixture, not a real `apps/web` build -- see web-stack.test.ts.

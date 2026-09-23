@@ -9,6 +9,10 @@ export interface TranslatorStageProps extends StageProps {
   environmentName: string;
   /** See `WebStackProps.siteContentPath`. */
   webSiteContentPath: string;
+  /** See `WebStackProps.previouslyValidatedDomainName` (ADR 0007). */
+  previouslyValidatedWebDomainName?: string;
+  /** See `WebStackProps.newCertificateAck` (ADR 0007). */
+  newCertificateAck?: boolean;
 }
 
 // The approved SageMaker Model Package version to deploy (issue #8). Bump
@@ -37,6 +41,8 @@ export class TranslatorStage extends Stage {
     new WebStack(this, "Web", {
       environmentName: props.environmentName,
       siteContentPath: props.webSiteContentPath,
+      previouslyValidatedDomainName: props.previouslyValidatedWebDomainName,
+      newCertificateAck: props.newCertificateAck,
     });
 
     const dataStack = new DataStack(this, "Data", {
