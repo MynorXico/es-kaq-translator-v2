@@ -287,6 +287,24 @@ a:focus-visible {
   }
 }
 
+/* Wide desktop treatment, matching the design's "Wide / 720px" preview
+   value exactly (see #115). Deliberately a second breakpoint distinct
+   from 600px above: a 720px-wide shell would leave uncomfortably little
+   margin on a ~600-770px tablet viewport. */
+@media (min-width: 800px) {
+  .app-shell {
+    max-width: 720px;
+  }
+
+  .app-body {
+    padding: 20px 24px 28px;
+  }
+
+  .about-page {
+    max-width: 720px;
+  }
+}
+
 .zigzag {
   height: 10px;
   margin: 0.5rem 0 1.5rem;
