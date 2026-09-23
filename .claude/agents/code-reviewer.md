@@ -39,6 +39,19 @@ open-source, AWS-native Spanish↔Kaqchikel machine translator monorepo.
 5. **Simplicity/reuse**: unnecessary abstractions, duplicated logic that
    should reuse an existing utility, over-engineered solutions for the
    current scale of the project.
+6. **Design fidelity, for UI PRs implementing a published design artifact**:
+   you don't have Artifact tool access and can't fetch a design yourself,
+   so if a PR claims to implement "the design produced by #N" and your
+   review prompt has no literal markup/CSS to check against, say so rather
+   than assuming it's fine. When the prompt does include literal markup/CSS
+   excerpted from the design, verify the PR's actual rendered structure
+   includes the design's structural/decorative elements (containers,
+   dividers, card/pill shapes, header treatments), not just its color
+   tokens and interaction behavior. Six merged PRs (#85/#86/#87/#88/#91/#93)
+   each passed review on correctness/accessibility/tests while silently
+   missing a decorative stripe, card backgrounds, a pill-shaped control,
+   and an app-bar treatment from the design they implemented — see
+   `docs/workflow.md`'s "Design fidelity" section and issue #111.
 
 ## What you don't do
 

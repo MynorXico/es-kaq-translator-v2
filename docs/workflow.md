@@ -45,6 +45,52 @@ any production code, then implement to green, then refactor — see
 [`docs/testing.md`](testing.md) for the process and which test level(s) a
 given change needs.
 
+## Design fidelity requires literal markup/CSS, not a prose description
+
+Six merged PRs (#85/#86/#87/#88/#91/#93, implementing the design from
+#52) each got the *functional* spec right — color tokens, spacing values,
+accessibility, states, exact copy — but the real deployed UI still didn't
+visually match the design's mockup: no decorative stripe, no card
+backgrounds around the input/output fields, no pill-shaped direction
+switcher, no app-bar treatment. The design was correct; every
+implementation of it lost structural/decorative fidelity, and it took
+until the app was actually deployed and screenshotted for anyone to
+notice (tracked and fixed as #111).
+
+Root cause: `dev`/`ml-engineer` (the implementing agents) don't have
+access to the Artifact tool and can't fetch a published design themselves
+— only `ux`/a human maintainer/the orchestrating session can.
+Every delegation for those six tickets described the design in prose
+(colors, spacing numbers, interaction rules) rather than including the
+artifact's actual HTML/CSS, so each implementer reproduced a reasonable
+*interpretation* of the description instead of the literal structure.
+Code review for those PRs checked correctness, accessibility, and test
+coverage — not literal visual-structure fidelity against the mockup — so
+this went uncaught through six review passes.
+
+**The fix, going forward:**
+
+- Whoever delegates a UI-implementation ticket against a published design
+  artifact (`work-ticket`, or you working inline) must first read the
+  artifact themselves (`Artifact` tool, `action: "read"`) and paste the
+  actual, relevant HTML/CSS directly into the delegation prompt —
+  structural/decorative elements (containers, dividers, pill/card shapes,
+  header treatments) especially, not just color tokens and spacing
+  numbers in prose. If a `dev`/`ml-engineer` agent receives a ticket that
+  says "implement against the design produced by #N" without literal
+  markup/CSS attached, it should ask for that rather than improvising
+  from the issue text alone.
+- When delegating a review of a PR that implements a published design,
+  include the same literal markup/CSS in the review prompt (`code-reviewer`
+  doesn't have Artifact tool access either — only `ux` does) and
+  explicitly ask for a structural fidelity check: does the PR's actual
+  rendered structure include the design's key structural/decorative
+  elements, not just its color tokens and interaction correctness?
+- For a design spanning several dependent tickets (like #52's six), the
+  literal markup/CSS only needs to be extracted once and can be reused
+  verbatim across each ticket's delegation prompt — it doesn't need
+  re-deriving per ticket.
+
 ## Grooming looks across tickets, not just at one at a time
 
 Two real planning gaps happened back to back on 2026-09-19, both from
