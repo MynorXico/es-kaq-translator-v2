@@ -42,24 +42,46 @@ fix at all, even after that fix landed -- see `training.
 tokenizer_extension`'s module docstring ("Re-evaluating an already-trained
 checkpoint") for the full argument.
 
-This script recovers it: `--train`/`--train-direction` (both required)
-must name the exact training corpus and direction the checkpoint's own
-training history used (from that run's own model card/hyperparameters --
-*not* necessarily the same as this script's own `--direction`, which only
-controls what to *evaluate*, not what the checkpoint was *trained* with).
-Given those, `training.tokenizer_extension.
-patch_word_boundary_decoding_for_checkpoint` deterministically recomputes
-the same whole-word boundary token set the checkpoint's training run(s)
-actually added (no SentencePiece retraining, no randomness -- see that
-function's docstring) and patches the reloaded tokenizer's decode behavior
-in place, before any translation is generated. `--base-model` (already
-recorded for provenance) is also used here to load the *pristine* base
-tokenizer vocab this reconstruction is computed against. The number of
-boundary tokens reconstructed/applied is recorded in the model card's
-hyperparameters for traceability, and a warning is logged (not raised) if
-any reconstructed token turns out to be missing from the checkpoint's own
-vocabulary -- a sign `--train`/`--train-direction`/`--base-model` don't
-actually match what the checkpoint was trained with.
+This script recovers it: `--train` (required) must name the exact training
+corpus the checkpoint's own training history was extended against (from
+that run's own model card/hyperparameters -- *not* necessarily the same
+corpus this script's own `--validation` scores against). Given that,
+`training.tokenizer_extension.patch_word_boundary_decoding_for_checkpoint`
+deterministically recomputes the same whole-word boundary token set the
+checkpoint's training run(s) actually added (no SentencePiece retraining,
+no randomness -- see that function's docstring) and patches the reloaded
+tokenizer's decode behavior in place, before any translation is generated.
+`--base-model` (already recorded for provenance) is also used here to load
+the *pristine* base tokenizer vocab this reconstruction is computed
+against.
+
+There is deliberately no `--train-direction` flag: an earlier version of
+this script had one, but `training.train.extend_vocabulary_for_examples`'s
+`sample_texts` always includes every pair's *both* columns regardless of
+`--direction` (`build_direction_examples("both")` doubles the example
+count, but `[ex.source_text ...] + [ex.target_text ...]` still reduces to
+the same underlying *set* of texts as any single-direction mode -- see
+`training.direction.build_direction_examples`), so the reconstructed token
+set is provably identical no matter what direction value would have been
+passed. A flag that can never change its own output has no reason to
+exist (PR #128 review).
+
+The number of boundary tokens reconstructed/applied is recorded in the
+model card's hyperparameters for traceability. Two independent checks
+then run (see `_diagnose_word_boundary_reconstruction`'s own docstring for
+the full reasoning) and warn on stderr (never raise, so an expensive real
+run doesn't die on a diagnostic) if something looks wrong:
+
+- **Over-reconstruction**: a reconstructed token that isn't actually in
+  the checkpoint's vocabulary at all -- unambiguously means `--train`/
+  `--base-model` don't match what the checkpoint was trained with.
+- **Under-reconstruction**: fewer boundary tokens were reconstructed than
+  are mathematically possible given the checkpoint's own recorded
+  `new_tokens_added` (from its saved `model_card.md`, best-effort) --
+  the more dangerous failure mode, since a naive "is every reconstructed
+  token present in the checkpoint?" check can *never* catch it (every
+  reconstructed token from a too-small `--train` is still trivially
+  present in the checkpoint's larger real vocab).
 
 ## Provenance: distinguishing a re-evaluation from a training run's own eval
 
@@ -100,6 +122,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -109,6 +132,7 @@ from typing import Any
 from data.corpus_io import read_tsv_pairs
 from evaluation.run import run_evaluation
 from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_CHOICES, build_direction_examples
+from training.subword_vocab import WORD_BOUNDARY_MARKER
 from training.tokenizer_extension import patch_word_boundary_decoding_for_checkpoint
 from training.train import DEFAULT_BASE_MODEL, generate_translations, resolve_model_source
 
@@ -154,21 +178,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "word-boundary-spacing fix'). Required: without it, this "
             "script cannot correctly recover which of the checkpoint's "
             "added tokens must decode with a leading space, and would "
-            "silently under-report or over-report issue #116's fix."
-        ),
-    )
-    parser.add_argument(
-        "--train-direction",
-        choices=DIRECTION_CHOICES,
-        default="both",
-        help=(
-            "The --direction value the checkpoint's own training run(s) "
-            "used to build the sample text its vocabulary was extended "
-            "against (training.train's own default is 'both'). This is "
-            "*not* the same as this script's own --direction below, which "
-            "only controls what to evaluate -- get this wrong and the "
-            "word-boundary reconstruction below will be silently "
-            "incorrect."
+            "silently under-report or over-report issue #116's fix. "
+            "There is deliberately no separate --train-direction flag: "
+            "the reconstructed token set is provably identical regardless "
+            "of direction (see this module's docstring)."
         ),
     )
     parser.add_argument(
@@ -302,30 +315,141 @@ def load_base_tokenizer_vocab(base_model: str) -> dict[str, int]:
     return M2M100Tokenizer.from_pretrained(base_model).get_vocab()
 
 
-def _warn_if_boundary_tokens_missing_from_checkpoint(
-    boundary_tokens: list[str], tokenizer: Any
-) -> None:
-    """Log a warning (never raise) if any reconstructed boundary token
-    isn't actually present in the checkpoint's own vocabulary -- a sign
-    `--train`/`--train-direction`/`--base-model` don't actually match what
-    the checkpoint was trained with (see `patch_word_boundary_decoding_
-    for_checkpoint`'s docstring). Duck-typed fakes without `get_vocab`
-    (not expected in real use, but used by some unit tests) are skipped
-    silently rather than raising here.
+_NEW_TOKENS_ADDED_RE = re.compile(r"-\s*\*\*new_tokens_added\*\*:\s*(\d+)")
+
+
+def _read_checkpoint_new_tokens_added(checkpoint_dir: str) -> int | None:
+    """Best-effort read of the `new_tokens_added` hyperparameter from the
+    checkpoint's own saved `model_card.md` (`training.train.
+    run_training_job` writes this alongside the model artifact, in the
+    same directory `save_model_and_tokenizer` saves the tokenizer to).
+    Used only as an auxiliary sanity bound for word-boundary
+    reconstruction (`_diagnose_word_boundary_reconstruction`) -- never
+    required. Returns `None` (never raises) if `checkpoint_dir` isn't a
+    real local path, the file is missing, or the field can't be found --
+    a missing/unreadable model card must never crash an otherwise-valid
+    eval-only run over a best-effort diagnostic.
     """
-    if not boundary_tokens or not hasattr(tokenizer, "get_vocab"):
+    model_card_path = Path(checkpoint_dir) / "model_card.md"
+    try:
+        if not model_card_path.is_file():
+            return None
+        text = model_card_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _NEW_TOKENS_ADDED_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _diagnose_word_boundary_reconstruction(
+    boundary_tokens: list[str],
+    tokenizer: Any,
+    base_vocab: dict[str, int],
+    checkpoint_new_tokens_added: int | None,
+) -> None:
+    """Cross-check the reconstructed whole-word boundary token set against
+    the checkpoint's own real vocabulary, catching both over- and
+    under-reconstruction.
+
+    An earlier version of this check only asked "is every reconstructed
+    token present in the checkpoint's vocabulary?" -- that can catch
+    over-reconstruction, but can **never** catch under-reconstruction
+    (PR #128 review): if `--train` points at a corpus that's a genuine
+    *subset* of what the checkpoint was actually trained on, reconstruction
+    silently returns an incomplete boundary-token set, and every one of
+    those (fewer) tokens is still trivially present in the checkpoint's
+    larger real vocab, so the old check's `missing` list is always empty.
+    Some genuinely-whole-word tokens would then silently stay glued on
+    decode -- partially re-introducing issue #116's bug with zero signal
+    anything's wrong.
+
+    This instead also computes the checkpoint's *exact* set of ambiguous
+    added tokens directly from a real vocab diff (checkpoint vocab minus
+    the pristine `base_vocab`, restricted to marker-less multi-character
+    tokens -- word-initial subword pieces and single missing characters
+    are self-describing and excluded) -- entirely independent of
+    `--train`'s content, unlike the reconstruction itself. The gap between
+    that exact set and the reconstructed `boundary_tokens` is *expected*
+    to be non-empty in the normal case: that's exactly where genuine
+    subword continuation pieces (`extend_tokenizer_vocab_with_subwords`)
+    live, which must correctly stay unmarked. But the gap can't exceed the
+    checkpoint's own recorded `new_tokens_added` (the *producing* training
+    run's own count of tokens it added, from its saved `model_card.md`) if
+    reconstruction correctly captured everything that run's own
+    whole-word extension step contributed -- `new_tokens_added` upper-bounds
+    "whole words added by that run" + "subword pieces added by that run",
+    so a gap *larger* than it can only mean some whole-word tokens were
+    missed. If it's larger, that's the under-reconstruction signal.
+
+    This deliberately does **not** require an exact equality against
+    `new_tokens_added`: for a checkpoint continued from a prior checkpoint
+    via `--init-model` (like this project's real deployed checkpoint,
+    `run-20260922T141956Z` -- a 3-run continuation chain), most whole-word
+    tokens were added by an *earlier* run, so `new_tokens_added` on the
+    checkpoint's own (last) model card only reflects that final run's own
+    incremental contribution, not the full cumulative history -- an exact
+    equality check would spuriously fire on every continuation checkpoint.
+    The inequality bound above still holds regardless of how many
+    continuation runs contributed, since it only relies on the *last*
+    run's own whole-word step being a correctly-reconstructed subset of
+    what it actually added (guaranteed by `--train` matching the corpus
+    every run in the chain used, per this project's convention).
+
+    Never raises: an expensive, hours-long real re-evaluation run
+    shouldn't die on a diagnostic. Everything is reported to stderr.
+    """
+    if not hasattr(tokenizer, "get_vocab"):
         return
     checkpoint_vocab = tokenizer.get_vocab()
-    missing = [token for token in boundary_tokens if token not in checkpoint_vocab]
-    if missing:
-        import sys
+    boundary_token_set = set(boundary_tokens)
 
+    over_reconstructed = sorted(
+        token for token in boundary_token_set if token not in checkpoint_vocab
+    )
+    if over_reconstructed:
         print(
-            f"WARNING: {len(missing)} of {len(boundary_tokens)} reconstructed "
-            "word-boundary tokens are missing from the checkpoint's own "
-            "vocabulary -- --train/--train-direction/--base-model may not "
-            f"match what this checkpoint was actually trained with. "
-            f"Sample missing tokens: {missing[:10]!r}",
+            f"WARNING: {len(over_reconstructed)} of {len(boundary_token_set)} "
+            "reconstructed word-boundary tokens are missing from the "
+            "checkpoint's own vocabulary -- --train/--base-model may not "
+            f"match what this checkpoint was actually trained with. Sample: "
+            f"{over_reconstructed[:10]!r}",
+            file=sys.stderr,
+        )
+
+    ambiguous_checkpoint_tokens = {
+        token
+        for token in checkpoint_vocab
+        if token not in base_vocab
+        and len(token) > 1
+        and not token.startswith(WORD_BOUNDARY_MARKER)
+    }
+    unaccounted = sorted(ambiguous_checkpoint_tokens - boundary_token_set)
+
+    if not unaccounted:
+        return
+
+    if checkpoint_new_tokens_added is None:
+        print(
+            f"NOTE: {len(unaccounted)} marker-less, multi-character tokens in "
+            "the checkpoint's vocabulary were not reconstructed as "
+            "word-boundary tokens. Most are expected to be genuine subword "
+            "continuation pieces (correctly left glued), but this could not "
+            "be cross-checked against the checkpoint's own recorded "
+            "new_tokens_added (no model_card.md found alongside the "
+            "checkpoint) -- treat this count as informational only.",
+            file=sys.stderr,
+        )
+    elif len(unaccounted) > checkpoint_new_tokens_added:
+        print(
+            f"WARNING: {len(unaccounted)} marker-less, multi-character "
+            "tokens in the checkpoint's vocabulary were not reconstructed "
+            "as word-boundary tokens, which exceeds the checkpoint's own "
+            f"recorded new_tokens_added ({checkpoint_new_tokens_added}) -- "
+            "mathematically, this can only happen if some genuine "
+            "whole-word tokens were missed (under-reconstruction), most "
+            "likely because --train doesn't fully reflect the checkpoint's "
+            f"real training corpus. Sample unaccounted-for tokens: "
+            f"{unaccounted[:10]!r}",
             file=sys.stderr,
         )
 
@@ -361,18 +485,24 @@ def run_checkpoint_evaluation(
     # Reconstruct + patch issue #116's word-boundary-spacing fix before
     # generating any translation -- see this module's docstring
     # ("Reconstructing issue #116's word-boundary-spacing fix") for why a
-    # reloaded checkpoint's tokenizer can't just carry this itself.
+    # reloaded checkpoint's tokenizer can't just carry this itself. Built
+    # directly from both columns of every training pair -- no direction
+    # tagging needed here, since the resulting *set* of sample texts is
+    # identical regardless of direction (see this module's docstring,
+    # "no --train-direction flag").
     train_pairs = read_tsv_pairs(args.train)
-    train_examples = build_direction_examples(train_pairs, args.train_direction)
-    train_sample_texts = [ex.source_text for ex in train_examples] + [
-        ex.target_text for ex in train_examples
+    train_sample_texts = [source for source, _ in train_pairs] + [
+        target for _, target in train_pairs
     ]
     train_sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
     base_vocab = base_vocab_loader(args.base_model)
     boundary_tokens = patch_word_boundary_decoding_for_checkpoint(
         tokenizer, base_vocab, train_sample_texts
     )
-    _warn_if_boundary_tokens_missing_from_checkpoint(boundary_tokens, tokenizer)
+    checkpoint_new_tokens_added = _read_checkpoint_new_tokens_added(model_source)
+    _diagnose_word_boundary_reconstruction(
+        boundary_tokens, tokenizer, base_vocab, checkpoint_new_tokens_added
+    )
 
     hypotheses = translator(
         model, tokenizer, val_examples, max_length=args.max_length, batch_size=args.batch_size
@@ -403,7 +533,6 @@ def run_checkpoint_evaluation(
             "max_length": args.max_length,
             "batch_size": args.batch_size,
             "word_boundary_reconstruction_train": args.train,
-            "word_boundary_reconstruction_train_direction": args.train_direction,
             "word_boundary_tokens_reconstructed": len(boundary_tokens),
         },
         "notes": (

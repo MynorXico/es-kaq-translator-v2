@@ -290,35 +290,56 @@ a local one — the one piece of genuinely new logic here, unit-tested
 against a fake S3 client in `tests/unit/test_evaluate_checkpoint_source.py`
 without ever touching real AWS).
 
-**`--train`/`--train-direction` (required): reconstructing issue #116's
-word-boundary-spacing fix for a reloaded checkpoint.** A checkpoint's saved
-tokenizer never records which added tokens were whole words/characters
-(`training.tokenizer_extension.extend_tokenizer_vocab`) versus subword
-pieces (`extend_tokenizer_vocab_with_subwords`) — `_mark_word_boundary_
+**`--train` (required): reconstructing issue #116's word-boundary-spacing
+fix for a reloaded checkpoint.** A checkpoint's saved tokenizer never
+records which added tokens were whole words/characters (`training.
+tokenizer_extension.extend_tokenizer_vocab`) versus subword pieces
+(`extend_tokenizer_vocab_with_subwords`) — `_mark_word_boundary_
 tokens`'s effect (issue #116's fix) lives only on the live tokenizer
 *instance* that originally called it, and `save_pretrained()` only ever
 writes a flat `added_tokens.json` list. Simply reloading a checkpoint here
 and generating translations would therefore silently **not** apply #116's
 fix at all, even after that fix landed on `main` — discovered when
 attempting to re-evaluate the deployed checkpoint (`run-20260922T141956Z`)
-against #116's fix without retraining. `--train`/`--train-direction` must
-name the exact training corpus/direction the checkpoint's *own* training
-history used (from that run's own model card/hyperparameters — not
-necessarily the same as this script's own `--direction`, which only
-controls what to *evaluate*). Given those, `training.tokenizer_extension.
-patch_word_boundary_decoding_for_checkpoint` deterministically recomputes
-the same whole-word boundary token set the checkpoint's training run(s)
-actually added — no SentencePiece retraining, no randomness, safe even
-across a chain of `--init-model` continuation runs (`training.
-tokenizer_extension`'s module docstring has the full argument, confirmed
-empirically against the real deployed checkpoint's own continuation
-chain) — and patches the reloaded tokenizer's decode behavior in place
-before any translation is generated. The reconstructed token count is
-recorded in the model card's hyperparameters
-(`word_boundary_tokens_reconstructed`), and a warning is printed to stderr
-(not raised) if any reconstructed token turns out to be missing from the
-checkpoint's own vocabulary — a sign `--train`/`--train-direction`/
-`--base-model` don't actually match what the checkpoint was trained with.
+against #116's fix without retraining. `--train` must name the exact
+training corpus the checkpoint's *own* training history used (from that
+run's own model card/hyperparameters — not necessarily the same corpus
+this script's own `--validation` scores against). There's deliberately no
+separate `--train-direction` flag: the reconstructed token set is provably
+identical regardless of direction, since every direction mode's sample
+text reduces to the same underlying *set* of both columns of every pair
+(confirmed empirically — an earlier version of this flag was dropped as
+dead weight once this was noticed in review, PR #128). Given `--train`,
+`training.tokenizer_extension.patch_word_boundary_decoding_for_checkpoint`
+deterministically recomputes the same whole-word boundary token set the
+checkpoint's training run(s) actually added — no SentencePiece retraining,
+no randomness, safe even across a chain of `--init-model` continuation
+runs (`training.tokenizer_extension`'s module docstring has the full
+argument, confirmed empirically against the real deployed checkpoint's
+own continuation chain) — and patches the reloaded tokenizer's decode
+behavior in place before any translation is generated. The reconstructed
+token count is recorded in the model card's hyperparameters
+(`word_boundary_tokens_reconstructed`).
+
+Two independent diagnostics then run and print to stderr (never raise) if
+something looks wrong — see `_diagnose_word_boundary_reconstruction`'s own
+docstring for the full reasoning:
+
+- **Over-reconstruction**: any reconstructed token that isn't actually in
+  the checkpoint's vocabulary — unambiguous evidence `--train`/
+  `--base-model` don't match what the checkpoint was trained with.
+- **Under-reconstruction** (the more dangerous failure mode, since a
+  too-small `--train` still makes every reconstructed token trivially
+  present in the checkpoint's larger real vocab, so the over-reconstruction
+  check alone can never catch it): the checkpoint's *exact* set of
+  ambiguous added tokens (a real vocab diff against the pristine base
+  model, independent of `--train`'s content) is cross-checked against the
+  reconstructed set. The gap between them is expected to be non-empty in
+  the normal case (genuine subword continuation pieces, which must
+  correctly stay unmarked), but it mathematically cannot exceed the
+  checkpoint's own recorded `new_tokens_added` (read best-effort from its
+  saved `model_card.md`) if reconstruction is correct — a larger gap means
+  some real whole-word tokens were missed.
 
 **Provenance**: a model card produced by this script is *not* a new
 training run's own eval, and is marked as such so it can't be confused
@@ -338,7 +359,6 @@ uv run python -m evaluation.evaluate_checkpoint \
   --checkpoint s3://<training-data-bucket>/model-artifacts/<run-id>/output/model.tar.gz \
   --validation s3://<training-data-bucket>/corpus/almg/v1/val.tsv \
   --train s3://<training-data-bucket>/corpus/almg/v1/train.tsv \
-  --train-direction both \
   --corpus-version almg-v1 \
   --source-run-id <run-id> \
   --output-dir ./eval-output
@@ -352,9 +372,10 @@ in for the real (heavy) model load/generate calls, and one test asserts
 the fake tokenizer's `add_tokens` is never called, guarding against
 vocabulary extension being reintroduced here by mistake. Separate tests
 cover the word-boundary reconstruction wiring itself (a real, non-zero
-token count reaches the model card; a mismatched fake checkpoint vocab
-triggers the stderr warning) and, against the real
-`facebook/m2m100_418M` tokenizer,
+token count reaches the model card; over-reconstruction and
+under-reconstruction each trigger their own distinct stderr diagnostic,
+the latter both with and without a `model_card.md` available for the
+cross-check) and, against the real `facebook/m2m100_418M` tokenizer,
 `tests/integration/test_tokenizer_extension_reload_reconstruction.py`
 proves the underlying save/reload/reconstruct round-trip actually works
 (extend → save → reload loses issue #116's fix → reconstruct + patch
@@ -364,6 +385,59 @@ submitted in this repo's test suite** — actually running this against the
 real checkpoint is a separate, maintainer-run action (issue #108's
 follow-up), same as `training/submit_job.py`'s real training job
 submission.
+
+### Verifying the reconstruction against a real checkpoint (maintainer step)
+
+The claim that reconstruction exactly matches a real checkpoint's own
+`added_tokens.json` (confirmed for the deployed checkpoint,
+`run-20260922T141956Z`, during this feature's development: 61,901
+reconstructed whole-word/character tokens against corpus `almg-v1`,
+exactly matching that checkpoint's real vocabulary) is independently
+re-checkable without retraining, mirroring issue #108's "real re-eval is a
+separate maintainer step" pattern rather than a one-off, unrepeatable
+claim:
+
+```sh
+# 1. Download the real checkpoint's tokenizer files only (not the model
+#    weights) to inspect its added vocabulary directly.
+aws s3 cp s3://<training-data-bucket>/model-artifacts/<run-id>/output/model.tar.gz ./model.tar.gz
+tar xzf model.tar.gz added_tokens.json vocab.json model_card.md
+
+# 2. Download that run's exact training corpus (from the run's own
+#    hyperparameters/model card -- --corpus-version, --train channel URI).
+aws s3 cp s3://<training-data-bucket>/corpus/almg/v1/train.tsv ./train.tsv
+
+# 3. Recompute the whole-word/character token set the same way
+#    evaluate_checkpoint.py does, using the real facebook/m2m100_418M
+#    tokenizer's pristine vocab (never the checkpoint's own).
+uv run python -c "
+from data.corpus_io import read_tsv_pairs
+from training.direction import ALL_DIRECTION_TAG_TOKENS
+from training.tokenizer_extension import reconstruct_whole_word_boundary_tokens
+from transformers import M2M100Tokenizer
+
+base_vocab = M2M100Tokenizer.from_pretrained('facebook/m2m100_418M').get_vocab()
+pairs = read_tsv_pairs('train.tsv')
+sample_texts = [s for s, _ in pairs] + [t for _, t in pairs] + list(ALL_DIRECTION_TAG_TOKENS)
+reconstructed = reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
+print(len(reconstructed))
+"
+
+# 4. Compare against the real checkpoint's saved vocab: every reconstructed
+#    token should be a key in added_tokens.json (step 1), and
+#    len(vocab.json) + len(added_tokens.json) - len(base_vocab) should
+#    equal len(reconstructed) + <subword tokens actually added, if any --
+#    see the checkpoint's own model_card.md's subword_vocab_size/
+#    new_tokens_added hyperparameters>.
+```
+
+If the checkpoint under test is itself the result of an `--init-model`
+continuation chain (like the real deployed checkpoint), step 2's corpus
+must be the corpus *every* run in that chain used (traceable via each
+training job's own `describe-training-job` hyperparameters/`init-model`
+channel, chained backward) -- see `training.tokenizer_extension`'s module
+docstring for why this still produces an exact match regardless of chain
+depth.
 
 ## Tokenizer/vocabulary extension for Kaqchikel (`training/`)
 
