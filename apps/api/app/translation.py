@@ -100,5 +100,16 @@ def translate_via_sagemaker(
         # EndpointConnectionError.
         raise TranslationServiceError(504, _TIMEOUT_MESSAGE) from error
 
-    body = json.loads(response["Body"].read())
-    return TranslateResponse(translation=body["translated_text"])
+    try:
+        body = json.loads(response["Body"].read())
+        translation = body["translated_text"]
+    except (json.JSONDecodeError, KeyError) as error:
+        # The endpoint returned a 2xx but violated its own documented
+        # contract (malformed JSON, or missing translated_text) -- a bad
+        # deployment or a bug in ml/deployment/inference.py's output_fn,
+        # not something a retry would fix on its own, but still not the
+        # caller's fault -- surfaced the same way as an upstream failure
+        # rather than an unhandled 500 with a stack trace.
+        raise TranslationServiceError(502, _UNAVAILABLE_MESSAGE) from error
+
+    return TranslateResponse(translation=translation)

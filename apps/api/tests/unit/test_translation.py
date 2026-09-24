@@ -105,3 +105,33 @@ def test_maps_a_timeout_to_a_504_translation_service_error():
         )
 
     assert excinfo.value.status_code == 504
+
+
+def test_maps_a_malformed_json_response_to_a_502_translation_service_error():
+    fake_client = MagicMock()
+    body = MagicMock()
+    body.read.return_value = b"not valid json"
+    fake_client.invoke_endpoint.return_value = {"Body": body}
+
+    with pytest.raises(TranslationServiceError) as excinfo:
+        translate_via_sagemaker(
+            TranslateRequest(text="Hola", direction=Direction.ES_TO_CAK),
+            runtime_client=fake_client,
+        )
+
+    assert excinfo.value.status_code == 502
+
+
+def test_maps_a_response_missing_translated_text_to_a_502_translation_service_error():
+    fake_client = MagicMock()
+    body = MagicMock()
+    body.read.return_value = json.dumps({"unexpected": "shape"}).encode("utf-8")
+    fake_client.invoke_endpoint.return_value = {"Body": body}
+
+    with pytest.raises(TranslationServiceError) as excinfo:
+        translate_via_sagemaker(
+            TranslateRequest(text="Hola", direction=Direction.ES_TO_CAK),
+            runtime_client=fake_client,
+        )
+
+    assert excinfo.value.status_code == 502
