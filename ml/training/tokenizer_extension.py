@@ -89,13 +89,28 @@ def _mark_word_boundary_tokens(tokenizer: TokenizerLike, tokens: Iterable[str]) 
     This works around it at the decode layer, without touching the
     (correctly-working) encode path or `add_tokens()` itself: it wraps the
     tokenizer's own `convert_tokens_to_string` exactly once (subsequent
-    calls just extend the same tracked set), splitting the token list into
-    runs around any *word-boundary* token -- one that should always start a
-    new word -- and joining those runs back together with an explicit
-    space. Tokens *not* passed here (e.g. single missing characters from
-    `find_missing_characters`, or mid-word subword continuation pieces)
-    are left exactly as before: glued to their neighbors, which is correct
-    for them.
+    calls just extend the same tracked set), grouping the token list into
+    runs and joining those runs back together with an explicit space.
+
+    A run boundary -- i.e. a real word boundary needing a space before it
+    -- happens right before any token that *starts a new word*: either one
+    of `tokens` (an added token we're told always starts a new word), or
+    any other token that itself already carries SentencePiece's own
+    word-boundary marker (a genuine native piece, or a word-initial added
+    subword piece from `extend_tokenizer_vocab_with_subwords`). Everything
+    else -- single missing characters from `find_missing_characters`,
+    mid-word subword continuation pieces -- has no marker and is *not* in
+    `tokens`, so it keeps accumulating into the current run and stays
+    glued to whatever precedes it, exactly as before.
+
+    Critically, this means an added *word-initial* token immediately
+    followed by an added *continuation* piece (no marker) lands in the
+    *same* run and gets glued together correctly -- e.g. `["▁zqvbn",
+    "wkr"]` (two newly added subword pieces composing one Kaqchikel word,
+    the exact scenario `extend_tokenizer_vocab_with_subwords`/#82 exists
+    for) decodes as `"zqvbnwkr"`, not `"zqvbn wkr"`. An earlier version of
+    this function always started a fresh run right after *any* token in
+    `tokens`, which incorrectly inserted a space in exactly this case.
 
     No-ops for tokenizer-like objects that don't implement
     `convert_tokens_to_string` (e.g. the duck-typed fakes used in this
@@ -112,25 +127,33 @@ def _mark_word_boundary_tokens(tokenizer: TokenizerLike, tokens: Iterable[str]) 
         original_convert_tokens_to_string = tokenizer.convert_tokens_to_string
 
         def convert_tokens_to_string_with_word_boundaries(tokens_to_decode: list[str]) -> str:
-            sub_texts: list[str] = []
+            runs: list[list[str]] = []
             current_run: list[str] = []
             for token in tokens_to_decode:
-                if token in boundary_tokens:
-                    if current_run:
-                        sub_texts.append(original_convert_tokens_to_string(current_run))
-                        current_run = []
-                    # The word-boundary space is already supplied by the
-                    # `" ".join(...)` below; strip the token's own
-                    # SentencePiece marker (present on subword pieces from
-                    # `extend_tokenizer_vocab_with_subwords`, absent on
-                    # whole words from `extend_tokenizer_vocab`) so it
-                    # doesn't leak into the decoded text as a literal `▁`.
-                    sub_texts.append(token.removeprefix(WORD_BOUNDARY_MARKER))
-                else:
-                    current_run.append(token)
+                starts_new_word = token in boundary_tokens or token.startswith(
+                    WORD_BOUNDARY_MARKER
+                )
+                if starts_new_word and current_run:
+                    runs.append(current_run)
+                    current_run = []
+                current_run.append(token)
             if current_run:
-                sub_texts.append(original_convert_tokens_to_string(current_run))
-            return " ".join(part for part in sub_texts if part).strip()
+                runs.append(current_run)
+
+            decoded_runs = []
+            for run in runs:
+                # `sp_model.decode()` (what `original_convert_tokens_to_string`
+                # delegates to) doesn't know about our own added tokens, so
+                # it can't strip/convert a marker it never registered on
+                # one -- do it ourselves before delegating, only for a
+                # run's leading token if *we* are the ones vouching it
+                # starts a new word. A genuinely native marker-carrying
+                # leading token is left untouched: the real decode already
+                # converts/strips its marker correctly on its own.
+                if run[0] in boundary_tokens:
+                    run = [run[0].removeprefix(WORD_BOUNDARY_MARKER), *run[1:]]
+                decoded_runs.append(original_convert_tokens_to_string(run))
+            return " ".join(part for part in decoded_runs if part).strip()
 
         tokenizer.convert_tokens_to_string = convert_tokens_to_string_with_word_boundaries
 

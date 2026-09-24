@@ -29,6 +29,7 @@ SentencePiece decode path to reproduce it against.
 from transformers import M2M100Tokenizer
 
 from training.tokenizer_extension import (
+    _mark_word_boundary_tokens,
     extend_tokenizer_vocab,
     extend_tokenizer_vocab_with_subwords,
 )
@@ -121,6 +122,68 @@ def test_extend_tokenizer_vocab_with_subwords_decodes_with_correct_spacing():
         f"word boundary lost around added subword piece {piece!r}: decoded {decoded!r}"
     )
     assert decoded == f"el {content} pueblo", f"expected an exact round-trip, got {decoded!r}"
+
+
+def test_word_boundary_token_glues_directly_onto_its_own_continuation_piece():
+    """Regression test for a real bug found in code review of this fix
+    (PR #124): a word-initial added token immediately followed by an added
+    *continuation* piece (no marker) is the exact scenario
+    `extend_tokenizer_vocab_with_subwords`/#82 exists for -- one Kaqchikel
+    word composed from two newly added subword pieces. An earlier version
+    of `_mark_word_boundary_tokens` always started a fresh run right after
+    *any* marked token, which incorrectly inserted a space between the two
+    pieces of what should decode as a single word.
+    """
+    tokenizer = _fresh_tokenizer()
+    tokenizer.add_tokens(["▁zqvbn", "wkr"])
+    # Only the word-initial piece is a word boundary -- "wkr" is a plain
+    # continuation piece (no marker), exactly like a real
+    # `extend_tokenizer_vocab_with_subwords` result.
+    _mark_word_boundary_tokens(tokenizer, ["▁zqvbn"])
+
+    ids = tokenizer.convert_tokens_to_ids(["▁zqvbn", "wkr"])
+    decoded = tokenizer.decode(ids, skip_special_tokens=True)
+    assert decoded == "zqvbnwkr", f"expected the two pieces glued into one word, got {decoded!r}"
+
+    ids2 = tokenizer.convert_tokens_to_ids(["▁el", "▁zqvbn", "wkr", "▁pueblo"])
+    decoded2 = tokenizer.decode(ids2, skip_special_tokens=True)
+    assert decoded2 == "el zqvbnwkr pueblo", f"got {decoded2!r}"
+
+
+def test_extend_tokenizer_vocab_with_subwords_composes_two_added_pieces_into_one_word():
+    """Same regression as above, but exercised through the real public
+    `extend_tokenizer_vocab_with_subwords` pipeline rather than the
+    private `_mark_word_boundary_tokens` helper directly, with a fixture
+    crafted so the trained subword model genuinely splits one invented
+    word-form into a shared word-initial prefix piece plus a distinct
+    continuation piece.
+    """
+    tokenizer = _fresh_tokenizer()
+    kaqchikel_texts = [
+        "Ri qpwvxelaaaa nqpwvxelbbbb ri qpwvxelcccc.",
+        "Jantape qpwvxeldddd nkatzu ri qpwvxeleeee tinamit.",
+        "Ronojel qpwvxelffff winaqi qpwvxelgggg.",
+        "Xa qpwvxelhhhh ri qpwvxeliiii jun chik.",
+    ] * 15
+
+    added = extend_tokenizer_vocab_with_subwords(tokenizer, kaqchikel_texts, vocab_size=50)
+    word_initial_pieces = [t for t in added if t.startswith("▁")]
+    assert word_initial_pieces, "fixture expected a word-initial prefix piece"
+    prefix = word_initial_pieces[0]
+    prefix_content = prefix.removeprefix("▁")
+
+    # Exclude the bare (unmarked) duplicate of the prefix's own content --
+    # a genuine mid-word continuation piece is a *different* string.
+    continuation_pieces = [
+        t for t in added if not t.startswith("▁") and t != prefix_content
+    ]
+    assert continuation_pieces, "fixture expected at least one continuation suffix piece"
+    suffix = continuation_pieces[0]
+    ids = tokenizer.convert_tokens_to_ids(["▁el", prefix, suffix, "▁pueblo"])
+    decoded = tokenizer.decode(ids, skip_special_tokens=True)
+
+    expected_word = prefix.removeprefix("▁") + suffix
+    assert decoded == f"el {expected_word} pueblo", f"got {decoded!r}"
 
 
 def test_word_boundary_fix_composes_across_both_extension_calls():
