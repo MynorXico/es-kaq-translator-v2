@@ -15,12 +15,15 @@ export interface ApiStackProps extends StackProps {
    * `sagemaker:InvokeEndpoint` IAM grant to exactly that endpoint's ARN.
    *
    * The endpoint is referenced by name rather than a live CDK cross-stack
-   * construct because the stack that creates it (#8) doesn't exist yet at
-   * the time `ApiStack` is defined -- see this class's doc comment for the
-   * full contract. Defaults to a documented per-environment naming
-   * convention (`traductor-kaqchikel-translate-<environmentName>`);
-   * override this prop from `app-stage.ts` if #8 ends up naming the real
-   * endpoint differently.
+   * construct because `ApiStack` is defined independently of the stack
+   * that creates it (`MlHostingStack`, #8) -- see this class's doc comment
+   * for the full contract. Defaults to a per-environment naming convention
+   * (`traductor-kaqchikel-translate-<environmentName>`) that does *not*
+   * match any real endpoint; `app-stage.ts` overrides it with
+   * `MlHostingStack`'s real `endpointName` for environments that actually
+   * have one (dev, for now -- see #9). Environments without a real
+   * `MlHostingStack` yet (qa/prod) fall back to this unmatched default,
+   * a known, pre-existing gap.
    */
   sageMakerEndpointName?: string;
 }
@@ -32,20 +35,16 @@ export interface ApiStackProps extends StackProps {
  * image) and `apps/api/app/lambda_handler.py` for the Mangum ASGI adapter
  * that lets the same FastAPI app run locally (uvicorn) and in Lambda.
  *
- * ## Environment-variable contract for #9
- *
- * `#9` (wiring `/v1/translate` to the real SageMaker endpoint) should read
- * these from `os.environ` in `apps/api/app`:
+ * ## Environment-variable contract (read from `os.environ` in `apps/api/app`)
  *
  * | Env var                  | Purpose |
  * |---------------------------|---------|
- * | `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint to invoke via `boto3`'s `sagemaker-runtime` `invoke_endpoint`. The Lambda's execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN in this account/region -- nothing broader (no wildcard resource, no `AmazonSageMakerFullAccess`). |
+ * | `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint `apps/api/app/translation.py` invokes via `boto3`'s `sagemaker-runtime` `invoke_endpoint` (#9). The Lambda's execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN in this account/region -- nothing broader (no wildcard resource, no `AmazonSageMakerFullAccess`). |
  * | `ALLOWED_ORIGINS`         | Pre-existing CORS config (see `apps/api/app/config.py`, issue #46). Deliberately left unset here (falls back to the local dev origin) since `apps/web`'s custom domain (issue #84) hasn't landed yet -- wire this up once that domain exists, rather than guessing its value now. |
  *
- * If #8 names its real endpoint differently than this stack's default
- * convention, pass `sageMakerEndpointName` explicitly from
- * `app-stage.ts` (or update the default here) -- don't hardcode a
- * different name inside `apps/api` itself.
+ * See `sageMakerEndpointName` above for how this stack's default
+ * `SAGEMAKER_ENDPOINT_NAME` convention gets overridden with the real
+ * endpoint name where one exists.
  */
 export class ApiStack extends Stack {
   public readonly apiFunction: DockerImageFunction;

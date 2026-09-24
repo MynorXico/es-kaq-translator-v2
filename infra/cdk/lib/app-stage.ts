@@ -49,10 +49,6 @@ export class TranslatorStage extends Stage {
       environmentName: props.environmentName,
     });
 
-    new ApiStack(this, "Api", {
-      environmentName: props.environmentName,
-    });
-
     // Model Registry entries are account-scoped, and only "dev" has a
     // trained, registered, approved model right now -- training only runs
     // against dev's corpus bucket (ml/training/submit_job.py's
@@ -60,12 +56,31 @@ export class TranslatorStage extends Stage {
     // either a duplicated registration there or cross-account Model
     // Registry sharing, neither of which ADR 0001 addresses -- deferred
     // rather than guessed at here (see MlHostingStack's own docstring).
+    //
+    // Created before ApiStack (rather than after, as originally written) so
+    // its real `endpointName` can be passed into ApiStack below -- issue #9
+    // found that ApiStack's own default endpoint-name convention
+    // (`traductor-kaqchikel-translate-<environmentName>`) never matched the
+    // real endpoint this stack creates
+    // (`traductor-kaqchikel-es-cak-<environmentName>`), because nothing
+    // ever overrode it.
+    let mlHostingStack: MlHostingStack | undefined;
     if (props.environmentName === "dev") {
-      new MlHostingStack(this, "MlHosting", {
+      mlHostingStack = new MlHostingStack(this, "MlHosting", {
         environmentName: props.environmentName,
         modelPackageVersion: DEV_MODEL_PACKAGE_VERSION,
         modelDataBucket: dataStack.bucket,
       });
     }
+
+    new ApiStack(this, "Api", {
+      environmentName: props.environmentName,
+      // Only pass an explicit override where a real endpoint exists (dev,
+      // for now -- see MlHostingStack's own "Scope: dev only" docstring).
+      // qa/prod fall back to ApiStack's own default, which names a
+      // not-yet-existing endpoint there -- an already-known gap (no
+      // MlHostingStack there yet), not something this ticket can fix.
+      sageMakerEndpointName: mlHostingStack?.endpointName,
+    });
   }
 }
