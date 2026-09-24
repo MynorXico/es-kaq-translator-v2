@@ -72,6 +72,16 @@ const SERVERLESS_MAX_CONCURRENCY = 2;
  * instantiates this stack for `environmentName === "dev"`.
  */
 export class MlHostingStack extends Stack {
+  /**
+   * The real, deployed endpoint's name (e.g.
+   * `traductor-kaqchikel-es-cak-dev`) -- `app-stage.ts` passes this into
+   * `ApiStack`'s `sageMakerEndpointName` prop so the Lambda actually calls
+   * the endpoint this stack creates, rather than relying on `ApiStack`'s
+   * own default naming convention (which names a different, non-existent
+   * endpoint -- issue #9).
+   */
+  public readonly endpointName: string;
+
   constructor(scope: Construct, id: string, props: MlHostingStackProps) {
     super(scope, id, props);
 
@@ -121,6 +131,7 @@ export class MlHostingStack extends Stack {
     );
 
     const namePrefix = `${MODEL_PACKAGE_GROUP_NAME}-${props.environmentName}`;
+    this.endpointName = namePrefix;
 
     const model = new CfnModel(this, "Model", {
       modelName: namePrefix,

@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_allowed_origins
 from app.models import TranslateRequest, TranslateResponse
+from app.translation import TranslationServiceError, translate_via_sagemaker
 from app.validation import translate_validation_error_message
 
 app = FastAPI(title="Traductor Kaqchikel API", version="0.0.1")
@@ -29,6 +30,13 @@ async def validation_exception_handler(
     )
 
 
+@app.exception_handler(TranslationServiceError)
+async def translation_service_error_handler(
+    request: Request, exc: TranslationServiceError
+) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -36,5 +44,4 @@ def health() -> dict[str, str]:
 
 @app.post("/v1/translate", response_model=TranslateResponse)
 def translate(request: TranslateRequest) -> TranslateResponse:
-    # Stub: will call the SageMaker Serverless Inference endpoint once trained (ADR 0001).
-    return TranslateResponse(translation="Esta función estará disponible próximamente.")
+    return translate_via_sagemaker(request)
