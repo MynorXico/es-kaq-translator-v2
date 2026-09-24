@@ -298,10 +298,50 @@ a:focus-visible {
 
   .app-body {
     padding: 20px 24px 28px;
+    max-width: none;
   }
 
   .about-page {
     max-width: 720px;
+  }
+}
+
+/* Wide desktop treatment: the two field-cards sit side by side with the
+   Traducir button centered in the gutter between them. The h1, subtitle,
+   and direction-switch stay full-width above the two columns via explicit
+   grid-column spans; the field-cards and cta-button fall into place via
+   grid auto-placement, since their DOM order (input -> button -> output)
+   already matches the intended visual order. */
+@media (min-width: 1280px) {
+  .app-shell {
+    max-width: 1120px;
+  }
+
+  .app-body {
+    padding: 32px 40px 40px;
+    display: grid;
+    grid-template-columns: minmax(280px, 1fr) 140px minmax(280px, 1fr);
+    gap: 20px 32px;
+    align-items: start;
+  }
+
+  .app-body > h1,
+  .app-body > p,
+  .app-body > .direction-switch {
+    grid-column: 1 / -1;
+  }
+
+  .direction-switch {
+    max-width: 480px;
+    margin: 0 auto;
+  }
+
+  .app-body > .cta-button {
+    align-self: center;
+  }
+
+  textarea {
+    min-height: 160px;
   }
 }
 
