@@ -19,6 +19,17 @@ module never requires `torch` to be installed for callers that only need
 tokenizer implements (`get_vocab()`, `add_tokens()`), so it *is* fully
 testable here against a small fake object that duck-types those two
 methods -- see `ml/tests/unit/test_tokenizer_extension.py`.
+
+Both `extend_tokenizer_vocab` and `extend_tokenizer_vocab_with_subwords`
+additionally call `_mark_word_boundary_tokens` after `add_tokens()`, to
+work around a real decode-time word-boundary-spacing bug in
+`add_tokens()` for SentencePiece-backed tokenizers like M2M100's (issue
+#116) -- see that function's docstring for the confirmed root cause. This
+only patches the tokenizer's `convert_tokens_to_string` (a no-op for
+duck-typed fakes that don't have one), so it doesn't affect the
+`get_vocab()`/`add_tokens()`-only unit tests above; it's covered
+separately, against the real checkpoint, in
+`tests/integration/test_tokenizer_extension_word_boundary_spacing.py`.
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ from training.subword_vocab import (
     DEFAULT_MIN_SUBWORD_LENGTH,
     DEFAULT_MODEL_TYPE,
     DEFAULT_VOCAB_SIZE,
+    WORD_BOUNDARY_MARKER,
     compute_new_subword_tokens,
 )
 from training.vocab_extension import resize_embedding_matrix, select_new_tokens
@@ -42,6 +54,87 @@ class TokenizerLike(Protocol):
     def get_vocab(self) -> dict[str, int]: ...
 
     def add_tokens(self, new_tokens: list[str]) -> int: ...
+
+
+# Attribute name used to stash the mutable set of "always decode with a
+# leading space" tokens on a real tokenizer instance -- see
+# `_mark_word_boundary_tokens`'s docstring (issue #116) for why this is
+# necessary and why it isn't just another `add_tokens()` call.
+_WORD_BOUNDARY_TOKENS_ATTR = "_translator_word_boundary_added_tokens"
+
+
+def _mark_word_boundary_tokens(tokenizer: TokenizerLike, tokens: Iterable[str]) -> None:
+    """Register `tokens` (already registered via `tokenizer.add_tokens()`)
+    as tokens that must always decode with a leading space, working around
+    a decode-time bug in `add_tokens()` for SentencePiece-backed tokenizers
+    like M2M100's (issue #116).
+
+    Root cause, confirmed against the real `facebook/m2m100_418M`
+    tokenizer: `tokenizer.add_tokens()` only registers new tokens in HF's
+    `added_tokens_encoder` overlay -- it never touches the real
+    `sp_model` (`sentencepiece.SentencePieceProcessor`) that
+    `M2M100Tokenizer.convert_tokens_to_string` delegates decoding to via
+    `self.sp_model.decode(...)`. *Encoding* still works correctly (HF's
+    generic added-token trie matches the literal added text directly
+    against raw input text, entirely independent of `sp_model`), but on
+    *decode*, `sp_model.decode()` has no way to apply its usual
+    SentencePiece "word-boundary marker -> space" handling to a token
+    string it has never seen: it silently concatenates an added token
+    directly onto whatever piece preceded it, dropping the space that
+    should have been there (e.g. "...de dios" + "awach" decodes as
+    "...de diosawach", not "...de dios awach") -- this is exactly the
+    "glued Spanish words" pattern documented in issue #116, not a rare
+    edge case.
+
+    This works around it at the decode layer, without touching the
+    (correctly-working) encode path or `add_tokens()` itself: it wraps the
+    tokenizer's own `convert_tokens_to_string` exactly once (subsequent
+    calls just extend the same tracked set), splitting the token list into
+    runs around any *word-boundary* token -- one that should always start a
+    new word -- and joining those runs back together with an explicit
+    space. Tokens *not* passed here (e.g. single missing characters from
+    `find_missing_characters`, or mid-word subword continuation pieces)
+    are left exactly as before: glued to their neighbors, which is correct
+    for them.
+
+    No-ops for tokenizer-like objects that don't implement
+    `convert_tokens_to_string` (e.g. the duck-typed fakes used in this
+    module's unit tests, which only need `get_vocab`/`add_tokens`).
+    """
+    tokens = list(tokens)
+    if not tokens or not hasattr(tokenizer, "convert_tokens_to_string"):
+        return
+
+    boundary_tokens: set[str] | None = getattr(tokenizer, _WORD_BOUNDARY_TOKENS_ATTR, None)
+    if boundary_tokens is None:
+        boundary_tokens = set()
+        setattr(tokenizer, _WORD_BOUNDARY_TOKENS_ATTR, boundary_tokens)
+        original_convert_tokens_to_string = tokenizer.convert_tokens_to_string
+
+        def convert_tokens_to_string_with_word_boundaries(tokens_to_decode: list[str]) -> str:
+            sub_texts: list[str] = []
+            current_run: list[str] = []
+            for token in tokens_to_decode:
+                if token in boundary_tokens:
+                    if current_run:
+                        sub_texts.append(original_convert_tokens_to_string(current_run))
+                        current_run = []
+                    # The word-boundary space is already supplied by the
+                    # `" ".join(...)` below; strip the token's own
+                    # SentencePiece marker (present on subword pieces from
+                    # `extend_tokenizer_vocab_with_subwords`, absent on
+                    # whole words from `extend_tokenizer_vocab`) so it
+                    # doesn't leak into the decoded text as a literal `▁`.
+                    sub_texts.append(token.removeprefix(WORD_BOUNDARY_MARKER))
+                else:
+                    current_run.append(token)
+            if current_run:
+                sub_texts.append(original_convert_tokens_to_string(current_run))
+            return " ".join(part for part in sub_texts if part).strip()
+
+        tokenizer.convert_tokens_to_string = convert_tokens_to_string_with_word_boundaries
+
+    boundary_tokens.update(tokens)
 
 
 def compute_new_tokens_for_texts(
@@ -78,6 +171,13 @@ def extend_tokenizer_vocab(tokenizer: TokenizerLike, sample_texts: Iterable[str]
     new_tokens = compute_new_tokens_for_texts(sample_texts, base_vocab)
     if new_tokens:
         tokenizer.add_tokens(new_tokens)
+        # Whole word-forms from `find_missing_words` (anything longer than
+        # a single character here) always start a new word wherever they
+        # occur and must decode with a leading space (issue #116). Single
+        # missing characters from `find_missing_characters` (the glottal
+        # apostrophe, extra vowels) are mid-word content and must stay
+        # glued to their neighbors -- unaffected, and already correct.
+        _mark_word_boundary_tokens(tokenizer, (token for token in new_tokens if len(token) > 1))
     return new_tokens
 
 
@@ -115,6 +215,14 @@ def extend_tokenizer_vocab_with_subwords(
     )
     if new_tokens:
         tokenizer.add_tokens(new_tokens)
+        # These pieces already carry SentencePiece's own word-boundary
+        # marker convention from the trained subword model: a piece
+        # starting with it begins a new word and must decode with a
+        # leading space (issue #116); a piece without it is a mid-word
+        # continuation and must stay glued -- already correct.
+        _mark_word_boundary_tokens(
+            tokenizer, (token for token in new_tokens if token.startswith(WORD_BOUNDARY_MARKER))
+        )
     return new_tokens
 
 
