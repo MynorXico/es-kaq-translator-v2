@@ -16,10 +16,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from data.corpus_io import read_tsv_pairs
 from evaluation.evaluate_checkpoint import parse_args, run_checkpoint_evaluation
-from training.direction import DIRECTION_TAGS
+from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_TAGS
+from training.tokenizer_extension import reconstruct_whole_word_boundary_tokens
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
+
+
+def _expected_boundary_tokens(base_vocab: dict[str, int]) -> list[str]:
+    """The real whole-word boundary tokens `sample_train.tsv` reconstructs
+    against `base_vocab` -- used by tests below to build a fake checkpoint
+    vocab that's a proper *superset* of what reconstruction will find, so
+    the over-reconstruction check doesn't spuriously fire while testing
+    the (separate) under-reconstruction check.
+    """
+    pairs = read_tsv_pairs(str(FIXTURES / "sample_train.tsv"))
+    sample_texts = [source for source, _ in pairs] + [target for _, target in pairs]
+    sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+    return reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
 
 
 class FakeCheckpointTokenizer:
@@ -70,6 +85,20 @@ def fake_resolve_source(checkpoint: str) -> str:
 fake_resolve_source.calls = []
 
 
+def fake_base_vocab_loader(base_model: str) -> dict[str, int]:
+    fake_base_vocab_loader.calls.append(base_model)
+    # A tiny, deliberately incomplete "pristine" vocab: `sample_train.tsv`'s
+    # text (see FIXTURES / "sample_train.tsv") has real whole-word gaps
+    # against this (e.g. "awäch"), so
+    # `patch_word_boundary_decoding_for_checkpoint` has something genuine
+    # to reconstruct -- mirrors the real base_model vocab's role, not a
+    # no-op stand-in.
+    return {c: i for i, c in enumerate("abcdefghijklmnopqrstuvwxyzáéíóúñ,. ")}
+
+
+fake_base_vocab_loader.calls = []
+
+
 def fake_translator(model, tokenizer, examples, **kwargs):
     # Deliberately not a real translation -- just proves the val examples
     # (and their target language tags) reached this step correctly, same
@@ -84,6 +113,8 @@ def _base_args(tmp_path, **overrides):
         overrides.pop("checkpoint", "s3://bucket/model-artifacts/run-1/output/model.tar.gz"),
         "--validation",
         str(FIXTURES / "sample_val_clean.tsv"),
+        "--train",
+        overrides.pop("train", str(FIXTURES / "sample_train.tsv")),
         "--corpus-version",
         "almg-v1",
         "--source-run-id",
@@ -107,6 +138,7 @@ def test_run_checkpoint_evaluation_wires_checkpoint_through_to_model_card(tmp_pa
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -153,6 +185,7 @@ def test_run_checkpoint_evaluation_never_extends_vocabulary(tmp_path):
         args,
         resolve_source=fake_resolve_source,
         model_loader=capturing_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -166,6 +199,7 @@ def test_run_checkpoint_evaluation_single_direction_evaluates_half_the_examples(
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -181,6 +215,8 @@ def test_run_checkpoint_evaluation_defaults_run_id_to_a_reeval_prefixed_timestam
             "local-checkpoint-dir",
             "--validation",
             str(FIXTURES / "sample_val_clean.tsv"),
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
             "--corpus-version",
             "almg-v1",
             "--source-run-id",
@@ -194,8 +230,162 @@ def test_run_checkpoint_evaluation_defaults_run_id_to_a_reeval_prefixed_timestam
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
     card_text = model_card_path.read_text(encoding="utf-8")
     assert "# Model card: reeval-" in card_text
+
+
+def test_run_checkpoint_evaluation_reconstructs_word_boundary_tokens_from_train_corpus(tmp_path):
+    """Issue #116's re-evaluation gap: a reloaded checkpoint's tokenizer
+    never records which added tokens need word-boundary decoding, so this
+    must be reconstructed from `--train`/`--base-model` every run -- see
+    `evaluate_checkpoint`'s module docstring.
+    """
+    fake_base_vocab_loader.calls.clear()
+    args, _ = _base_args(tmp_path)
+
+    model_card_path = run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    # The base tokenizer's *pristine* vocab was loaded via --base-model,
+    # never the checkpoint's own (already-extended) tokenizer.
+    assert fake_base_vocab_loader.calls == [args.base_model]
+
+    card_text = model_card_path.read_text(encoding="utf-8")
+    assert "word_boundary_reconstruction_train" in card_text
+    assert str(FIXTURES / "sample_train.tsv") in card_text
+    assert "word_boundary_tokens_reconstructed" in card_text
+    # sample_train.tsv's text has genuine whole-word gaps against the tiny
+    # fake base vocab (see fake_base_vocab_loader's own docstring) -- this
+    # must be a real, non-zero reconstruction, not an accidental no-op.
+    assert "- **word_boundary_tokens_reconstructed**: 0" not in card_text
+
+
+def test_run_checkpoint_evaluation_warns_on_over_reconstruction(tmp_path, capsys):
+    """If `--train`/`--base-model` don't actually match what the checkpoint
+    was trained with, the reconstructed boundary tokens might not all be
+    present in the checkpoint's own vocabulary -- this must be surfaced
+    loudly (stderr), not silently ignored.
+    """
+    args, _ = _base_args(tmp_path)
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            # Deliberately missing every reconstructed boundary token --
+            # simulates a checkpoint that was never actually trained
+            # against this --train corpus.
+            return {c: i for i, c in enumerate("xyz")}
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "missing from the checkpoint" in captured.err
+
+
+def test_run_checkpoint_evaluation_warns_on_under_reconstruction(tmp_path, capsys):
+    """Issue #128 review's core finding: a checkpoint vocab that has real,
+    unreconstructed whole-word-shaped tokens beyond what --train could ever
+    account for (exceeding the checkpoint's own recorded
+    new_tokens_added) must be flagged -- the failure mode the old
+    "is every reconstructed token present?" check could never catch, since
+    every reconstructed token here *is* trivially present in the
+    checkpoint's larger real vocab.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    # The checkpoint's own model card records it only ever added 1 new
+    # token -- so 2 unaccounted-for ambiguous tokens below is impossible
+    # if reconstruction were complete.
+    (checkpoint_dir / "model_card.md").write_text(
+        "# Model card: run-x\n\n## Hyperparameters\n\n- **new_tokens_added**: 1\n",
+        encoding="utf-8",
+    )
+
+    def resolve_to_checkpoint_dir(checkpoint: str) -> str:
+        return str(checkpoint_dir)
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            base_vocab = fake_base_vocab_loader("unused")
+            vocab = dict(base_vocab)
+            for offset, token in enumerate(_expected_boundary_tokens(base_vocab)):
+                vocab[token] = len(base_vocab) + offset
+            # Two marker-less, multi-character tokens the checkpoint really
+            # has that --train's tiny sample can never reconstruct as
+            # whole-word boundary tokens (not present in sample_train.tsv
+            # at all) -- exceeds the recorded new_tokens_added (1) above.
+            vocab["unseen_whole_word"] = len(vocab)
+            vocab["another_missed_word"] = len(vocab) + 1
+            return vocab
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    args, _ = _base_args(tmp_path)
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=resolve_to_checkpoint_dir,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "exceeds the checkpoint's own recorded new_tokens_added" in captured.err
+
+
+def test_run_checkpoint_evaluation_notes_unaccounted_tokens_without_a_model_card(
+    tmp_path, capsys
+):
+    """No `model_card.md` alongside the checkpoint (e.g. a checkpoint saved
+    by something other than `training.train.run_training_job`) must not
+    silently skip the under-reconstruction diagnostic entirely -- it should
+    still report the raw count, just without the cross-check, clearly
+    labeled as informational only (not a WARNING).
+    """
+    args, _ = _base_args(tmp_path)
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            base_vocab = fake_base_vocab_loader("unused")
+            vocab = dict(base_vocab)
+            for offset, token in enumerate(_expected_boundary_tokens(base_vocab)):
+                vocab[token] = len(base_vocab) + offset
+            vocab["unseen_whole_word"] = len(vocab)
+            return vocab
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert "NOTE" in captured.err
+    assert "could not be cross-checked" in captured.err
+    assert "WARNING" not in captured.err
