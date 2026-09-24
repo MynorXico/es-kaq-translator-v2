@@ -314,7 +314,7 @@ export default function App() {
 
         <button
           type="button"
-          className="cta-button"
+          className="cta-button button-outline"
           onClick={runTranslate}
           disabled={isTranslating || !input.trim() || isOverLimit}
         >
