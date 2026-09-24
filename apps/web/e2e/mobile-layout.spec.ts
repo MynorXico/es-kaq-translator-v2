@@ -99,6 +99,7 @@ test.describe("mobile layout (#41)", () => {
   });
 
   test("the translator content column caps at 480px, per #52's mobile spec", async ({ page }) => {
+    await page.setViewportSize(MOBILE_VIEWPORT);
     await page.goto("/");
     const maxWidth = await page.locator("main").evaluate((el) => getComputedStyle(el).maxWidth);
     expect(maxWidth).toBe("480px");
