@@ -345,6 +345,26 @@ a:focus-visible {
   }
 }
 
+/* Vertical positioning/balance on tall viewports: pins the shell's top
+   edge with a height-gated offset (not true centering, since the shell's
+   height varies across states and the textarea has a native resize
+   handle — centering would make the card jump under the user's cursor
+   mid-drag). Gated on height as well as width so a short-but-wide window
+   (e.g. 1920x700) and the common 1366x768 laptop don't get pushed toward
+   the fold; see #135. */
+@media (min-width: 800px) and (min-height: 800px) {
+  .app-shell {
+    margin-top: clamp(64px, 8vh, 140px);
+    margin-bottom: clamp(64px, 8vh, 140px);
+  }
+
+  body {
+    background:
+      radial-gradient(ellipse 900px 520px at 50% 34%, var(--primary-tint), transparent 70%),
+      var(--bg);
+  }
+}
+
 .zigzag {
   height: 10px;
   margin: 0.5rem 0 1.5rem;
