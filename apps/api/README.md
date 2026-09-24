@@ -1,9 +1,8 @@
 # apps/api
 
-FastAPI service exposing the Spanish<->Kaqchikel translation API. Currently
-a hello-world scaffold: `GET /health` and a `POST /v1/translate` stub that
-returns a placeholder message — real model integration (calling a
-SageMaker Serverless Inference endpoint) is tracked separately, see
+FastAPI service exposing the Spanish<->Kaqchikel translation API:
+`GET /health` and `POST /v1/translate`, which calls the deployed SageMaker
+Serverless Inference endpoint (`app/translation.py`, issue #9) — see
 [`docs/adr/0001-initial-architecture.md`](../../docs/adr/0001-initial-architecture.md).
 
 Deployed as a Lambda container image behind an API Gateway HTTP API (see
@@ -42,7 +41,7 @@ uv run ruff check .                    # lint
 | Env var | Purpose | Default |
 |---|---|---|
 | `ALLOWED_ORIGINS` | Comma-separated list of origins allowed to call the API cross-origin (CORS), i.e. the deployed `apps/web` origin for the current environment. | `http://localhost:5173` (Vite's default dev server origin) |
-| `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint to invoke for real translations (issues #8/#9). Set by `ApiStack` to `traductor-kaqchikel-translate-<environment>` by default. The Lambda execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN. Not yet read by any code -- `/v1/translate` is still the placeholder stub; #9 should read it via `boto3`'s `sagemaker-runtime` client. | unset locally |
+| `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint `app/translation.py` invokes via `boto3`'s `sagemaker-runtime` client for real translations (issues #8/#9). Set by `ApiStack`/`app-stage.ts`, which pass through `MlHostingStack`'s real endpoint name for environments that have one (dev, for now). The Lambda execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN. | unset locally (required to call `/v1/translate`) |
 
 Each environment's CDK deployment sets `ALLOWED_ORIGINS` to its own
 `apps/web` origin once that domain exists (see

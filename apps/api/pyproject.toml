@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "mangum>=0.17",
+    "boto3>=1.34",
 ]
 
 [dependency-groups]
