@@ -79,6 +79,53 @@ describe("buildPipelineApp", () => {
     expect(stagesWithManualApproval[0].Name.startsWith("Prod")).toBe(true);
   });
 
+  it("bakes the dev API Gateway URL into the synth step's VITE_API_BASE_URL env var", () => {
+    const app = new App();
+    const stack = buildPipelineApp(
+      app,
+      { ...FAKE_CONFIG, webApiBaseUrls: { dev: "https://fake-api.example.com" } },
+      FIXTURE_SITE_CONTENT_PATH,
+    );
+    app.synth();
+    const template = Template.fromStack(stack);
+
+    const projects = template.findResources("AWS::CodeBuild::Project");
+    const synthProject = Object.values(projects).find((project) => {
+      const envVars = project.Properties.Environment?.EnvironmentVariables as
+        | Array<{ Name: string }>
+        | undefined;
+      return envVars?.some((envVar) => envVar.Name === "VITE_API_BASE_URL");
+    });
+    expect(synthProject).toBeDefined();
+
+    const envVars = synthProject!.Properties.Environment.EnvironmentVariables as Array<{
+      Name: string;
+      Value: string;
+    }>;
+    const viteApiBaseUrl = envVars.find((envVar) => envVar.Name === "VITE_API_BASE_URL");
+    expect(viteApiBaseUrl?.Value).toBe("https://fake-api.example.com");
+  });
+
+  it("falls back to an empty string VITE_API_BASE_URL when no dev API URL is configured", () => {
+    const template = synthPipelineTemplate();
+
+    const projects = template.findResources("AWS::CodeBuild::Project");
+    const synthProject = Object.values(projects).find((project) => {
+      const envVars = project.Properties.Environment?.EnvironmentVariables as
+        | Array<{ Name: string }>
+        | undefined;
+      return envVars?.some((envVar) => envVar.Name === "VITE_API_BASE_URL");
+    });
+    expect(synthProject).toBeDefined();
+
+    const envVars = synthProject!.Properties.Environment.EnvironmentVariables as Array<{
+      Name: string;
+      Value: string;
+    }>;
+    const viteApiBaseUrl = envVars.find((envVar) => envVar.Name === "VITE_API_BASE_URL");
+    expect(viteApiBaseUrl?.Value).toBe("");
+  });
+
   it("scopes the synth step's SSM permissions to the traductor-kaqchikel parameter path", () => {
     const template = synthPipelineTemplate();
 

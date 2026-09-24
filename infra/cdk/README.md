@@ -76,13 +76,16 @@ build` before `cdk synth`, so `WebStack`'s `BucketDeployment` always has a
 real, fresh Vite build to deploy — every environment currently gets the
 exact same build output (see the doc comment on `buildPipelineApp` for why
 that's fine for now). The build's `VITE_API_BASE_URL` (see
-`apps/web/README.md`) comes from `PipelineConfig.webApiBaseUrl` and
-defaults to an empty string — a same-origin relative request against the
-environment's own CloudFront distribution, which fails harmlessly and
-surfaces as a generic client-side error (not an actual HTTP 404 — see the
-doc comment on `PipelineConfig.webApiBaseUrl` for why) — until issue #96
-(`apps/api`'s own deployment) lands and that value can be wired to a real
-origin.
+`apps/web/README.md`) comes from `PipelineConfig.webApiBaseUrls.dev`,
+fetched by `bin/app.ts` from the `/traductor-kaqchikel/api-urls/dev` SSM
+parameter (issue #130) — it defaults to an empty string only when that
+parameter is absent, which now means a same-origin relative request
+against the environment's own CloudFront distribution, failing harmlessly
+and surfacing as a generic client-side error (not an actual HTTP 404 —
+see the doc comment on `PipelineConfig.webApiBaseUrls` for why). `qa`/
+`prod` don't have a real `ApiStack` URL to bake in yet, so their SSM
+parameters (and `PipelineConfig` entries) are expected to stay absent
+until each environment has one.
 
 A local `cdk synth`/`cdk deploy` needs `apps/web/dist` to already exist
 (run `pnpm --filter web build` first) unless you're using

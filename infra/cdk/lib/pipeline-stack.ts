@@ -20,23 +20,36 @@ export interface PipelineConfig {
   /** e.g. "MynorXico/es-kaq-translator-v2" */
   repoString: string;
   /**
-   * Build-time `VITE_API_BASE_URL` baked into every `apps/web` build this
-   * pipeline produces (see apps/web/README.md). Deliberately NOT wired to
-   * the real `apps/api` deployment yet -- that's issue #96, being built in
-   * parallel with no visibility into its exact CloudFormation output name
-   * from here (see issue #84). Defaults to an empty string (a same-origin
+   * Per-environment `apps/api` HTTP API Gateway URL (issue #96/#123),
+   * fetched by `bin/app.ts` from `/traductor-kaqchikel/api-urls/{env}` SSM
+   * parameters -- the same async SSM-Parameter-Store-at-synth-time pattern
+   * as `previouslyValidatedWebCertDomains` below (ADR 0004/0007), and for
+   * the same reason: `ApiStack`'s real URL is a CloudFormation-resolved
+   * value that doesn't exist until *after* that stack deploys, so it can't
+   * be read from within this synchronous, pre-deploy synth step the way
+   * `MlHostingStack`'s plain constructed endpoint name was threaded into
+   * `ApiStack` for issue #9. An absent entry means no real `ApiStack` has
+   * been deployed for that environment yet (qa/prod, for now).
+   *
+   * Only `dev`'s value is actually used below: the synth step below builds
+   * `apps/web` once, shared by every stage (issue #84), so there's only
+   * one `VITE_API_BASE_URL` to bake in. `qa`/`prod` are captured here so
+   * they're ready to use once per-stage builds (or their own real
+   * `ApiStack`s) exist -- see `webSiteContentPath`'s doc comment above
+   * `buildPipelineApp`.
+   *
+   * A missing `dev` value falls back to an empty string (a same-origin
    * relative request against this environment's own CloudFront
    * distribution, rather than silently pointing a deployed environment at
-   * a local dev server) until #96 lands, at which point wiring the real
-   * URL through here is a small follow-up. Note this doesn't actually
-   * fail with a 404: `WebStack`'s SPA-routing fallback (403/404 ->
-   * `index.html` with a 200) means the client gets a 200 with the app's
-   * own HTML body instead, which then fails harmlessly client-side
-   * (`response.json()` throws parsing HTML as JSON, surfaced to the user
-   * as a generic error by `apps/web/src/App.tsx`'s existing error
-   * handling) -- not a real HTTP 404.
+   * a local dev server). Note this doesn't actually fail with a 404:
+   * `WebStack`'s SPA-routing fallback (403/404 -> `index.html` with a 200)
+   * means the client gets a 200 with the app's own HTML body instead,
+   * which then fails harmlessly client-side (`response.json()` throws
+   * parsing HTML as JSON, surfaced to the user as a generic error by
+   * `apps/web/src/App.tsx`'s existing error handling) -- not a real HTTP
+   * 404.
    */
-  webApiBaseUrl?: string;
+  webApiBaseUrls?: Partial<Record<"dev" | "qa" | "prod", string>>;
   /**
    * Per-environment domain name that had a successfully DNS-validated ACM
    * certificate as of the last runbook update (ADR 0007), fetched by
@@ -74,7 +87,7 @@ const SSM_PARAMETER_PATH_PREFIX = "traductor-kaqchikel";
  * below builds `apps/web` once, before running `cdk synth`, so all of
  * Dev/Qa/Prod deploy the exact same build output (issue #84; per-stage
  * builds only become meaningful once each environment has its own real
- * `apps/api` URL to bake in, see `webApiBaseUrl` above).
+ * `apps/api` URL to bake in, see `webApiBaseUrls` above).
  */
 export function buildPipelineApp(app: App, config: PipelineConfig, webSiteContentPath: string): Stack {
   const stack = new Stack(app, "TraductorKaqchikel-Pipeline", {
@@ -92,7 +105,7 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
     // (lib/web-stack.ts) has real content to pick up from disk.
     commands: ["pnpm --filter web build", "pnpm --filter infra-cdk synth"],
     env: {
-      VITE_API_BASE_URL: config.webApiBaseUrl ?? "",
+      VITE_API_BASE_URL: config.webApiBaseUrls?.dev ?? "",
     },
     primaryOutputDirectory: "infra/cdk/cdk.out",
     rolePolicyStatements: [

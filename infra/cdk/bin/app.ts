@@ -40,6 +40,14 @@ function mockConfig(): PipelineConfig {
       qa: webHostName("qa"),
       prod: webHostName("prod"),
     },
+    // Plausible fake API Gateway URLs so `test/mock-synth.test.ts`'s
+    // credential-free `cdk synth` exercises the same `VITE_API_BASE_URL`
+    // wiring as a real synth (see `PipelineConfig.webApiBaseUrls`).
+    webApiBaseUrls: {
+      dev: "https://mock-dev-api.execute-api.us-east-1.amazonaws.com",
+      qa: "https://mock-qa-api.execute-api.us-east-1.amazonaws.com",
+      prod: "https://mock-prod-api.execute-api.us-east-1.amazonaws.com",
+    },
   };
 }
 
@@ -90,6 +98,9 @@ async function realConfig(): Promise<PipelineConfig> {
     devWebCertDomain,
     qaWebCertDomain,
     prodWebCertDomain,
+    devApiBaseUrl,
+    qaApiBaseUrl,
+    prodApiBaseUrl,
   ] = await Promise.all([
     fetchSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/accounts/tooling`),
     fetchSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/accounts/dev`),
@@ -102,6 +113,13 @@ async function realConfig(): Promise<PipelineConfig> {
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/domains/dev-web-cert-domain`),
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/domains/qa-web-cert-domain`),
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/domains/prod-web-cert-domain`),
+    // Issue #130: absent (no real `ApiStack` deployed for that environment
+    // yet -- qa/prod, for now) is expected, not an error -- same
+    // `fetchOptionalSsmParameter` treatment as the cert-domain lookups
+    // above.
+    fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/dev`),
+    fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/qa`),
+    fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/prod`),
   ]);
 
   return {
@@ -116,6 +134,11 @@ async function realConfig(): Promise<PipelineConfig> {
       dev: devWebCertDomain,
       qa: qaWebCertDomain,
       prod: prodWebCertDomain,
+    },
+    webApiBaseUrls: {
+      dev: devApiBaseUrl,
+      qa: qaApiBaseUrl,
+      prod: prodApiBaseUrl,
     },
   };
 }
