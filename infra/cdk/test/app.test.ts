@@ -101,13 +101,16 @@ describe("realConfig", () => {
           "arn:aws:codeconnections:us-east-1:111111111111:connection/real-connection-id",
         "/traductor-kaqchikel/domains/dev-web-cert-domain": "app-dev.traductorkaqchikel.com",
         "/traductor-kaqchikel/domains/qa-web-cert-domain": "app-qa.traductorkaqchikel.com",
+        "/traductor-kaqchikel/api-urls/dev": "https://ovc1orcvql.execute-api.us-east-1.amazonaws.com",
       };
       const name = command.input.Name;
       if (name in values) {
         return Promise.resolve(parameterResponse(values[name]));
       }
-      // prod-web-cert-domain is deliberately absent -- simulates a
-      // never-yet-validated environment (first-ever certificate).
+      // prod-web-cert-domain, api-urls/qa, and api-urls/prod are
+      // deliberately absent -- simulates a never-yet-validated environment
+      // (first-ever certificate) and environments without a real
+      // `ApiStack` deployed yet.
       return Promise.reject(new FakeParameterNotFound());
     });
 
@@ -123,6 +126,11 @@ describe("realConfig", () => {
     expect(config.previouslyValidatedWebCertDomains).toEqual({
       dev: "app-dev.traductorkaqchikel.com",
       qa: "app-qa.traductorkaqchikel.com",
+      prod: undefined,
+    });
+    expect(config.webApiBaseUrls).toEqual({
+      dev: "https://ovc1orcvql.execute-api.us-east-1.amazonaws.com",
+      qa: undefined,
       prod: undefined,
     });
   });
@@ -154,6 +162,7 @@ describe("resolveConfig", () => {
       qa: webHostName("qa"),
       prod: webHostName("prod"),
     });
+    expect(config.webApiBaseUrls?.dev).toMatch(/^https?:\/\//);
     expect(config.newCertificateAck).toBe(false);
   });
 
