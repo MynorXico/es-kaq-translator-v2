@@ -28,6 +28,39 @@ minus everything training-only:
   warm-start embeddings for brand-new tokens *before* fine-tuning trains
   them, which has nothing to do here.
 
+## Reconstructing issue #116's word-boundary-spacing fix for a reloaded checkpoint
+
+A checkpoint's saved tokenizer never persists which added tokens were
+whole words/characters (`training.tokenizer_extension.
+extend_tokenizer_vocab`) versus subword pieces
+(`extend_tokenizer_vocab_with_subwords`) -- `_mark_word_boundary_tokens`'s
+effect (issue #116's fix) lives only on the live tokenizer *instance* that
+originally called it, and `save_pretrained()` only ever writes a flat
+`added_tokens.json` list. Simply reloading a checkpoint's tokenizer here
+and generating translations would therefore silently **not** apply #116's
+fix at all, even after that fix landed -- see `training.
+tokenizer_extension`'s module docstring ("Re-evaluating an already-trained
+checkpoint") for the full argument.
+
+This script recovers it: `--train`/`--train-direction` (both required)
+must name the exact training corpus and direction the checkpoint's own
+training history used (from that run's own model card/hyperparameters --
+*not* necessarily the same as this script's own `--direction`, which only
+controls what to *evaluate*, not what the checkpoint was *trained* with).
+Given those, `training.tokenizer_extension.
+patch_word_boundary_decoding_for_checkpoint` deterministically recomputes
+the same whole-word boundary token set the checkpoint's training run(s)
+actually added (no SentencePiece retraining, no randomness -- see that
+function's docstring) and patches the reloaded tokenizer's decode behavior
+in place, before any translation is generated. `--base-model` (already
+recorded for provenance) is also used here to load the *pristine* base
+tokenizer vocab this reconstruction is computed against. The number of
+boundary tokens reconstructed/applied is recorded in the model card's
+hyperparameters for traceability, and a warning is logged (not raised) if
+any reconstructed token turns out to be missing from the checkpoint's own
+vocabulary -- a sign `--train`/`--train-direction`/`--base-model` don't
+actually match what the checkpoint was trained with.
+
 ## Provenance: distinguishing a re-evaluation from a training run's own eval
 
 A model card produced by this script is **not** a new training run: it
@@ -75,7 +108,8 @@ from typing import Any
 
 from data.corpus_io import read_tsv_pairs
 from evaluation.run import run_evaluation
-from training.direction import DIRECTION_CHOICES, build_direction_examples
+from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_CHOICES, build_direction_examples
+from training.tokenizer_extension import patch_word_boundary_decoding_for_checkpoint
 from training.train import DEFAULT_BASE_MODEL, generate_translations, resolve_model_source
 
 _S3_URI_RE = re.compile(r"^s3://(?P<bucket>[^/]+)/(?P<key>.+)$")
@@ -110,6 +144,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Path or s3:// URI to the validation corpus TSV (source<TAB>target).",
     )
     parser.add_argument(
+        "--train",
+        required=True,
+        help=(
+            "Path or s3:// URI to the exact training corpus TSV the "
+            "checkpoint's own training history was extended against (from "
+            "that run's own model card/hyperparameters -- see this "
+            "module's docstring, 'Reconstructing issue #116's "
+            "word-boundary-spacing fix'). Required: without it, this "
+            "script cannot correctly recover which of the checkpoint's "
+            "added tokens must decode with a leading space, and would "
+            "silently under-report or over-report issue #116's fix."
+        ),
+    )
+    parser.add_argument(
+        "--train-direction",
+        choices=DIRECTION_CHOICES,
+        default="both",
+        help=(
+            "The --direction value the checkpoint's own training run(s) "
+            "used to build the sample text its vocabulary was extended "
+            "against (training.train's own default is 'both'). This is "
+            "*not* the same as this script's own --direction below, which "
+            "only controls what to evaluate -- get this wrong and the "
+            "word-boundary reconstruction below will be silently "
+            "incorrect."
+        ),
+    )
+    parser.add_argument(
         "--corpus-version",
         required=True,
         help=(
@@ -138,10 +200,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_BASE_MODEL,
         help=(
             "Hugging Face model id the checkpoint was originally "
-            "fine-tuned from, recorded in the model card for traceability "
-            "only -- this is never actually loaded, since the checkpoint "
-            "itself (already fine-tuned, with its extended vocabulary "
-            "already saved) is loaded directly instead."
+            "fine-tuned from. Recorded in the model card for traceability, "
+            "and also actually loaded (its *tokenizer* only, never its "
+            "weights) to get the pristine, pre-extension vocab that issue "
+            "#116's word-boundary reconstruction is computed against -- "
+            "the checkpoint's own (already-extended) tokenizer must never "
+            "be used for that base vocab, or the reconstruction would "
+            "wrongly see everything as 'already covered'."
         ),
     )
     parser.add_argument(
@@ -222,22 +287,68 @@ def load_checkpoint_tokenizer_and_model(source: str) -> tuple[Any, Any]:
     return tokenizer, model
 
 
+def load_base_tokenizer_vocab(base_model: str) -> dict[str, int]:
+    """Load *only* the vocab (`get_vocab()`) of a pristine base tokenizer
+    (e.g. `facebook/m2m100_418M`, never one with any extension already
+    applied). Used as the `base_vocab` argument to `training.
+    tokenizer_extension.reconstruct_whole_word_boundary_tokens`/
+    `patch_word_boundary_decoding_for_checkpoint` -- see this module's
+    docstring, "Reconstructing issue #116's word-boundary-spacing fix".
+    Lazily imports `transformers`, same laziness pattern as
+    `load_checkpoint_tokenizer_and_model` above.
+    """
+    from transformers import M2M100Tokenizer
+
+    return M2M100Tokenizer.from_pretrained(base_model).get_vocab()
+
+
+def _warn_if_boundary_tokens_missing_from_checkpoint(
+    boundary_tokens: list[str], tokenizer: Any
+) -> None:
+    """Log a warning (never raise) if any reconstructed boundary token
+    isn't actually present in the checkpoint's own vocabulary -- a sign
+    `--train`/`--train-direction`/`--base-model` don't actually match what
+    the checkpoint was trained with (see `patch_word_boundary_decoding_
+    for_checkpoint`'s docstring). Duck-typed fakes without `get_vocab`
+    (not expected in real use, but used by some unit tests) are skipped
+    silently rather than raising here.
+    """
+    if not boundary_tokens or not hasattr(tokenizer, "get_vocab"):
+        return
+    checkpoint_vocab = tokenizer.get_vocab()
+    missing = [token for token in boundary_tokens if token not in checkpoint_vocab]
+    if missing:
+        import sys
+
+        print(
+            f"WARNING: {len(missing)} of {len(boundary_tokens)} reconstructed "
+            "word-boundary tokens are missing from the checkpoint's own "
+            "vocabulary -- --train/--train-direction/--base-model may not "
+            f"match what this checkpoint was actually trained with. "
+            f"Sample missing tokens: {missing[:10]!r}",
+            file=sys.stderr,
+        )
+
+
 def run_checkpoint_evaluation(
     args: argparse.Namespace,
     *,
     resolve_source: Callable[[str], str] = resolve_checkpoint_source,
     model_loader: Callable[[str], tuple[Any, Any]] = load_checkpoint_tokenizer_and_model,
+    base_vocab_loader: Callable[[str], dict[str, int]] = load_base_tokenizer_vocab,
     translator: Callable[..., list[str]] = generate_translations,
 ) -> Path:
     """Run the full eval-only job: load validation corpus -> load
-    checkpoint -> translate -> evaluate -> write model card. Returns the
-    path to the written model card.
+    checkpoint -> reconstruct + patch issue #116's word-boundary decoding
+    fix -> translate -> evaluate -> write model card. Returns the path to
+    the written model card.
 
     Deliberately does **not** call `training.train.fine_tune` or
     `training.train.extend_vocabulary_for_examples` -- see this module's
-    own docstring for why. `resolve_source`/`model_loader`/`translator`
-    default to the real implementations above; tests inject fakes in
-    their place (see `tests/integration/test_evaluate_checkpoint_pipeline.py`).
+    own docstring for why. `resolve_source`/`model_loader`/
+    `base_vocab_loader`/`translator` default to the real implementations
+    above; tests inject fakes in their place (see `tests/integration/
+    test_evaluate_checkpoint_pipeline.py`).
     """
     run_id = args.run_id or datetime.now(UTC).strftime("reeval-%Y%m%dT%H%M%SZ")
 
@@ -246,6 +357,22 @@ def run_checkpoint_evaluation(
 
     model_source = resolve_source(args.checkpoint)
     tokenizer, model = model_loader(model_source)
+
+    # Reconstruct + patch issue #116's word-boundary-spacing fix before
+    # generating any translation -- see this module's docstring
+    # ("Reconstructing issue #116's word-boundary-spacing fix") for why a
+    # reloaded checkpoint's tokenizer can't just carry this itself.
+    train_pairs = read_tsv_pairs(args.train)
+    train_examples = build_direction_examples(train_pairs, args.train_direction)
+    train_sample_texts = [ex.source_text for ex in train_examples] + [
+        ex.target_text for ex in train_examples
+    ]
+    train_sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+    base_vocab = base_vocab_loader(args.base_model)
+    boundary_tokens = patch_word_boundary_decoding_for_checkpoint(
+        tokenizer, base_vocab, train_sample_texts
+    )
+    _warn_if_boundary_tokens_missing_from_checkpoint(boundary_tokens, tokenizer)
 
     hypotheses = translator(
         model, tokenizer, val_examples, max_length=args.max_length, batch_size=args.batch_size
@@ -275,6 +402,9 @@ def run_checkpoint_evaluation(
             "source_checkpoint": args.checkpoint,
             "max_length": args.max_length,
             "batch_size": args.batch_size,
+            "word_boundary_reconstruction_train": args.train,
+            "word_boundary_reconstruction_train_direction": args.train_direction,
+            "word_boundary_tokens_reconstructed": len(boundary_tokens),
         },
         "notes": (
             f"Re-evaluation of an existing checkpoint from run "
@@ -283,9 +413,19 @@ def run_checkpoint_evaluation(
             "own model card for its training sentence count). Hypotheses "
             "were generated with the fixed training.train."
             "generate_translations() (issue #106's direction-tag-leak "
-            "fix), so this model card's BLEU/chrF supersedes any earlier "
-            "number reported for the same checkpoint. This run produced no "
-            "new weights and registered no new SageMaker Model Registry "
+            "fix). This tokenizer was also patched with issue #116's "
+            "word-boundary-spacing fix, reconstructed from --train/"
+            "--train-direction/--base-model rather than persisted by the "
+            f"checkpoint itself ({len(boundary_tokens)} whole-word "
+            "boundary tokens reconstructed -- see training."
+            "tokenizer_extension.patch_word_boundary_decoding_for_"
+            "checkpoint), since a saved checkpoint's tokenizer never "
+            "records which added tokens need it. This model card's "
+            "BLEU/chrF therefore supersedes any earlier number reported "
+            "for the same checkpoint, including a prior re-evaluation "
+            "that only applied issue #106's fix without also correctly "
+            "reconstructing issue #116's. This run produced no new "
+            "weights and registered no new SageMaker Model Registry "
             f"model package -- it only re-scores the already-registered "
             f"weights from {args.source_run_id!r}."
         ),

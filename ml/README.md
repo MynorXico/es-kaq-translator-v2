@@ -290,6 +290,36 @@ a local one — the one piece of genuinely new logic here, unit-tested
 against a fake S3 client in `tests/unit/test_evaluate_checkpoint_source.py`
 without ever touching real AWS).
 
+**`--train`/`--train-direction` (required): reconstructing issue #116's
+word-boundary-spacing fix for a reloaded checkpoint.** A checkpoint's saved
+tokenizer never records which added tokens were whole words/characters
+(`training.tokenizer_extension.extend_tokenizer_vocab`) versus subword
+pieces (`extend_tokenizer_vocab_with_subwords`) — `_mark_word_boundary_
+tokens`'s effect (issue #116's fix) lives only on the live tokenizer
+*instance* that originally called it, and `save_pretrained()` only ever
+writes a flat `added_tokens.json` list. Simply reloading a checkpoint here
+and generating translations would therefore silently **not** apply #116's
+fix at all, even after that fix landed on `main` — discovered when
+attempting to re-evaluate the deployed checkpoint (`run-20260922T141956Z`)
+against #116's fix without retraining. `--train`/`--train-direction` must
+name the exact training corpus/direction the checkpoint's *own* training
+history used (from that run's own model card/hyperparameters — not
+necessarily the same as this script's own `--direction`, which only
+controls what to *evaluate*). Given those, `training.tokenizer_extension.
+patch_word_boundary_decoding_for_checkpoint` deterministically recomputes
+the same whole-word boundary token set the checkpoint's training run(s)
+actually added — no SentencePiece retraining, no randomness, safe even
+across a chain of `--init-model` continuation runs (`training.
+tokenizer_extension`'s module docstring has the full argument, confirmed
+empirically against the real deployed checkpoint's own continuation
+chain) — and patches the reloaded tokenizer's decode behavior in place
+before any translation is generated. The reconstructed token count is
+recorded in the model card's hyperparameters
+(`word_boundary_tokens_reconstructed`), and a warning is printed to stderr
+(not raised) if any reconstructed token turns out to be missing from the
+checkpoint's own vocabulary — a sign `--train`/`--train-direction`/
+`--base-model` don't actually match what the checkpoint was trained with.
+
 **Provenance**: a model card produced by this script is *not* a new
 training run's own eval, and is marked as such so it can't be confused
 with one — `--source-run-id` (required) names the training run whose
@@ -307,6 +337,8 @@ own `--help` for every flag):
 uv run python -m evaluation.evaluate_checkpoint \
   --checkpoint s3://<training-data-bucket>/model-artifacts/<run-id>/output/model.tar.gz \
   --validation s3://<training-data-bucket>/corpus/almg/v1/val.tsv \
+  --train s3://<training-data-bucket>/corpus/almg/v1/train.tsv \
+  --train-direction both \
   --corpus-version almg-v1 \
   --source-run-id <run-id> \
   --output-dir ./eval-output
@@ -314,15 +346,24 @@ uv run python -m evaluation.evaluate_checkpoint \
 
 Test coverage follows this project's "duck-type and fixture" convention
 (`tests/integration/test_evaluate_checkpoint_pipeline.py`, mirroring
-`tests/integration/test_train_pipeline.py`): a fake checkpoint loader and a
-fake `generate_translations` stand in for the real (heavy) model
-load/generate calls, and one test asserts the fake tokenizer's `add_tokens`
-is never called, guarding against vocabulary extension being reintroduced
-here by mistake. **No real checkpoint is downloaded and no real
-SageMaker job is submitted in this repo's test suite** — actually running
-this against the real checkpoint is a separate, maintainer-run action
-(issue #108's follow-up), same as `training/submit_job.py`'s real training
-job submission.
+`tests/integration/test_train_pipeline.py`): a fake checkpoint loader, a
+fake base-tokenizer-vocab loader, and a fake `generate_translations` stand
+in for the real (heavy) model load/generate calls, and one test asserts
+the fake tokenizer's `add_tokens` is never called, guarding against
+vocabulary extension being reintroduced here by mistake. Separate tests
+cover the word-boundary reconstruction wiring itself (a real, non-zero
+token count reaches the model card; a mismatched fake checkpoint vocab
+triggers the stderr warning) and, against the real
+`facebook/m2m100_418M` tokenizer,
+`tests/integration/test_tokenizer_extension_reload_reconstruction.py`
+proves the underlying save/reload/reconstruct round-trip actually works
+(extend → save → reload loses issue #116's fix → reconstruct + patch
+recovers it, byte-for-byte matching the never-saved original's decode
+output). **No real checkpoint is downloaded and no real SageMaker job is
+submitted in this repo's test suite** — actually running this against the
+real checkpoint is a separate, maintainer-run action (issue #108's
+follow-up), same as `training/submit_job.py`'s real training job
+submission.
 
 ## Tokenizer/vocabulary extension for Kaqchikel (`training/`)
 

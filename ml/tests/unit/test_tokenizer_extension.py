@@ -13,6 +13,8 @@ from training.tokenizer_extension import (
     compute_new_tokens_for_texts,
     extend_tokenizer_vocab,
     extend_tokenizer_vocab_with_subwords,
+    patch_word_boundary_decoding_for_checkpoint,
+    reconstruct_whole_word_boundary_tokens,
 )
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -40,6 +42,20 @@ class FakeM2M100Tokenizer:
             next_id += 1
             added += 1
         return added
+
+
+class FakeDecodingTokenizer(FakeM2M100Tokenizer):
+    """Extends `FakeM2M100Tokenizer` with a naive `convert_tokens_to_string`
+    that just concatenates tokens with no separator -- standing in for a
+    real `sentencepiece` `sp_model.decode()` call that has no idea how to
+    space a token it never registered (issue #116's actual root cause).
+    Unlike `FakeM2M100Tokenizer`, this fake *can* exercise
+    `_mark_word_boundary_tokens`'s wrapper logic, since it implements the
+    one method that logic patches.
+    """
+
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+        return "".join(tokens)
 
 
 def _base_vocab() -> dict[str, int]:
@@ -113,3 +129,102 @@ def test_extend_tokenizer_vocab_with_subwords_is_idempotent_on_second_call():
 
     assert first
     assert second == []
+
+
+def test_reconstruct_whole_word_boundary_tokens_matches_a_live_extension():
+    """The whole point of `reconstruct_whole_word_boundary_tokens` (issue
+    #116's re-evaluation gap): given the *same* pristine base vocab and
+    the *same* sample texts `extend_tokenizer_vocab` originally saw, it
+    must recover exactly the same set of multi-character (whole-word)
+    tokens that a live `extend_tokenizer_vocab` call would mark as word
+    boundaries -- without ever calling `add_tokens` itself.
+    """
+    base_vocab = _base_vocab()
+    sample_texts = ["k'o awäch zqvbn ri nimalaj"]
+
+    live_tokenizer = FakeM2M100Tokenizer(base_vocab)
+    live_added = extend_tokenizer_vocab(live_tokenizer, sample_texts)
+    live_whole_word_tokens = {token for token in live_added if len(token) > 1}
+
+    reconstructed = reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
+
+    assert live_whole_word_tokens
+    assert set(reconstructed) == live_whole_word_tokens
+
+
+def test_reconstruct_whole_word_boundary_tokens_excludes_single_characters():
+    base_vocab = _base_vocab()
+
+    reconstructed = reconstruct_whole_word_boundary_tokens(base_vocab, ["k'o awäch"])
+
+    assert all(len(token) > 1 for token in reconstructed)
+    assert "'" not in reconstructed
+    assert "ä" not in reconstructed
+
+
+def test_reconstruct_whole_word_boundary_tokens_is_a_fixed_point_of_the_corpus():
+    """Confirms the property this project's real re-evaluation relies on
+    (see `training.tokenizer_extension`'s module docstring): re-running
+    whole-word extension against a vocab that already covers the corpus
+    (e.g. a continuation-training checkpoint re-extending against the same
+    corpus its own earlier training pass already covered) is a no-op --
+    so the reconstruction is unaffected by how many times the real
+    checkpoint's training chain re-applied it.
+    """
+    base_vocab = _base_vocab()
+    sample_texts = ["k'o awäch zqvbn"]
+
+    first_pass = reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
+    already_extended_vocab = dict(base_vocab)
+    next_id = max(already_extended_vocab.values()) + 1
+    for offset, token in enumerate(first_pass):
+        already_extended_vocab[token] = next_id + offset
+
+    second_pass = reconstruct_whole_word_boundary_tokens(already_extended_vocab, sample_texts)
+
+    assert first_pass
+    assert second_pass == []
+
+
+def test_patch_word_boundary_decoding_for_checkpoint_fixes_glued_words():
+    """Simulates reloading a checkpoint's tokenizer that already has a
+    whole-word token added (as if by a prior, now-forgotten
+    `extend_tokenizer_vocab` call) but *without* its boundary-marking
+    wrapper installed -- exactly what a real `save_pretrained()` /
+    `from_pretrained()` round-trip loses (this module's docstring).
+    """
+    base_vocab = {c: i for i, c in enumerate("abcdefghijklmnopqrstuvwxyzáéíóúñ. ")}
+    base_vocab["▁de"] = len(base_vocab)
+    base_vocab["▁dios"] = len(base_vocab)
+    sample_texts = ["awach"]
+
+    checkpoint_vocab = dict(base_vocab)
+    checkpoint_vocab["awach"] = max(checkpoint_vocab.values()) + 1
+    tokenizer = FakeDecodingTokenizer(checkpoint_vocab)
+
+    # Before patching: the naive/real decode path glues the added token
+    # directly onto its neighbor, exactly like the real bug.
+    assert tokenizer.convert_tokens_to_string(["▁de", "▁dios", "awach"]) == "▁de▁diosawach"
+
+    applied = patch_word_boundary_decoding_for_checkpoint(tokenizer, base_vocab, sample_texts)
+
+    assert "awach" in applied
+    decoded = tokenizer.convert_tokens_to_string(["▁de", "▁dios", "awach"])
+    assert decoded == "▁de ▁dios awach"
+
+
+def test_patch_word_boundary_decoding_for_checkpoint_is_a_noop_for_fakes_without_convert(
+    tmp_path,
+):
+    """`FakeM2M100Tokenizer` doesn't implement `convert_tokens_to_string`
+    (matching the other duck-typed fakes used across this project's
+    eval-only wiring tests) -- patching must no-op cleanly rather than
+    raise, exactly like `_mark_word_boundary_tokens` already documents.
+    """
+    base_vocab = _base_vocab()
+    tokenizer = FakeM2M100Tokenizer(dict(base_vocab))
+
+    applied = patch_word_boundary_decoding_for_checkpoint(tokenizer, base_vocab, ["k'o awäch"])
+
+    assert applied  # still computed and returned for caller-side logging
+    assert not hasattr(tokenizer, "convert_tokens_to_string")

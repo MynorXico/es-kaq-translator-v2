@@ -70,6 +70,20 @@ def fake_resolve_source(checkpoint: str) -> str:
 fake_resolve_source.calls = []
 
 
+def fake_base_vocab_loader(base_model: str) -> dict[str, int]:
+    fake_base_vocab_loader.calls.append(base_model)
+    # A tiny, deliberately incomplete "pristine" vocab: `sample_train.tsv`'s
+    # text (see FIXTURES / "sample_train.tsv") has real whole-word gaps
+    # against this (e.g. "awäch"), so
+    # `patch_word_boundary_decoding_for_checkpoint` has something genuine
+    # to reconstruct -- mirrors the real base_model vocab's role, not a
+    # no-op stand-in.
+    return {c: i for i, c in enumerate("abcdefghijklmnopqrstuvwxyzáéíóúñ,. ")}
+
+
+fake_base_vocab_loader.calls = []
+
+
 def fake_translator(model, tokenizer, examples, **kwargs):
     # Deliberately not a real translation -- just proves the val examples
     # (and their target language tags) reached this step correctly, same
@@ -84,6 +98,8 @@ def _base_args(tmp_path, **overrides):
         overrides.pop("checkpoint", "s3://bucket/model-artifacts/run-1/output/model.tar.gz"),
         "--validation",
         str(FIXTURES / "sample_val_clean.tsv"),
+        "--train",
+        overrides.pop("train", str(FIXTURES / "sample_train.tsv")),
         "--corpus-version",
         "almg-v1",
         "--source-run-id",
@@ -107,6 +123,7 @@ def test_run_checkpoint_evaluation_wires_checkpoint_through_to_model_card(tmp_pa
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -153,6 +170,7 @@ def test_run_checkpoint_evaluation_never_extends_vocabulary(tmp_path):
         args,
         resolve_source=fake_resolve_source,
         model_loader=capturing_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -166,6 +184,7 @@ def test_run_checkpoint_evaluation_single_direction_evaluates_half_the_examples(
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
@@ -181,6 +200,8 @@ def test_run_checkpoint_evaluation_defaults_run_id_to_a_reeval_prefixed_timestam
             "local-checkpoint-dir",
             "--validation",
             str(FIXTURES / "sample_val_clean.tsv"),
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
             "--corpus-version",
             "almg-v1",
             "--source-run-id",
@@ -194,8 +215,74 @@ def test_run_checkpoint_evaluation_defaults_run_id_to_a_reeval_prefixed_timestam
         args,
         resolve_source=fake_resolve_source,
         model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
         translator=fake_translator,
     )
 
     card_text = model_card_path.read_text(encoding="utf-8")
     assert "# Model card: reeval-" in card_text
+
+
+def test_run_checkpoint_evaluation_reconstructs_word_boundary_tokens_from_train_corpus(tmp_path):
+    """Issue #116's re-evaluation gap: a reloaded checkpoint's tokenizer
+    never records which added tokens need word-boundary decoding, so this
+    must be reconstructed from `--train`/`--train-direction`/`--base-model`
+    every run -- see `evaluate_checkpoint`'s module docstring.
+    """
+    fake_base_vocab_loader.calls.clear()
+    args, _ = _base_args(tmp_path)
+
+    model_card_path = run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    # The base tokenizer's *pristine* vocab was loaded via --base-model,
+    # never the checkpoint's own (already-extended) tokenizer.
+    assert fake_base_vocab_loader.calls == [args.base_model]
+
+    card_text = model_card_path.read_text(encoding="utf-8")
+    assert "word_boundary_reconstruction_train" in card_text
+    assert str(FIXTURES / "sample_train.tsv") in card_text
+    assert "word_boundary_reconstruction_train_direction" in card_text
+    assert "word_boundary_tokens_reconstructed" in card_text
+    # sample_train.tsv's text has genuine whole-word gaps against the tiny
+    # fake base vocab (see fake_base_vocab_loader's own docstring) -- this
+    # must be a real, non-zero reconstruction, not an accidental no-op.
+    assert "- **word_boundary_tokens_reconstructed**: 0" not in card_text
+
+
+def test_run_checkpoint_evaluation_warns_when_reconstructed_tokens_miss_the_checkpoint(
+    tmp_path, capsys
+):
+    """If `--train`/`--train-direction`/`--base-model` don't actually match
+    what the checkpoint was trained with, the reconstructed boundary
+    tokens won't all be present in the checkpoint's own vocabulary -- this
+    must be surfaced loudly (stderr), not silently ignored.
+    """
+    args, _ = _base_args(tmp_path)
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            # Deliberately missing every reconstructed boundary token --
+            # simulates a checkpoint that was never actually trained
+            # against this --train corpus.
+            return {c: i for i, c in enumerate("xyz")}
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "missing from the checkpoint" in captured.err

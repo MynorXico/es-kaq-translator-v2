@@ -30,6 +30,34 @@ duck-typed fakes that don't have one), so it doesn't affect the
 `get_vocab()`/`add_tokens()`-only unit tests above; it's covered
 separately, against the real checkpoint, in
 `tests/integration/test_tokenizer_extension_word_boundary_spacing.py`.
+
+## Re-evaluating an already-trained checkpoint (issue #116's re-evaluation gap)
+
+`_mark_word_boundary_tokens`'s effect lives entirely on a live tokenizer
+*instance* (a monkey-patched `convert_tokens_to_string` closure plus a
+mutable set) -- it is never persisted by `save_pretrained()`, which only
+writes a flat `added_tokens.json` list. Reloading a checkpoint trained
+before this module called `_mark_word_boundary_tokens` (i.e. every
+checkpoint trained before issue #116's fix, including ones already
+deployed) therefore can't recover which added tokens were whole
+words/characters (`extend_tokenizer_vocab`) versus subword pieces
+(`extend_tokenizer_vocab_with_subwords`) from the saved files alone:
+word-initial subword pieces are self-describing via their own
+`WORD_BOUNDARY_MARKER` prefix, but whole-word tokens and subword
+*continuation* pieces are both marker-less multi-character strings,
+indistinguishable from each other by inspection.
+
+`reconstruct_whole_word_boundary_tokens` / `patch_word_boundary_decoding_
+for_checkpoint` below solve this without retraining: given the exact base
+model vocab and training corpus text the checkpoint's own
+`training.train.extend_vocabulary_for_examples` call used,
+`compute_new_tokens_for_texts` is pure/deterministic (no SentencePiece
+training, no seed dependency), so it can be re-run after the fact to
+recover exactly the same whole-word token set -- see
+`reconstruct_whole_word_boundary_tokens`'s own docstring for the full
+argument, including why this still works even across a chain of
+`--init-model` continuation runs. `evaluation.evaluate_checkpoint` is the
+real caller of this.
 """
 
 from __future__ import annotations
@@ -160,6 +188,19 @@ def _mark_word_boundary_tokens(tokenizer: TokenizerLike, tokens: Iterable[str]) 
     boundary_tokens.update(tokens)
 
 
+def _select_whole_word_tokens(tokens: Iterable[str]) -> list[str]:
+    """Whole word-forms (anything longer than a single character) always
+    start a new word wherever they occur and must decode with a leading
+    space (issue #116); single characters are mid-word content and must
+    stay glued to their neighbors. Shared by `extend_tokenizer_vocab` (a
+    live extension) and `reconstruct_whole_word_boundary_tokens` (a
+    from-scratch recomputation of what a live extension would have added,
+    for a checkpoint that was never marked -- see this module's docstring)
+    so the two can't drift on this filter.
+    """
+    return [token for token in tokens if len(token) > 1]
+
+
 def compute_new_tokens_for_texts(
     sample_texts: Iterable[str], base_vocab: dict[str, int]
 ) -> list[str]:
@@ -194,14 +235,96 @@ def extend_tokenizer_vocab(tokenizer: TokenizerLike, sample_texts: Iterable[str]
     new_tokens = compute_new_tokens_for_texts(sample_texts, base_vocab)
     if new_tokens:
         tokenizer.add_tokens(new_tokens)
-        # Whole word-forms from `find_missing_words` (anything longer than
-        # a single character here) always start a new word wherever they
-        # occur and must decode with a leading space (issue #116). Single
-        # missing characters from `find_missing_characters` (the glottal
-        # apostrophe, extra vowels) are mid-word content and must stay
-        # glued to their neighbors -- unaffected, and already correct.
-        _mark_word_boundary_tokens(tokenizer, (token for token in new_tokens if len(token) > 1))
+        _mark_word_boundary_tokens(tokenizer, _select_whole_word_tokens(new_tokens))
     return new_tokens
+
+
+def reconstruct_whole_word_boundary_tokens(
+    base_vocab: dict[str, int], sample_texts: Iterable[str]
+) -> list[str]:
+    """Recompute, from scratch, the whole-word/multi-character tokens that
+    a live `extend_tokenizer_vocab` call would add for `sample_texts`
+    against a *pristine* `base_vocab` -- e.g. a freshly loaded
+    `facebook/m2m100_418M` tokenizer's own `get_vocab()`, never one with
+    any prior extension already applied.
+
+    ## Why this exists: a saved checkpoint can't tell you this on its own
+
+    `_mark_word_boundary_tokens`'s effect (issue #116's fix) lives only on
+    a live tokenizer *instance* -- a monkey-patched
+    `convert_tokens_to_string` plus a mutable set -- and is never persisted
+    by `save_pretrained()`, which only ever writes a flat `added_tokens.
+    json` list. Reloading a checkpoint's tokenizer therefore can't tell,
+    from the saved files alone, which marker-less multi-character added
+    tokens are whole words from `extend_tokenizer_vocab` (must decode with
+    a leading space) versus subword *continuation* pieces from
+    `extend_tokenizer_vocab_with_subwords` (must stay glued to their
+    neighbor) -- both are plain multi-character strings with no
+    `WORD_BOUNDARY_MARKER` prefix. Word-*initial* subword pieces don't have
+    this problem: they carry the marker themselves and are already handled
+    correctly by `_mark_word_boundary_tokens`'s own marker check,
+    regardless of whether they were ever explicitly registered in its
+    `tokens` argument.
+
+    ## Why recomputing this is safe
+
+    `compute_new_tokens_for_texts` is a pure, deterministic function of
+    `sample_texts` and `base_vocab` -- character/word set operations plus
+    `training.vocab_extension.select_new_tokens`'s sorted dedupe, no
+    SentencePiece training, no seed dependency anywhere in this step
+    (unlike `extend_tokenizer_vocab_with_subwords`, which trains a fresh
+    SentencePiece model and is *not* safe to reconstruct this way -- it
+    doesn't need to be, since its output is self-describing via the
+    marker). Given the exact base model vocab and the exact training
+    corpus text a checkpoint's own `training.train.
+    extend_vocabulary_for_examples` call used to build its `sample_texts`
+    (every training example's source *and* target text, plus the
+    direction tag tokens), re-running this recovers exactly the same
+    whole-word/character token list the live call added.
+
+    This still holds even across a chain of `--init-model` continuation
+    runs that each re-ran `extend_tokenizer_vocab` against the *same*
+    corpus: `select_new_tokens` only ever returns tokens not already in
+    the vocab, so re-applying whole-word extension against a vocab that
+    already covers the corpus is a no-op. The set of whole-word tokens a
+    checkpoint's tokenizer actually has is therefore a fixed point of its
+    training corpus, unaffected by how many training passes contributed to
+    reaching it (confirmed against this project's real deployed checkpoint
+    and its continuation chain, issue #116's re-evaluation follow-up).
+
+    This is **not** safe to use if `sample_texts`/`base_vocab` don't
+    actually match what the checkpoint's training history used (a
+    different corpus version, a different `--direction`, or a different
+    base model) -- callers must pass the exact training corpus/direction
+    recorded in the checkpoint's own (or its continuation chain's
+    earliest) training run metadata, not the evaluation run's own
+    settings. See `evaluation.evaluate_checkpoint` for the real caller.
+    """
+    new_tokens = compute_new_tokens_for_texts(sample_texts, base_vocab)
+    return _select_whole_word_tokens(new_tokens)
+
+
+def patch_word_boundary_decoding_for_checkpoint(
+    tokenizer: TokenizerLike, base_vocab: dict[str, int], sample_texts: Iterable[str]
+) -> list[str]:
+    """Patch an already-loaded checkpoint tokenizer's decode behavior with
+    issue #116's word-boundary-spacing fix, for a checkpoint whose
+    tokenizer was saved *without* `_mark_word_boundary_tokens` ever having
+    been called on it (every checkpoint trained before this reconstruction
+    path existed -- see `reconstruct_whole_word_boundary_tokens`'s
+    docstring for why a saved checkpoint can't just carry this information
+    directly).
+
+    Returns the boundary token list actually applied, so callers (e.g.
+    `evaluation.evaluate_checkpoint`) can sanity-check it against the
+    checkpoint's own vocabulary -- e.g. warn if some reconstructed tokens
+    are missing from the checkpoint's `get_vocab()`, a sign
+    `sample_texts`/`base_vocab` don't actually match what the checkpoint
+    was trained with.
+    """
+    boundary_tokens = reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
+    _mark_word_boundary_tokens(tokenizer, boundary_tokens)
+    return boundary_tokens
 
 
 def extend_tokenizer_vocab_with_subwords(
