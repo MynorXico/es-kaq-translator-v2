@@ -48,6 +48,13 @@ describe("App", () => {
     expect(container.querySelectorAll(".field-card").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("gives Traducir a primary-CTA treatment (#52's single-token teal system), not the bare button reset (#92)", () => {
+    render(<App />);
+    const translateButton = screen.getByRole("button", { name: "Traducir" });
+
+    expect(translateButton).toHaveClass("button-outline");
+  });
+
   it("shows a character counter that updates as the user types", () => {
     render(<App />);
     const input = screen.getByLabelText(/^Texto en /);
