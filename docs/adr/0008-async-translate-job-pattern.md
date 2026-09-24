@@ -200,12 +200,19 @@ Inference endpoint type is introduced by this ADR.
   small; a warm translation should still resolve within one or two poll
   intervals (a few seconds), not materially changing the experience for
   the common case.
-- **Cost**: DynamoDB on-demand and the extra Lambda invocations (one
-  enqueue + one worker + a handful of polls per translation) are
-  negligible at this project's current low, bursty traffic (ADR 0001) —
-  well within AWS free-tier levels at expected volumes, and still
-  strictly pay-per-use, preserving ADR 0001's zero-traffic-costs-nothing
-  property (unlike the pre-warming alternative below).
+- **Cost**: DynamoDB on-demand and the extra Lambda invocations are
+  negligible, low-single-digit-cents cost even at the high end, at this
+  project's current low, bursty traffic (ADR 0001) — still strictly
+  pay-per-use, preserving ADR 0001's zero-traffic-costs-nothing property
+  (unlike the pre-warming alternative below). (DynamoDB's advertised free
+  tier is specified in provisioned-capacity terms, so it's not a clean
+  fit for the on-demand billing mode this ADR uses — the underlying
+  "negligible" claim doesn't depend on it either way.) Poll volume
+  depends heavily on scenario: 1-2 polls for an already-warm request, but
+  up to roughly 30-60 polls for a full ~60-90s cold start at a 1.5-2s
+  poll interval — still cheap in absolute dollar terms, but worth stating
+  both cases explicitly since the cold-start case is this ADR's actual
+  reason for existing.
 - **ADR 0005 (rate limiting, Proposed)** will need to account for the new
   `GET` polling route when it's implemented — polls don't call SageMaker
   and are cheap, but the WAF rule's scope should cover both routes, not
@@ -220,7 +227,33 @@ Inference endpoint type is introduced by this ADR.
   wiring (extending `ApiStack` or a new small stack, `dev`'s call);
   `apps/api/app` gains `worker_handler.py` and a `jobs.py`-style module
   for the DynamoDB read/write + job-id generation; `apps/web/src/api.ts`
-  gains the poll loop. Exact module split is left to `dev`.
+  gains the poll loop. Exact module split is left to `dev`. `apps/api`'s
+  existing test coverage for the synchronous `/v1/translate` contract
+  must be replaced with test-first (per `docs/testing.md`) coverage for
+  the new job-creation/poll endpoints and the worker handler — this is a
+  named requirement of the implementation follow-up, not an incidental
+  side effect of updating the OpenAPI docs. `TranslateJobsTable` and both
+  Lambdas are per-environment resources, deployed fresh into each
+  environment's own account by the CDK Pipelines promotion (dev/qa/prod
+  each get their own table and functions), the same pattern `ApiStack`'s
+  existing resources already follow — not a shared/singleton table across
+  environments.
+- **Observability trade-off**: splitting one logical translate request
+  across two Lambdas means its two halves (request handling, SageMaker
+  inference) land in separate CloudWatch log groups, correlated only by
+  `job_id`. This is also an opportunity (issue #47's planned structured
+  logging can cleanly separate request-handling latency from inference
+  latency) but only if `job_id`-keyed structured logging is built in from
+  the start of the implementation follow-up, rather than retrofitted once
+  #47 lands.
+- **Duplicate jobs from client retries**: a client retry on
+  `POST /v1/translate-jobs` after a network blip (not a request the
+  client itself made twice deliberately, but e.g. a dropped response to
+  an otherwise-successful enqueue) creates a second, unrelated job with
+  no dedup between them. Accepted as out of scope for now, given this
+  project's current traffic and the low cost of an occasional duplicate
+  translation — a documented decision, not an oversight, revisit if it
+  becomes a real problem.
 
 ## Alternatives considered
 
