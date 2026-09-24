@@ -5,6 +5,7 @@ import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { DockerImageCode, DockerImageFunction } from "aws-cdk-lib/aws-lambda";
 import type { Construct } from "constructs";
+import { webHostName } from "./config";
 
 export interface ApiStackProps extends StackProps {
   environmentName: string;
@@ -40,7 +41,7 @@ export interface ApiStackProps extends StackProps {
  * | Env var                  | Purpose |
  * |---------------------------|---------|
  * | `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint `apps/api/app/translation.py` invokes via `boto3`'s `sagemaker-runtime` `invoke_endpoint` (#9). The Lambda's execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN in this account/region -- nothing broader (no wildcard resource, no `AmazonSageMakerFullAccess`). |
- * | `ALLOWED_ORIGINS`         | Pre-existing CORS config (see `apps/api/app/config.py`, issue #46). Deliberately left unset here (falls back to the local dev origin) since `apps/web`'s custom domain (issue #84) hasn't landed yet -- wire this up once that domain exists, rather than guessing its value now. |
+ * | `ALLOWED_ORIGINS`         | Pre-existing CORS config (see `apps/api/app/config.py`, issue #46). Set to this environment's real `apps/web` custom domain (`webHostName()`, the same SSOT `WebStack` uses) now that it exists for every environment (issues #84/#99) -- confirmed live that leaving this unset broke every real browser request with a CORS preflight failure, even though a direct `curl` against the API looked fine (curl doesn't enforce CORS). |
  *
  * See `sageMakerEndpointName` above for how this stack's default
  * `SAGEMAKER_ENDPOINT_NAME` convention gets overridden with the real
@@ -67,6 +68,7 @@ export class ApiStack extends Stack {
       timeout: Duration.seconds(29),
       environment: {
         SAGEMAKER_ENDPOINT_NAME: sageMakerEndpointName,
+        ALLOWED_ORIGINS: `https://${webHostName(props.environmentName)}`,
       },
       description: `Traductor Kaqchikel API (${props.environmentName})`,
     });

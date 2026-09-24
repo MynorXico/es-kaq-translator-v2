@@ -53,6 +53,18 @@ describe("ApiStack", () => {
     });
   });
 
+  it("passes this environment's real custom-domain origin as ALLOWED_ORIGINS, not left unset", () => {
+    const { template } = synthApiStack();
+
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          ALLOWED_ORIGINS: "https://app-test.traductorkaqchikel.com",
+        }),
+      },
+    });
+  });
+
   it("allows overriding the SageMaker endpoint name explicitly", () => {
     const { template } = synthApiStack({ sageMakerEndpointName: "some-other-endpoint" });
 
