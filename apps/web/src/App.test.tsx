@@ -514,6 +514,27 @@ describe("App bad-translation report link", () => {
     expect(body).toContain("## Input text\n\nHola");
     expect(body).not.toContain("Hola mundo");
   });
+
+  it("truncates a near-max-length input/output so the report URL stays under GitHub's length limit", async () => {
+    // Accented characters percent-encode to 6 characters each (%XX%XX for
+    // their 2-byte UTF-8 form), so near-MAX_INPUT_LENGTH text on both
+    // sides can otherwise push the built URL well past GitHub's ~8,196
+    // character limit for creating an issue via query parameters.
+    const longInput = "áéíóú ".repeat(330).trim(); // ~1979 chars, under MAX_INPUT_LENGTH
+    const longOutput = "ñüñü ".repeat(350).trim(); // ~1749 chars
+    mockedTranslate.mockResolvedValueOnce({ translation: longOutput });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: longInput } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    const href = link.getAttribute("href") ?? "";
+
+    expect(href.length).toBeLessThanOrEqual(8096);
+    const body = new URL(href).searchParams.get("body") ?? "";
+    expect(body).toContain("texto truncado");
+  });
 });
 
 describe("App direction swap", () => {

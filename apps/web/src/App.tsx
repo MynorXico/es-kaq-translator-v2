@@ -56,16 +56,16 @@ const DIRECTION_SECTION: Record<TranslationDirection, string> = {
   "cak-to-es": "- [ ] Spanish -> Kaqchikel\n- [x] Kaqchikel -> Spanish",
 };
 
-// Builds a GitHub "new issue" URL targeting translation_quality.md, with the
-// direction, input, and output already populated under the template's own
-// section headings, so a query-string `body` param lands in the right
-// places instead of just appending free text.
-function buildTranslationReportUrl(
+// GitHub's documented limit for creating an issue via URL query parameters
+// is ~8,196 characters; this stays under it with margin.
+const GITHUB_NEW_ISSUE_URL_LENGTH_LIMIT = 8096;
+
+function buildReportBody(
   direction: TranslationDirection,
   sourceText: string,
   translation: string,
 ): string {
-  const body = [
+  return [
     "## Direction",
     "",
     DIRECTION_SECTION[direction],
@@ -91,15 +91,73 @@ function buildTranslationReportUrl(
     "## Additional context",
     "",
   ].join("\n");
+}
 
+function buildReportUrl(
+  direction: TranslationDirection,
+  sourceText: string,
+  translation: string,
+): string {
   const params = new URLSearchParams({
     template: "translation_quality.md",
     labels: "translation-quality",
     title: "[Translation] ",
-    body,
+    body: buildReportBody(direction, sourceText, translation),
   });
 
   return `${REPO_URL}/issues/new?${params.toString()}`;
+}
+
+function truncatedWithNote(text: string, keepLength: number): string {
+  if (text.length <= keepLength) {
+    return text;
+  }
+  return `${text.slice(0, keepLength)}\n\n[texto truncado por límite de longitud de la URL]`;
+}
+
+// Builds a GitHub "new issue" URL targeting translation_quality.md, with the
+// direction, input, and output already populated under the template's own
+// section headings, so a query-string `body` param lands in the right
+// places instead of just appending free text.
+//
+// Near-MAX_INPUT_LENGTH input/output, especially with accented Spanish/
+// Kaqchikel characters (which percent-encode to 6 characters each), can
+// push the built URL past GitHub's length limit for creating an issue this
+// way. If that happens, binary-search the largest shared per-field
+// character budget that keeps the URL under the limit, rather than always
+// failing/silently truncating for exactly the long translations most
+// likely to need reporting.
+function buildTranslationReportUrl(
+  direction: TranslationDirection,
+  sourceText: string,
+  translation: string,
+): string {
+  const fullUrl = buildReportUrl(direction, sourceText, translation);
+  if (fullUrl.length <= GITHUB_NEW_ISSUE_URL_LENGTH_LIMIT) {
+    return fullUrl;
+  }
+
+  let low = 0;
+  let high = Math.max(sourceText.length, translation.length);
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidateUrl = buildReportUrl(
+      direction,
+      truncatedWithNote(sourceText, mid),
+      truncatedWithNote(translation, mid),
+    );
+    if (candidateUrl.length <= GITHUB_NEW_ISSUE_URL_LENGTH_LIMIT) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+
+  return buildReportUrl(
+    direction,
+    truncatedWithNote(sourceText, low),
+    truncatedWithNote(translation, low),
+  );
 }
 
 // How long the "Copiado"/"No se pudo copiar" confirmation replaces the
