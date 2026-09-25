@@ -48,6 +48,10 @@ function mockConfig(): PipelineConfig {
       qa: "https://mock-qa-api.execute-api.us-east-1.amazonaws.com",
       prod: "https://mock-prod-api.execute-api.us-east-1.amazonaws.com",
     },
+    // Issue #110: an obviously-fake address, just so the mock-accounts path
+    // (CI's credential-free PR check, test/mock-synth.test.ts) also
+    // exercises the SNS email subscription resource, not just the topic.
+    pipelineFailureNotificationEmail: "pipeline-alerts@example.com",
   };
 }
 
@@ -101,6 +105,7 @@ async function realConfig(): Promise<PipelineConfig> {
     devApiBaseUrl,
     qaApiBaseUrl,
     prodApiBaseUrl,
+    pipelineFailureNotificationEmail,
   ] = await Promise.all([
     fetchSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/accounts/tooling`),
     fetchSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/accounts/dev`),
@@ -120,6 +125,13 @@ async function realConfig(): Promise<PipelineConfig> {
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/dev`),
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/qa`),
     fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/api-urls/prod`),
+    // Issue #110: absent until a human manually creates this parameter
+    // (see docs/runbooks/pipeline-failure-alerting.md) is expected, not an
+    // error -- `PipelineFailureAlerting` still creates the SNS topic and
+    // EventBridge rule either way, just without a subscriber yet. Never a
+    // literal real email in this repo (CLAUDE.md), hence SSM rather than a
+    // hardcoded string here.
+    fetchOptionalSsmParameter(client, `${SSM_PARAMETER_PATH_PREFIX}/alerts/pipeline-failure-email`),
   ]);
 
   return {
@@ -140,6 +152,7 @@ async function realConfig(): Promise<PipelineConfig> {
       qa: qaApiBaseUrl,
       prod: prodApiBaseUrl,
     },
+    pipelineFailureNotificationEmail,
   };
 }
 

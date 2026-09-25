@@ -2,6 +2,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { CodeBuildStep, CodePipeline, CodePipelineSource, ManualApprovalStep } from "aws-cdk-lib/pipelines";
 import { TranslatorStage } from "./app-stage";
+import { PipelineFailureAlerting } from "./pipeline-alerting";
 
 /**
  * Config resolved by `bin/app.ts` (from SSM in a real deploy, or hardcoded
@@ -68,11 +69,25 @@ export interface PipelineConfig {
    * validation step it will block on. Defaults to `false`.
    */
   newCertificateAck?: boolean;
+  /**
+   * Email address notified when `TraductorKaqchikelPipeline`'s execution
+   * fails (issue #110), fetched by `bin/app.ts` from
+   * `/traductor-kaqchikel/alerts/pipeline-failure-email` SSM parameter.
+   * Never a literal real address in this repo (CLAUDE.md) -- an absent
+   * value still creates the failure-notification SNS topic and EventBridge
+   * rule (so nothing is silently skipped), just without a subscriber yet.
+   */
+  pipelineFailureNotificationEmail?: string;
 }
 
 // Every SSM parameter this project owns lives under this path (ADR 0004).
 // The synth step's IAM role is scoped to exactly this prefix, nothing wider.
 const SSM_PARAMETER_PATH_PREFIX = "traductor-kaqchikel";
+
+// The pipeline's own name, used both for `CodePipeline`'s `pipelineName`
+// prop and to filter the EventBridge failure-alerting rule (issue #110) --
+// kept as one constant so the two can never drift apart.
+const PIPELINE_NAME = "TraductorKaqchikelPipeline";
 
 /**
  * Builds the self-mutating CDK Pipelines `Stack` (deployed once, by hand,
@@ -119,12 +134,22 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
   });
 
   const pipeline = new CodePipeline(stack, "Pipeline", {
-    pipelineName: "TraductorKaqchikelPipeline",
+    pipelineName: PIPELINE_NAME,
     synth: synthStep,
     // Dev/Qa/Prod are separate AWS accounts, so the pipeline's artifact
     // bucket needs a KMS key to let those accounts' deploy roles decrypt
     // pipeline artifacts (required for any cross-account CodePipeline).
     crossAccountKeys: true,
+  });
+
+  // Issue #110: notify a maintainer within minutes when this pipeline's
+  // execution fails -- see `PipelineFailureAlerting`'s doc comment for why
+  // this only needs to listen for execution-level (not stage-level) FAILED
+  // events, and `docs/runbooks/pipeline-failure-alerting.md` for the
+  // operational writeup.
+  new PipelineFailureAlerting(stack, "FailureAlerting", {
+    pipelineName: PIPELINE_NAME,
+    notificationEmail: config.pipelineFailureNotificationEmail,
   });
 
   const devStage = new TranslatorStage(stack, "Dev", {

@@ -160,4 +160,45 @@ describe("buildPipelineApp", () => {
       }
     }
   });
+
+  // Issue #110: pipeline execution failure alerting.
+  describe("pipeline failure alerting", () => {
+    it("creates an EventBridge rule matching this pipeline's FAILED execution state", () => {
+      const template = synthPipelineTemplate();
+
+      template.hasResourceProperties("AWS::Events::Rule", {
+        EventPattern: {
+          source: ["aws.codepipeline"],
+          "detail-type": ["CodePipeline Pipeline Execution State Change"],
+          detail: {
+            pipeline: ["TraductorKaqchikelPipeline"],
+            state: ["FAILED"],
+          },
+        },
+      });
+    });
+
+    it("subscribes the configured notification email to the failure topic", () => {
+      const app = new App();
+      const stack = buildPipelineApp(
+        app,
+        { ...FAKE_CONFIG, pipelineFailureNotificationEmail: "maintainer@example.com" },
+        FIXTURE_SITE_CONTENT_PATH,
+      );
+      app.synth();
+      const template = Template.fromStack(stack);
+
+      template.hasResourceProperties("AWS::SNS::Subscription", {
+        Protocol: "email",
+        Endpoint: "maintainer@example.com",
+      });
+    });
+
+    it("still creates the failure topic (with no subscription) when no notification email is configured", () => {
+      const template = synthPipelineTemplate();
+
+      template.resourceCountIs("AWS::SNS::Topic", 1);
+      template.resourceCountIs("AWS::SNS::Subscription", 0);
+    });
+  });
 });
