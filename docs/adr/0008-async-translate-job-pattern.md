@@ -322,8 +322,11 @@ Inference endpoint type is introduced by this ADR.
   existing resources already follow — not a shared/singleton table across
   environments.
   - `main.py`'s `CORSMiddleware` currently hardcodes `allow_methods=
-    ["POST"]`; the new `GET /v1/translate-jobs/{job_id}` route needs
-    `"GET"` added, or polling breaks from a browser entirely.
+    ["POST"]`. A plain cross-origin `GET` with no custom headers is a
+    CORS "simple request" and wouldn't actually be blocked by this on its
+    own (no preflight is triggered, and `allow_methods` only governs the
+    preflight response) — but adding `"GET"` explicitly is still correct
+    and should be done defensively rather than relying on that nuance.
   - `main.py`'s existing `@app.exception_handler(TranslationServiceError)`
     becomes dead code once `/v1/translate` retires (no remaining route
     calls `translate_via_sagemaker` directly) and must be removed, not
