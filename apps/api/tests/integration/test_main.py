@@ -1,4 +1,5 @@
 import json
+import logging
 from unittest.mock import MagicMock
 
 from botocore.exceptions import ClientError
@@ -90,3 +91,59 @@ def test_translate_rejects_invalid_direction():
     )
     assert response.status_code == 422
     assert response.json() == {"error": "La dirección debe ser 'es-to-cak' o 'cak-to-es'."}
+
+
+def test_translate_success_logs_structured_request_metadata_without_the_raw_text(
+    monkeypatch, caplog
+):
+    _mock_invoke_endpoint(monkeypatch, translated_text="Utz sq'ij")
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        response = client.post(
+            "/v1/translate",
+            json={"text": "Buenos días", "direction": "es-to-cak"},
+        )
+
+    assert response.status_code == 200
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+
+    payload = json.loads(records[0].message)
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Buenos días")
+    assert payload["status_code"] == 200
+    assert payload["error_type"] is None
+    assert "latency_ms" in payload
+
+    assert "Buenos días" not in caplog.text
+    assert "Utz sq'ij" not in caplog.text
+
+
+def test_translate_error_logs_structured_request_metadata_with_the_error_type(
+    monkeypatch, caplog
+):
+    _mock_invoke_endpoint(
+        monkeypatch,
+        error=ClientError(
+            {"Error": {"Code": "ModelError", "Message": "Received client error (400)"}},
+            "InvokeEndpoint",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        response = client.post(
+            "/v1/translate",
+            json={"text": "Hola", "direction": "es-to-cak"},
+        )
+
+    assert response.status_code == 400
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+
+    payload = json.loads(records[0].message)
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Hola")
+    assert payload["status_code"] == 400
+    assert payload["error_type"] == "TranslationServiceError"
+
+    assert "Hola" not in caplog.text

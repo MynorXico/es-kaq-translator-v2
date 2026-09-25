@@ -1,3 +1,5 @@
+import time
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -5,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_allowed_origins
 from app.models import ErrorResponse, TranslateRequest, TranslateResponse
+from app.observability import log_translate_request
 from app.translation import TranslationServiceError, translate_via_sagemaker
 from app.validation import translate_validation_error_message
 
@@ -114,4 +117,30 @@ def health() -> dict[str, str]:
     },
 )
 def translate(request: TranslateRequest) -> TranslateResponse:
-    return translate_via_sagemaker(request)
+    # Structured logging (issue #47) starts here, after request validation
+    # (`TranslateRequest`'s own field constraints) has already passed --
+    # a malformed request never reaches this function body at all, so it
+    # never has a `direction`/`text` worth logging metadata about in the
+    # first place. This covers the actual translate call: the thing whose
+    # error rate/latency the CloudWatch alarms in infra/cdk care about.
+    start = time.perf_counter()
+    try:
+        result = translate_via_sagemaker(request)
+    except TranslationServiceError as error:
+        log_translate_request(
+            direction=request.direction.value,
+            input_length=len(request.text),
+            latency_ms=(time.perf_counter() - start) * 1000,
+            status_code=error.status_code,
+            error_type=type(error).__name__,
+        )
+        raise
+
+    log_translate_request(
+        direction=request.direction.value,
+        input_length=len(request.text),
+        latency_ms=(time.perf_counter() - start) * 1000,
+        status_code=200,
+        error_type=None,
+    )
+    return result

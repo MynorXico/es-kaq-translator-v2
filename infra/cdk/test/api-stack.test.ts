@@ -122,4 +122,42 @@ describe("ApiStack", () => {
 
     template.hasOutput("ApiUrl", {});
   });
+
+  describe("CloudWatch alarms (issue #47)", () => {
+    it("alarms on an elevated 5xx error rate from the HTTP API", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::CloudWatch::Alarm",
+        Match.objectLike({
+          MetricName: "5xx",
+          Namespace: "AWS/ApiGateway",
+          ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+        }),
+      );
+    });
+
+    it("alarms on elevated latency from the HTTP API", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::CloudWatch::Alarm",
+        Match.objectLike({
+          MetricName: "Latency",
+          Namespace: "AWS/ApiGateway",
+          ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+        }),
+      );
+    });
+
+    it("does not silently treat missing data as breaching for either alarm", () => {
+      const { template } = synthApiStack();
+
+      const alarms = template.findResources("AWS::CloudWatch::Alarm");
+      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(2);
+      for (const alarm of Object.values(alarms)) {
+        expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
+      }
+    });
+  });
 });
