@@ -261,5 +261,8 @@ test.describe("wide desktop layout non-happy-path states (#122)", () => {
     const swapBox = await swapButton.boundingBox();
     expect(Math.abs(swapBox!.width - 44)).toBeLessThan(2);
     expect(Math.abs(swapBox!.height - 44)).toBeLessThan(2);
+
+    const dirLabel = page.locator(".dir-label").first();
+    expect(await dirLabel.evaluate((el) => getComputedStyle(el).fontSize)).toBe("15px");
   });
 });
