@@ -1,6 +1,6 @@
 # ADR 0008: Asynchronous job pattern for `/v1/translate` (cold-start handling)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-24
 
 ## Context
