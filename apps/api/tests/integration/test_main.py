@@ -157,8 +157,15 @@ def test_translate_logs_structured_request_metadata_for_a_non_translation_servic
     # still surfaces as a 500 and must still be logged -- this is exactly
     # the "bad model deployment"/misconfiguration class of failure the
     # CloudWatch alarms in infra/cdk are meant to catch, so it can't be
-    # silently unlogged.
+    # silently unlogged. `boto3.client(...)` is mocked here (even though
+    # its return value is never used) so this test's outcome doesn't
+    # depend on whether the environment running it happens to have an AWS
+    # region configured -- without a region, `boto3.client(...)` itself
+    # raises `NoRegionError` before `_endpoint_name()` is ever reached,
+    # which is what actually happens in CI and would otherwise make this
+    # test assert a different, environment-dependent error_type.
     monkeypatch.delenv("SAGEMAKER_ENDPOINT_NAME", raising=False)
+    monkeypatch.setattr(translation_module.boto3, "client", lambda *args, **kwargs: MagicMock())
     # This exercises the generic `Exception` handler in app/main.py, which
     # only ever runs for a real (non-test) client -- Starlette's
     # TestClient re-raises unhandled-by-a-more-specific-handler exceptions
