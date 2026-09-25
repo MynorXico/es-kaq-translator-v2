@@ -31,6 +31,14 @@ for why (a cross-account DNS-write mechanism that doesn't exist yet, since
 the hosted zone and this stack's CloudFront distribution live in different
 AWS accounts).
 
+The pipeline stack also includes `PipelineFailureAlerting`
+(`lib/pipeline-alerting.ts`, issue #110): an EventBridge rule + SNS topic
+that emails a maintainer within minutes if `TraductorKaqchikelPipeline`'s
+execution fails. See
+[the pipeline-failure-alerting runbook](../../docs/runbooks/pipeline-failure-alerting.md)
+for how to configure the notification email and how to verify it's
+working.
+
 ## Setup
 
 From the repo root (this app is part of the pnpm workspace):

@@ -102,6 +102,7 @@ describe("realConfig", () => {
         "/traductor-kaqchikel/domains/dev-web-cert-domain": "app-dev.traductorkaqchikel.com",
         "/traductor-kaqchikel/domains/qa-web-cert-domain": "app-qa.traductorkaqchikel.com",
         "/traductor-kaqchikel/api-urls/dev": "https://ovc1orcvql.execute-api.us-east-1.amazonaws.com",
+        "/traductor-kaqchikel/alerts/pipeline-failure-email": "maintainer@example.com",
       };
       const name = command.input.Name;
       if (name in values) {
@@ -133,6 +134,20 @@ describe("realConfig", () => {
       qa: undefined,
       prod: undefined,
     });
+    expect(config.pipelineFailureNotificationEmail).toBe("maintainer@example.com");
+  });
+
+  it("leaves pipelineFailureNotificationEmail undefined (not an error) when that parameter hasn't been created yet (issue #110)", async () => {
+    sendMock.mockImplementation((command: { input: { Name: string } }) => {
+      if (command.input.Name === "/traductor-kaqchikel/alerts/pipeline-failure-email") {
+        return Promise.reject(new FakeParameterNotFound());
+      }
+      return Promise.resolve(parameterResponse("fake-value"));
+    });
+
+    const config = await realConfig();
+
+    expect(config.pipelineFailureNotificationEmail).toBeUndefined();
   });
 });
 
@@ -164,6 +179,7 @@ describe("resolveConfig", () => {
     });
     expect(config.webApiBaseUrls?.dev).toMatch(/^https?:\/\//);
     expect(config.newCertificateAck).toBe(false);
+    expect(config.pipelineFailureNotificationEmail).toBe(mockConfig().pipelineFailureNotificationEmail);
   });
 
   it("threads newCertificateAck=true from context through the mock-accounts path", async () => {
