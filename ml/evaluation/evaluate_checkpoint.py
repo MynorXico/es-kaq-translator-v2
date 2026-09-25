@@ -66,6 +66,25 @@ set is provably identical no matter what direction value would have been
 passed. A flag that can never change its own output has no reason to
 exist (PR #128 review).
 
+**This "always both columns" construction is only valid for checkpoints
+trained *before* issue #125's fix.** #125 found that
+`extend_vocabulary_for_examples`'s whole-word/character step mixed
+ordinary Spanish into what should be Kaqchikel-only vocabulary coverage,
+and scoped it to Kaqchikel-only text going forward -- but this script's
+`train_sample_texts` construction was not updated to match. For any
+checkpoint retrained under the post-#125 behavior, this reconstruction
+will over-generate boundary tokens (including Spanish-derived ones the
+new checkpoint's vocab never actually has), which will misleadingly
+trip `_diagnose_word_boundary_reconstruction`'s over-reconstruction
+check below as if `--train`/`--base-model` didn't match the checkpoint,
+when the real cause is this script's own stale, unscoped
+`train_sample_texts` construction. No checkpoint has been retrained
+under the new behavior yet, so this doesn't affect any result produced
+so far -- but whoever re-evaluates the *next* retrained checkpoint needs
+to give this script a way to select old-vs-new scoping by checkpoint
+provenance before trusting its output (see issue #125's PR #142 review
+for the original finding; tracked separately as issue #143).
+
 The number of boundary tokens reconstructed/applied is recorded in the
 model card's hyperparameters for traceability. Two independent checks
 then run (see `_diagnose_word_boundary_reconstruction`'s own docstring for
@@ -489,7 +508,11 @@ def run_checkpoint_evaluation(
     # directly from both columns of every training pair -- no direction
     # tagging needed here, since the resulting *set* of sample texts is
     # identical regardless of direction (see this module's docstring,
-    # "no --train-direction flag").
+    # "no --train-direction flag"). NOTE: this "both columns" construction
+    # is only valid for checkpoints trained before issue #125's fix scoped
+    # vocabulary extension to Kaqchikel-only text -- see the docstring
+    # section above (issue #143 tracks giving this a provenance-aware
+    # mode before the next retrain).
     train_pairs = read_tsv_pairs(args.train)
     train_sample_texts = [source for source, _ in train_pairs] + [
         target for _, target in train_pairs
