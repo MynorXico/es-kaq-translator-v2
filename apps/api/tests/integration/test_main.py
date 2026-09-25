@@ -1,4 +1,5 @@
 import json
+import logging
 from unittest.mock import MagicMock
 
 from botocore.exceptions import ClientError
@@ -90,3 +91,103 @@ def test_translate_rejects_invalid_direction():
     )
     assert response.status_code == 422
     assert response.json() == {"error": "La dirección debe ser 'es-to-cak' o 'cak-to-es'."}
+
+
+def test_translate_success_logs_structured_request_metadata_without_the_raw_text(
+    monkeypatch, caplog
+):
+    _mock_invoke_endpoint(monkeypatch, translated_text="Utz sq'ij")
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        response = client.post(
+            "/v1/translate",
+            json={"text": "Buenos días", "direction": "es-to-cak"},
+        )
+
+    assert response.status_code == 200
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+
+    payload = json.loads(records[0].message)
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Buenos días")
+    assert payload["status_code"] == 200
+    assert payload["error_type"] is None
+    assert "latency_ms" in payload
+
+    assert "Buenos días" not in caplog.text
+    assert "Utz sq'ij" not in caplog.text
+
+
+def test_translate_error_logs_structured_request_metadata_with_the_error_type(
+    monkeypatch, caplog
+):
+    _mock_invoke_endpoint(
+        monkeypatch,
+        error=ClientError(
+            {"Error": {"Code": "ModelError", "Message": "Received client error (400)"}},
+            "InvokeEndpoint",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        response = client.post(
+            "/v1/translate",
+            json={"text": "Hola", "direction": "es-to-cak"},
+        )
+
+    assert response.status_code == 400
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+
+    payload = json.loads(records[0].message)
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Hola")
+    assert payload["status_code"] == 400
+    assert payload["error_type"] == "TranslationServiceError"
+
+    assert "Hola" not in caplog.text
+
+
+def test_translate_logs_structured_request_metadata_for_a_non_translation_service_error(
+    monkeypatch, caplog
+):
+    # A RuntimeError from a misconfigured environment (missing
+    # SAGEMAKER_ENDPOINT_NAME) is not a TranslationServiceError, but it
+    # still surfaces as a 500 and must still be logged -- this is exactly
+    # the "bad model deployment"/misconfiguration class of failure the
+    # CloudWatch alarms in infra/cdk are meant to catch, so it can't be
+    # silently unlogged. `boto3.client(...)` is mocked here (even though
+    # its return value is never used) so this test's outcome doesn't
+    # depend on whether the environment running it happens to have an AWS
+    # region configured -- without a region, `boto3.client(...)` itself
+    # raises `NoRegionError` before `_endpoint_name()` is ever reached,
+    # which is what actually happens in CI and would otherwise make this
+    # test assert a different, environment-dependent error_type.
+    monkeypatch.delenv("SAGEMAKER_ENDPOINT_NAME", raising=False)
+    monkeypatch.setattr(translation_module.boto3, "client", lambda *args, **kwargs: MagicMock())
+    # This exercises the generic `Exception` handler in app/main.py, which
+    # only ever runs for a real (non-test) client -- Starlette's
+    # TestClient re-raises unhandled-by-a-more-specific-handler exceptions
+    # by default regardless of a registered Exception handler, purely for
+    # test debuggability. `raise_server_exceptions=False` here asserts the
+    # actual HTTP contract a real client would see.
+    non_raising_client = TestClient(app, raise_server_exceptions=False)
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        response = non_raising_client.post(
+            "/v1/translate",
+            json={"text": "Hola", "direction": "es-to-cak"},
+        )
+
+    assert response.status_code == 500
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+
+    payload = json.loads(records[0].message)
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Hola")
+    assert payload["status_code"] == 500
+    assert payload["error_type"] == "RuntimeError"
+
+    assert "Hola" not in caplog.text

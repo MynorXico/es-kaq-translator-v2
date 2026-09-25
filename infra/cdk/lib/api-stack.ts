@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { CfnOutput, Duration, Stack, StackProps } from "aws-cdk-lib";
 import { HttpApi } from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
+import { Alarm, ComparisonOperator, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { DockerImageCode, DockerImageFunction } from "aws-cdk-lib/aws-lambda";
 import type { Construct } from "constructs";
@@ -100,5 +101,49 @@ export class ApiStack extends Stack {
 
     new CfnOutput(this, "ApiUrl", { value: this.httpApi.apiEndpoint });
     new CfnOutput(this, "ApiFunctionName", { value: this.apiFunction.functionName });
+
+    // Basic cost/operational-visibility alarms (issue #47). SageMaker
+    // Serverless Inference bills per invocation and scales to zero (ADR
+    // 0001), so an elevated error rate or latency is both a user-facing
+    // problem and a signal something's gone wrong upstream (e.g. endpoint
+    // cold starts, throttling, a bad model deployment) worth surfacing.
+    //
+    // Sourced from the HTTP API's own built-in CloudWatch metrics (5xx
+    // count, p90 latency) rather than a custom metric filter over
+    // `apps/api`'s structured request logs (see `app/observability.py`):
+    // `TranslationServiceError` is caught and turned into a normal HTTP
+    // 4xx/5xx response by `app/main.py`'s exception handler, so it never
+    // shows up as a Lambda-level `Errors` metric -- the API Gateway layer
+    // is the one place that reliably sees every response's status code.
+    //
+    // No alarm action (e.g. an SNS topic) is wired up yet -- these alarms
+    // are visible in the CloudWatch console/API immediately, but nothing
+    // pages/emails on them yet. Wiring actual on-call notification is a
+    // separate concern this ticket doesn't scope.
+    new Alarm(this, "ServerErrorRateAlarm", {
+      alarmDescription: `Elevated 5xx error rate on the Traductor Kaqchikel API (${props.environmentName})`,
+      metric: this.httpApi.metricServerError({ period: Duration.minutes(5) }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      // Scale-to-zero means long stretches with literally zero requests
+      // (and so no metric data points) are expected and not an incident
+      // -- don't let CloudWatch's "missing data" default (breaching) fire
+      // false alarms overnight.
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+
+    new Alarm(this, "HighLatencyAlarm", {
+      alarmDescription: `Elevated latency on the Traductor Kaqchikel API (${props.environmentName})`,
+      metric: this.httpApi.metricLatency({ period: Duration.minutes(5), statistic: "p90" }),
+      // Generous relative to typical translation latency: SageMaker
+      // Serverless Inference cold-starts (scale-to-zero) can take several
+      // seconds on their own, so this should catch a genuinely degraded
+      // endpoint, not a single cold start.
+      threshold: Duration.seconds(10).toMilliseconds(),
+      evaluationPeriods: 3,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
   }
 }

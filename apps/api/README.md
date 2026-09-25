@@ -55,3 +55,17 @@ Tests are split `tests/unit/` (pure functions, no I/O) and
 `tests/integration/` (through the actual FastAPI app via `TestClient`).
 See [`docs/testing.md`](../../docs/testing.md) for the full pyramid and
 the TDD process this project follows.
+
+## Observability
+
+Every `/v1/translate` request logs one structured JSON line via
+`app/observability.py` (`app.request` logger): `direction`,
+`input_length`, `latency_ms`, `status_code`, and `error_type` (`null` on
+success). The raw request/response translation text is never logged --
+metadata only (issue #47). Successful requests log at INFO, failed ones
+at WARNING, so the two are easy to filter on separately.
+
+`infra/cdk/lib/api-stack.ts` alarms on the API Gateway HTTP API's own
+built-in CloudWatch metrics (5xx count, p90 latency) rather than a
+log-based metric filter over these lines -- see that file's comments for
+why.
