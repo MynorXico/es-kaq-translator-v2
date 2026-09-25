@@ -321,6 +321,23 @@ behavior in place before any translation is generated. The reconstructed
 token count is recorded in the model card's hyperparameters
 (`word_boundary_tokens_reconstructed`).
 
+**Provenance-aware reconstruction (issue #143).** Issue #125 scoped
+`training.train.extend_vocabulary_for_examples`'s whole-word/character step
+to Kaqchikel-only text instead of every pair's both columns. Reconstructing
+against the wrong construction for a given checkpoint would misleadingly
+trip the over-reconstruction diagnostic below, so this script picks the
+construction to use from the checkpoint's *own* recorded provenance rather
+than a caller-supplied flag: `training.train.run_training_job` records a
+fixed `vocab_extension_scoping` hyperparameter
+(`training.train.VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY`) in every model
+card it writes going forward, and `_read_checkpoint_vocab_extension_
+scoping` reads it back from the checkpoint's own saved `model_card.md`
+(best-effort, never fatal). If present, `_build_train_sample_texts` uses
+the new Kaqchikel-only column only; if absent — true for every checkpoint
+trained before this field existed, including the currently-deployed
+`run-20260922T141956Z` (Model Package v4) — it falls back to the legacy
+"both columns" construction unchanged.
+
 Two independent diagnostics then run and print to stderr (never raise) if
 something looks wrong — see `_diagnose_word_boundary_reconstruction`'s own
 docstring for the full reasoning:

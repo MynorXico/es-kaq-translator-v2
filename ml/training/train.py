@@ -91,6 +91,19 @@ from training.tokenizer_extension import (
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 
+# Issue #143: the value `run_training_job` records in every model card's
+# `vocab_extension_scoping` hyperparameter, going forward. Issue #125 fully
+# replaced the old ("both languages mixed in") whole-word/character
+# vocab-extension behavior in code -- there is no runtime flag choosing
+# between old and new, every run from here on uses this scoping -- so this
+# is a fixed value, not a CLI-configurable one. Its purpose is purely
+# provenance: a checkpoint's saved model card recording this value (or, for
+# any checkpoint trained before this field existed, *not* recording it at
+# all) is how `evaluation.evaluate_checkpoint` tells a post-#125 checkpoint
+# apart from a pre-#125 one when reconstructing issue #116's word-boundary
+# fix (see that module's docstring/`_build_train_sample_texts`).
+VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY = "kaqchikel_only"
+
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse CLI args, matching the SageMaker Training Job convention of
@@ -679,6 +692,7 @@ def run_training_job(
             "subword_vocab_size": args.subword_vocab_size,
             "new_tokens_added": len(added_tokens),
             "resumed_from_checkpoint": bool(args.init_model),
+            "vocab_extension_scoping": VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY,
         },
         "notes": notes,
     }

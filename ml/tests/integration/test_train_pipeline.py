@@ -30,7 +30,11 @@ from training.tokenizer_extension import (
 from training.tokenizer_extension import (
     extend_tokenizer_vocab_with_subwords as real_extend_tokenizer_vocab_with_subwords,
 )
-from training.train import parse_args, run_training_job
+from training.train import (
+    VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY,
+    parse_args,
+    run_training_job,
+)
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -216,6 +220,12 @@ def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
     assert "facebook/m2m100_418M" in card_text
     assert "both" in card_text
     assert "**Validation sentences**: 4" in card_text
+
+    # 5. Issue #143: every run going forward must record which
+    #    vocab-extension scoping it used, so a future re-evaluation of this
+    #    checkpoint (evaluation.evaluate_checkpoint) can tell it apart from
+    #    a pre-#125 checkpoint whose model card never recorded this field.
+    assert f"- **vocab_extension_scoping**: {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY}" in card_text
 
 
 def _run_training_job_for_vocab_size(tmp_path, subdir: str, run_id: str) -> tuple[int, str]:

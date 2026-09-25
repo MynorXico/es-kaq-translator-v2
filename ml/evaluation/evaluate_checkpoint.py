@@ -70,20 +70,34 @@ exist (PR #128 review).
 trained *before* issue #125's fix.** #125 found that
 `extend_vocabulary_for_examples`'s whole-word/character step mixed
 ordinary Spanish into what should be Kaqchikel-only vocabulary coverage,
-and scoped it to Kaqchikel-only text going forward -- but this script's
-`train_sample_texts` construction was not updated to match. For any
-checkpoint retrained under the post-#125 behavior, this reconstruction
-will over-generate boundary tokens (including Spanish-derived ones the
-new checkpoint's vocab never actually has), which will misleadingly
-trip `_diagnose_word_boundary_reconstruction`'s over-reconstruction
-check below as if `--train`/`--base-model` didn't match the checkpoint,
-when the real cause is this script's own stale, unscoped
-`train_sample_texts` construction. No checkpoint has been retrained
-under the new behavior yet, so this doesn't affect any result produced
-so far -- but whoever re-evaluates the *next* retrained checkpoint needs
-to give this script a way to select old-vs-new scoping by checkpoint
-provenance before trusting its output (see issue #125's PR #142 review
-for the original finding; tracked separately as issue #143).
+and scoped it to Kaqchikel-only text going forward. For any checkpoint
+retrained under the post-#125 behavior, reconstructing against the old
+"both columns" set would over-generate boundary tokens (including
+Spanish-derived ones the new checkpoint's vocab never actually has),
+misleadingly tripping `_diagnose_word_boundary_reconstruction`'s
+over-reconstruction check below as if `--train`/`--base-model` didn't
+match the checkpoint, when the real cause would be reconstructing against
+the wrong scoping for that checkpoint's own provenance.
+
+Issue #143 closed this gap: `_build_train_sample_texts` picks the
+construction to use based on the checkpoint's *own* recorded provenance,
+never a caller-supplied flag. `training.train.run_training_job` records a
+fixed `vocab_extension_scoping` hyperparameter
+(`training.train.VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY`) in every model
+card it writes, going forward -- issue #125's fix fully replaced the old
+behavior in code, so there is no runtime choice to make at training time
+any more, only a fixed value to record. `_read_checkpoint_vocab_
+extension_scoping` reads this back from the checkpoint's own saved
+`model_card.md` (best-effort, mirroring `_read_checkpoint_new_tokens_
+added`'s "never raises" contract): if present, `_build_train_sample_texts`
+uses the new Kaqchikel-only construction (`training.direction.
+collect_texts_for_language`-equivalent: the target/Kaqchikel column of
+every pair, since this project's TSV convention is always `es<TAB>cak`);
+if absent -- which is implicitly true for every checkpoint trained before
+this field existed, including the currently-deployed
+`run-20260922T141956Z` (Model Package v4) -- it falls back to the legacy
+"both columns" construction unchanged, so nothing about how already-
+deployed checkpoints get re-evaluated changes.
 
 The number of boundary tokens reconstructed/applied is recorded in the
 model card's hyperparameters for traceability. Two independent checks
@@ -153,7 +167,12 @@ from evaluation.run import run_evaluation
 from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_CHOICES, build_direction_examples
 from training.subword_vocab import WORD_BOUNDARY_MARKER
 from training.tokenizer_extension import patch_word_boundary_decoding_for_checkpoint
-from training.train import DEFAULT_BASE_MODEL, generate_translations, resolve_model_source
+from training.train import (
+    DEFAULT_BASE_MODEL,
+    VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY,
+    generate_translations,
+    resolve_model_source,
+)
 
 _S3_URI_RE = re.compile(r"^s3://(?P<bucket>[^/]+)/(?P<key>.+)$")
 
@@ -360,6 +379,78 @@ def _read_checkpoint_new_tokens_added(checkpoint_dir: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+_VOCAB_EXTENSION_SCOPING_RE = re.compile(r"-\s*\*\*vocab_extension_scoping\*\*:\s*(\S+)")
+
+# Label recorded on *this script's own* re-evaluation model card for
+# provenance, when the checkpoint being re-evaluated has no recorded
+# `vocab_extension_scoping` of its own (i.e. it predates issue #125) --
+# never compared against, purely a human-readable note of which
+# construction this run actually used.
+_LEGACY_UNSCOPED_VOCAB_EXTENSION_LABEL = "legacy_unscoped_pre_125"
+
+
+def _read_checkpoint_vocab_extension_scoping(checkpoint_dir: str) -> str | None:
+    """Best-effort read of the `vocab_extension_scoping` hyperparameter from
+    the checkpoint's own saved `model_card.md` (mirrors `_read_checkpoint_
+    new_tokens_added`'s "never raises" contract above -- a missing/
+    unreadable model card, or a real path that just predates issue #125's
+    fix, must never crash an otherwise-valid eval-only run).
+
+    Returns `None` for a checkpoint trained before issue #125 (its own
+    `training.train.run_training_job` run never wrote this field at all --
+    this is the *expected*, common case for every checkpoint trained so
+    far, including the currently-deployed `run-20260922T141956Z`), and
+    `training.train.VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY` for one trained
+    under issue #125's fix. See `_build_train_sample_texts`, which uses
+    this to pick the correct `train_sample_texts` construction by the
+    checkpoint's own provenance rather than a caller-supplied flag (issue
+    #143).
+    """
+    model_card_path = Path(checkpoint_dir) / "model_card.md"
+    try:
+        if not model_card_path.is_file():
+            return None
+        text = model_card_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _VOCAB_EXTENSION_SCOPING_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _build_train_sample_texts(
+    train_pairs: list[tuple[str, str]], vocab_extension_scoping: str | None
+) -> list[str]:
+    """Build the `sample_texts` issue #116's word-boundary reconstruction is
+    computed against, choosing the construction that actually matches how
+    the checkpoint being re-evaluated was trained (issue #143):
+
+    - `vocab_extension_scoping == VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY`
+      (a checkpoint trained under issue #125's fix): only the Kaqchikel
+      (target) column of every pair -- this project's TSV convention is
+      always `es<TAB>cak` (see `data.corpus_io.read_tsv_pairs`), so this is
+      equivalent to `training.direction.collect_texts_for_language`
+      restricted to Kaqchikel across a "both directions" example set,
+      without needing to build `TranslationExample`s just for this.
+    - Anything else, including `None` (a checkpoint trained before issue
+      #125's fix ever existed -- the common case for every checkpoint
+      trained so far): the legacy "every pair's both columns" construction,
+      unchanged from this script's original behavior.
+
+    Either way, this project's direction tag tokens (`training.direction.
+    ALL_DIRECTION_TAG_TOKENS`) are always appended -- they need real,
+    warm-started embedding rows regardless of which vocab-extension scoping
+    produced them, and were never excluded by issue #125's fix.
+    """
+    if vocab_extension_scoping == VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY:
+        sample_texts = [target for _, target in train_pairs]
+    else:
+        sample_texts = [source for source, _ in train_pairs] + [
+            target for _, target in train_pairs
+        ]
+    sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+    return sample_texts
+
+
 def _diagnose_word_boundary_reconstruction(
     boundary_tokens: list[str],
     tokenizer: Any,
@@ -504,20 +595,16 @@ def run_checkpoint_evaluation(
     # Reconstruct + patch issue #116's word-boundary-spacing fix before
     # generating any translation -- see this module's docstring
     # ("Reconstructing issue #116's word-boundary-spacing fix") for why a
-    # reloaded checkpoint's tokenizer can't just carry this itself. Built
-    # directly from both columns of every training pair -- no direction
-    # tagging needed here, since the resulting *set* of sample texts is
-    # identical regardless of direction (see this module's docstring,
-    # "no --train-direction flag"). NOTE: this "both columns" construction
-    # is only valid for checkpoints trained before issue #125's fix scoped
-    # vocabulary extension to Kaqchikel-only text -- see the docstring
-    # section above (issue #143 tracks giving this a provenance-aware
-    # mode before the next retrain).
+    # reloaded checkpoint's tokenizer can't just carry this itself. No
+    # direction tagging needed here, since the resulting *set* of sample
+    # texts is identical regardless of direction either way (see this
+    # module's docstring, "no --train-direction flag"). Which columns
+    # actually feed into this is picked by the checkpoint's own recorded
+    # provenance, not a caller-supplied flag (issue #143) -- see
+    # `_build_train_sample_texts`.
     train_pairs = read_tsv_pairs(args.train)
-    train_sample_texts = [source for source, _ in train_pairs] + [
-        target for _, target in train_pairs
-    ]
-    train_sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+    vocab_extension_scoping = _read_checkpoint_vocab_extension_scoping(model_source)
+    train_sample_texts = _build_train_sample_texts(train_pairs, vocab_extension_scoping)
     base_vocab = base_vocab_loader(args.base_model)
     boundary_tokens = patch_word_boundary_decoding_for_checkpoint(
         tokenizer, base_vocab, train_sample_texts
@@ -557,6 +644,9 @@ def run_checkpoint_evaluation(
             "batch_size": args.batch_size,
             "word_boundary_reconstruction_train": args.train,
             "word_boundary_tokens_reconstructed": len(boundary_tokens),
+            "vocab_extension_scoping": (
+                vocab_extension_scoping or _LEGACY_UNSCOPED_VOCAB_EXTENSION_LABEL
+            ),
         },
         "notes": (
             f"Re-evaluation of an existing checkpoint from run "
