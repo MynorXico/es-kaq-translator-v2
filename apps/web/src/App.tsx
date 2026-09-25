@@ -41,6 +41,67 @@ const APP_NAME = "Traductor Kaqchikel";
 const QUALITY_DISCLAIMER =
   "Esta traducción fue generada automáticamente por un modelo en desarrollo y puede contener errores.";
 
+// Issue #42: a link next to a successful translation lets a user report it
+// as incorrect without needing to already know this repo exists. It opens a
+// new GitHub issue pre-filled against the "Translation quality report"
+// template (.github/ISSUE_TEMPLATE/translation_quality.md), so the reporter
+// only has to add the expected translation and their background.
+const REPO_URL = "https://github.com/MynorXico/es-kaq-translator-v2";
+
+// Mirrors the checkbox options under the template's "## Direction" heading
+// literally (including the English wording) so the pre-filled body matches
+// the template's own text.
+const DIRECTION_SECTION: Record<TranslationDirection, string> = {
+  "es-to-cak": "- [x] Spanish -> Kaqchikel\n- [ ] Kaqchikel -> Spanish",
+  "cak-to-es": "- [ ] Spanish -> Kaqchikel\n- [x] Kaqchikel -> Spanish",
+};
+
+// Builds a GitHub "new issue" URL targeting translation_quality.md, with the
+// direction, input, and output already populated under the template's own
+// section headings, so a query-string `body` param lands in the right
+// places instead of just appending free text.
+function buildTranslationReportUrl(
+  direction: TranslationDirection,
+  sourceText: string,
+  translation: string,
+): string {
+  const body = [
+    "## Direction",
+    "",
+    DIRECTION_SECTION[direction],
+    "",
+    "## Input text",
+    "",
+    sourceText,
+    "",
+    "## Output produced by the translator",
+    "",
+    translation,
+    "",
+    "## Expected / correct translation",
+    "",
+    "",
+    "## Your background (optional, helps us weigh the report)",
+    "",
+    "- [ ] Native Kaqchikel speaker",
+    "- [ ] Kaqchikel learner / student",
+    "- [ ] Linguist / ALMG-affiliated",
+    "- [ ] Other",
+    "",
+    "## Additional context",
+    "",
+  ].join("\n");
+
+  const params = new URLSearchParams({
+    template: "translation_quality.md",
+    labels: "translation-quality",
+    title: "[Translation] ",
+    body,
+  });
+
+  return `${REPO_URL}/issues/new?${params.toString()}`;
+}
+
 // How long the "Copiado"/"No se pudo copiar" confirmation replaces the
 // "Copiar" label before reverting.
 const COPY_FEEDBACK_MS = 2000;
@@ -55,7 +116,7 @@ type TranslateState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "warming" }
-  | { status: "success"; translation: string }
+  | { status: "success"; translation: string; sourceText: string }
   | { status: "error"; kind: TranslateErrorKind };
 
 const ERROR_MESSAGES: Record<TranslateErrorKind, string> = {
@@ -176,6 +237,13 @@ export default function App() {
 
   async function runTranslate() {
     const requestId = ++requestIdRef.current;
+    // Snapshotted now, not read from `input` at success time: the user can
+    // keep editing the input while this request is in flight (see the
+    // focus-management comment above), so `input` itself may no longer
+    // match what was actually sent by the time the response comes back.
+    // The report-a-bad-translation link (#42) needs the text that actually
+    // produced the shown translation.
+    const sourceText = input;
     setCopyState("idle");
     setTranslateState({ status: "loading" });
     const warmingTimer = setTimeout(() => {
@@ -187,7 +255,7 @@ export default function App() {
     try {
       const result = await translate(input, direction);
       if (requestIdRef.current === requestId) {
-        setTranslateState({ status: "success", translation: result.translation });
+        setTranslateState({ status: "success", translation: result.translation, sourceText });
       }
     } catch (error) {
       if (requestIdRef.current === requestId) {
@@ -369,6 +437,22 @@ export default function App() {
 
           {translateState.status === "success" && (
             <p className="output-disclaimer">{QUALITY_DISCLAIMER}</p>
+          )}
+
+          {translateState.status === "success" && (
+            <a
+              className="link-button"
+              href={buildTranslationReportUrl(
+                direction,
+                translateState.sourceText,
+                translateState.translation,
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              ¿Traducción incorrecta? Repórtala
+              <span className="sr-only"> (se abre en una pestaña nueva)</span>
+            </a>
           )}
         </div>
       </main>

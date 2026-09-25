@@ -445,6 +445,77 @@ describe("App copy and clear affordances", () => {
   });
 });
 
+describe("App bad-translation report link", () => {
+  beforeEach(() => {
+    mockedTranslate.mockReset();
+  });
+
+  it("does not show the report link before a translation succeeds", () => {
+    render(<App />);
+    expect(screen.queryByRole("link", { name: /Repórtala/ })).not.toBeInTheDocument();
+  });
+
+  it("opens a pre-filled GitHub issue in a new tab once a translation succeeds", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+
+    const url = new URL(link.getAttribute("href") ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(
+      "https://github.com/MynorXico/es-kaq-translator-v2/issues/new",
+    );
+    expect(url.searchParams.get("template")).toBe("translation_quality.md");
+    expect(url.searchParams.get("labels")).toBe("translation-quality");
+    expect(url.searchParams.get("title")).toBe("[Translation] ");
+
+    const body = url.searchParams.get("body") ?? "";
+    expect(body).toContain("- [x] Spanish -> Kaqchikel");
+    expect(body).toContain("- [ ] Kaqchikel -> Spanish");
+    expect(body).toContain("## Input text\n\nHola");
+    expect(body).toContain("## Output produced by the translator\n\nUtz");
+  });
+
+  it("marks the reverse direction checkbox when reporting a Kaqchikel-to-Spanish translation", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Hola" });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Utz" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    const url = new URL(link.getAttribute("href") ?? "");
+    const body = url.searchParams.get("body") ?? "";
+
+    expect(body).toContain("- [x] Kaqchikel -> Spanish");
+    expect(body).toContain("- [ ] Spanish -> Kaqchikel");
+  });
+
+  it("uses the exact input text that produced the shown translation, even if the field is edited afterwards", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByRole("link", { name: /Repórtala/ });
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola mundo" } });
+
+    const link = screen.getByRole("link", { name: /Repórtala/ });
+    const url = new URL(link.getAttribute("href") ?? "");
+    const body = url.searchParams.get("body") ?? "";
+
+    expect(body).toContain("## Input text\n\nHola");
+    expect(body).not.toContain("Hola mundo");
+  });
+});
+
 describe("App direction swap", () => {
   beforeEach(() => {
     mockedTranslate.mockReset();
