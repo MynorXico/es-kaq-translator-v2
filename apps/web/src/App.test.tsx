@@ -445,6 +445,98 @@ describe("App copy and clear affordances", () => {
   });
 });
 
+describe("App bad-translation report link", () => {
+  beforeEach(() => {
+    mockedTranslate.mockReset();
+  });
+
+  it("does not show the report link before a translation succeeds", () => {
+    render(<App />);
+    expect(screen.queryByRole("link", { name: /Repórtala/ })).not.toBeInTheDocument();
+  });
+
+  it("opens a pre-filled GitHub issue in a new tab once a translation succeeds", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+
+    const url = new URL(link.getAttribute("href") ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe(
+      "https://github.com/MynorXico/es-kaq-translator-v2/issues/new",
+    );
+    expect(url.searchParams.get("template")).toBe("translation_quality.md");
+    expect(url.searchParams.get("labels")).toBe("translation-quality");
+    expect(url.searchParams.get("title")).toBe("[Translation] ");
+
+    const body = url.searchParams.get("body") ?? "";
+    expect(body).toContain("- [x] Spanish -> Kaqchikel");
+    expect(body).toContain("- [ ] Kaqchikel -> Spanish");
+    expect(body).toContain("## Input text\n\nHola");
+    expect(body).toContain("## Output produced by the translator\n\nUtz");
+  });
+
+  it("marks the reverse direction checkbox when reporting a Kaqchikel-to-Spanish translation", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Hola" });
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Utz" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    const url = new URL(link.getAttribute("href") ?? "");
+    const body = url.searchParams.get("body") ?? "";
+
+    expect(body).toContain("- [x] Kaqchikel -> Spanish");
+    expect(body).toContain("- [ ] Spanish -> Kaqchikel");
+  });
+
+  it("uses the exact input text that produced the shown translation, even if the field is edited afterwards", async () => {
+    mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+    await screen.findByRole("link", { name: /Repórtala/ });
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola mundo" } });
+
+    const link = screen.getByRole("link", { name: /Repórtala/ });
+    const url = new URL(link.getAttribute("href") ?? "");
+    const body = url.searchParams.get("body") ?? "";
+
+    expect(body).toContain("## Input text\n\nHola");
+    expect(body).not.toContain("Hola mundo");
+  });
+
+  it("truncates a near-max-length input/output so the report URL stays under GitHub's length limit", async () => {
+    // Accented characters percent-encode to 6 characters each (%XX%XX for
+    // their 2-byte UTF-8 form), so near-MAX_INPUT_LENGTH text on both
+    // sides can otherwise push the built URL well past GitHub's ~8,196
+    // character limit for creating an issue via query parameters.
+    const longInput = "áéíóú ".repeat(330).trim(); // ~1979 chars, under MAX_INPUT_LENGTH
+    const longOutput = "ñüñü ".repeat(350).trim(); // ~1749 chars
+    mockedTranslate.mockResolvedValueOnce({ translation: longOutput });
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: longInput } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    const link = await screen.findByRole("link", { name: /Repórtala/ });
+    const href = link.getAttribute("href") ?? "";
+
+    expect(href.length).toBeLessThanOrEqual(8096);
+    const body = new URL(href).searchParams.get("body") ?? "";
+    expect(body).toContain("texto truncado");
+  });
+});
+
 describe("App direction swap", () => {
   beforeEach(() => {
     mockedTranslate.mockReset();
