@@ -25,6 +25,9 @@ import torch
 import training.train as train_module
 from training.direction import DIRECTION_TAGS
 from training.tokenizer_extension import (
+    extend_tokenizer_vocab as real_extend_tokenizer_vocab,
+)
+from training.tokenizer_extension import (
     extend_tokenizer_vocab_with_subwords as real_extend_tokenizer_vocab_with_subwords,
 )
 from training.train import parse_args, run_training_job
@@ -313,6 +316,59 @@ def test_run_training_job_feeds_kaqchikel_only_text_to_subword_extension(tmp_pat
     # A real Kaqchikel word-form from the fixture, present on the
     # Kaqchikel side only.
     assert any("qatinamit" in text for text in texts)
+
+
+def test_run_training_job_feeds_kaqchikel_only_text_to_whole_word_extension(tmp_path, monkeypatch):
+    """Issue #125: the whole-word/character extension step
+    (`extend_tokenizer_vocab`) must isolate the Kaqchikel side of the
+    corpus the same way the subword step already does (see
+    `test_run_training_job_feeds_kaqchikel_only_text_to_subword_extension`
+    above) -- never mixed with Spanish source/target text across either
+    direction.
+
+    Before this fix, `extend_vocabulary_for_examples` fed *both* every
+    example's source *and* target text unconditionally into this step,
+    which registers a brand-new standalone token for any exact word-form
+    not already a single vocab entry -- including ordinary Spanish surface
+    forms the base M2M100 tokenizer already represents correctly via
+    existing subwords (confirmed empirically against the real checkpoint
+    for issue #125: 100% of a real sample of Spanish "missing" whole
+    words were already fully representable, zero `<unk>`), not genuinely
+    uncoverable Spanish content. Mixing Spanish in here also contradicts
+    this same function's own subword step, which already isolates
+    Kaqchikel-only text specifically because "M2M100 already tokenizes
+    [Spanish] natively" (see `extend_vocabulary_for_examples`'s
+    docstring).
+    """
+    captured_calls: list[list[str]] = []
+
+    def spy(tokenizer, sample_texts):
+        sample_texts = list(sample_texts)
+        captured_calls.append(sample_texts)
+        return real_extend_tokenizer_vocab(tokenizer, sample_texts)
+
+    monkeypatch.setattr(train_module, "extend_tokenizer_vocab", spy)
+
+    _run_training_job_for_vocab_size(
+        tmp_path, "whole-word-spy-run", "smoke-test-whole-word-spy-run"
+    )
+
+    assert len(captured_calls) == 1
+    texts = captured_calls[0]
+    assert texts  # the whole-word step actually received something to train on
+
+    spanish_only_words = ("Buenos", "pueblo", "niño", "trabajo", "maestro", "gente")
+    for text in texts:
+        assert not any(word in text for word in spanish_only_words)
+
+    # A real Kaqchikel word-form from the fixture, present on the
+    # Kaqchikel side only.
+    assert any("qatinamit" in text for text in texts)
+
+    # Direction tags must still reach this step -- they need real,
+    # warm-started embedding rows too (see the function's own docstring).
+    assert any("__cak__" in text for text in texts)
+    assert any("__es__" in text for text in texts)
 
 
 def test_run_training_job_single_direction_trains_half_the_examples(tmp_path):

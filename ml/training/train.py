@@ -302,22 +302,38 @@ def extend_vocabulary_for_examples(
     they get real, warm-started embedding rows too rather than falling back
     to whatever `add_tokens` would leave uninitialized.
 
-    Two complementary extension steps, run in sequence (issue #82):
+    Two complementary extension steps, run in sequence (issue #82), both
+    scoped to the Kaqchikel-only side of `examples`
+    (`training.direction.collect_texts_for_language`) plus the direction
+    tags -- never mixed with Spanish source/target text, which M2M100
+    already tokenizes natively:
 
     1. `extend_tokenizer_vocab` -- character/whole-word gap coverage
-       (#34/#62), against every example's source *and* target text plus
-       the direction tags.
+       (#34/#62).
     2. `extend_tokenizer_vocab_with_subwords` -- a Kaqchikel-only
        SentencePiece/Unigram subword vocabulary (`training.subword_vocab`),
        diffed against the tokenizer's vocab *after* step 1 (so it never
-       re-proposes a whole word/character already added there), trained
-       only on the Kaqchikel side of `examples`
-       (`training.direction.collect_texts_for_language`) -- never mixed
-       with Spanish, which M2M100 already tokenizes natively. This targets
-       the subword-fragmentation ceiling three real training runs'
+       re-proposes a whole word/character already added there). This
+       targets the subword-fragmentation ceiling three real training runs'
        diminishing BLEU-vs-loss returns pointed at (see
        `training/subword_vocab.py`'s module docstring for the full
        rationale).
+
+    Step 1 originally also fed every example's Spanish source/target text
+    into `extend_tokenizer_vocab` (issue #125): `find_missing_words`
+    checks whether a word's exact literal surface form is already a single
+    vocab *key*, not whether the tokenizer can already represent it at all
+    via composition of existing subwords -- so it flagged the large
+    majority of ordinary Spanish words in a real corpus as "missing" and
+    registered a new standalone token for each one, even though the base
+    M2M100 tokenizer already encodes/decodes them correctly (confirmed
+    empirically against the real checkpoint: of a real sample of Spanish
+    words this step flagged as missing, 100% were already fully
+    representable with zero `<unk>` tokens). That contradicted this same
+    function's own rationale for isolating Spanish out of step 2, and
+    roughly doubled real vocabulary growth with tokens that don't fill a
+    genuine gap -- see issue #125 for the full classification. Both steps
+    are now scoped the same way.
 
     A single `resize_embeddings_for_new_tokens` call at the end covers the
     combined total from both steps, so the model's embedding matrix is
@@ -326,12 +342,13 @@ def extend_vocabulary_for_examples(
     Returns the list of tokens actually added by either step (may be
     empty).
     """
-    sample_texts = [ex.source_text for ex in examples] + [ex.target_text for ex in examples]
+    kaqchikel_texts = collect_texts_for_language(examples, KAQCHIKEL)
+
+    sample_texts = list(kaqchikel_texts)
     sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
 
     added_tokens = extend_tokenizer_vocab(tokenizer, sample_texts)
 
-    kaqchikel_texts = collect_texts_for_language(examples, KAQCHIKEL)
     if kaqchikel_texts:
         added_tokens = added_tokens + extend_tokenizer_vocab_with_subwords(
             tokenizer, kaqchikel_texts, vocab_size=subword_vocab_size

@@ -4,11 +4,18 @@ already represent as single tokens.
 
 ## Why this exists (issue #82)
 
-Run #66 already extended M2M100's tokenizer with ~61,901 whole Kaqchikel
-word-forms (`training.vocab_gap.find_missing_words`, wired into
-`training.tokenizer_extension.extend_tokenizer_vocab`). That closes the
-"this exact word was never seen" gap, but says nothing about the *subword*
-structure underneath: Kaqchikel is agglutinative (ergative/absolutive
+Run #66 already extended M2M100's tokenizer with ~61,901 whole word-forms
+(`training.vocab_gap.find_missing_words`, wired into
+`training.tokenizer_extension.extend_tokenizer_vocab`) -- at the time
+assumed to be Kaqchikel, though issue #125's later investigation found a
+large fraction of that run's added tokens were actually ordinary Spanish
+words the whole-word step wasn't yet scoped away from (fixed in
+`training.train.extend_vocabulary_for_examples` after #125; this
+docstring's "Kaqchikel-only" framing below describes the current,
+post-fix behavior, not what run #66 itself did). Whatever fraction of it
+genuinely was Kaqchikel closes the "this exact word was never seen" gap,
+but says nothing about the *subword* structure underneath: Kaqchikel is
+agglutinative (ergative/absolutive
 person marking, noun incorporation), so a word-form the model hasn't
 memorized verbatim still gets fragmented by M2M100's generic multilingual
 SentencePiece model into long, awkward multi-token chains it has no reason

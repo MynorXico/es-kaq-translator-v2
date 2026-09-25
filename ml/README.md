@@ -533,6 +533,28 @@ corpus (never mixed with Spanish, which M2M100 already tokenizes
 natively), then diffing its resulting subword pieces against the base
 tokenizer's vocab:
 
+**Issue #125 finding:** run #66's whole-word step above wasn't actually
+isolated to Kaqchikel the way this subword step always has been --
+`find_missing_words` checks whether a word's exact surface form is
+already a single vocab *key*, not whether the base tokenizer can already
+represent it via existing subwords, so it flagged the large majority of
+ordinary Spanish words in the real corpus as "missing" too and registered
+a new standalone token for each one. A real classification (run against
+the real `facebook/m2m100_418M` tokenizer, since the private corpus isn't
+available outside a training job -- see issue #125 for the full
+methodology and numbers) found roughly half of that kind of whole-word
+token set attributable to Spanish, and that essentially all of the
+Spanish-attributed tokens sampled were already fully representable by the
+base tokenizer's existing subwords (i.e. not a genuine gap). Fixed in
+`training.train.extend_vocabulary_for_examples`, which now scopes the
+whole-word/character step to Kaqchikel-only text too, matching this
+subword step. This does **not** retroactively change the currently
+deployed checkpoint's already-baked-in vocabulary (see
+`training/tokenizer_extension.py`'s `reconstruct_whole_word_boundary_tokens`
+docstring, which still deliberately reconstructs the old, unscoped
+behavior to match that checkpoint's real training history) -- only a
+future retraining run picks up the fix.
+
 - `train_subword_model(texts, vocab_size, model_type)` — trains fully in
   memory (`io.BytesIO`, via SentencePiece's `sentence_iterator`/
   `model_writer` kwargs), never writing the trained model proto to disk.
