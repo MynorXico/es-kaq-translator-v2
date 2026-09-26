@@ -99,7 +99,56 @@ top of API Gateway's own default account/stage-level throttling.
 - This ADR decides the mechanism only. The follow-up implementation
   ticket (filed once this ADR is accepted) covers the actual CDK
   construct, the chosen threshold, and wiring it into whichever stack
-  ends up hosting the API Gateway resource.
+  ends up hosting the API Gateway resource. Per `qa`'s review of this
+  ADR (issue #50), that follow-up ticket must also cover, as named
+  requirements rather than incidental side effects:
+  - **Verification, in two tiers** — a rate-based rule's trailing
+    5-minute evaluation window isn't something CloudFormation synth can
+    prove works, only that the resources are shaped correctly. (1) CDK
+    assertion tests (`infra/cdk`'s existing Vitest + `aws-cdk-lib/
+    assertions` tier, same as `test/api-stack.test.ts`) confirming the
+    `WebACL` (`Scope: REGIONAL`), its rate-based rule (`AggregateKeyType:
+    IP`, the configured `Limit`, `Action: Block`), and the
+    `WebACLAssociation` targeting the right stage exist with the right
+    properties — plus a negative assertion that no API key/usage-plan
+    resources exist, guarding against drifting back toward the rejected
+    option 1. (2) A one-time, manual **live** check post-deploy: `apps/
+    api`'s existing `GET /health` route never calls SageMaker, and the
+    WAF association is stage-level (covers every route), so sending
+    enough requests from one source to `/health` in `dev` (never `qa`/
+    `prod`, and never as a scheduled/automated check — see below) is a
+    safe, near-zero-cost way to confirm the rule actually blocks at
+    threshold, without either paying per-invocation SageMaker cost or
+    risking real users. This is throwaway QA verification, like the
+    existing post-deploy check that a real request through the deployed
+    API returns a translation (`docs/testing.md`) — not a repeatable
+    automated test: running it on a schedule, or against `qa`/`prod`,
+    would itself look like (or actually be) the abuse pattern it exists
+    to catch.
+  - **A CloudWatch alarm on the WebACL's own metrics**: the `WebACL`'s
+    `VisibilityConfig` must have `CloudWatchMetricsEnabled: true`, and a
+    new alarm on its `BlockedRequests` metric (namespace `AWS/WAFV2`)
+    is required, not optional — without it, neither a threshold set too
+    low (blocking real users) nor a genuine abuse spike is visible to
+    anyone until a complaint or a bill arrives. This is the concrete
+    mechanism by which "the threshold is a tuning parameter" stays an
+    actionable escape hatch rather than a decision nobody revisits; it's
+    also what closes the gap noted below, where a WAF block currently
+    has zero visibility in the existing `ServerErrorRateAlarm`/
+    `HighLatencyAlarm` pair (#47), since WAF intercepts before the
+    request reaches API Gateway's own `AWS/ApiGateway` metrics.
+  - **A specified block-response shape, wired into `apps/web`'s error
+    handling**: whether the block action keeps WAF's default `403` or
+    uses a custom response (e.g. `429` with `Retry-After`), that choice
+    must be explicit, and `apps/web/src/App.tsx`'s `classifyError` must
+    gain a distinct `"rateLimited"` `TranslateErrorKind` (with its own
+    Spanish copy, e.g. "Demasiadas solicitudes, inténtalo de nuevo en
+    unos minutos.") for that status, plus a unit test for the new
+    branch. Today, any non-5xx `TranslateHttpError` — including a WAF
+    block — falls into the generic `"client"` kind and shows "revisa lo
+    que escribiste" ("check what you wrote"), which is actively
+    misleading for a rate-limited user whose input was never the
+    problem.
 
 ## Consequences
 
@@ -133,6 +182,17 @@ top of API Gateway's own default account/stage-level throttling.
   tier, API Gateway usage plans + API keys (or a proper auth-based quota)
   become relevant again for per-customer quotas — that would be a
   separate, future ADR, not a reason to hold off on WAF now.
+- **Accepted risk: shared-IP false positives.** Per-IP aggregation can
+  collectively block a batch of distinct legitimate users behind one
+  shared source IP (a school, library, or corporate NAT) during
+  ordinary, non-abusive usage, not just during a real attack. This is
+  not mitigated in v1 — it's surfaced here for the same reason the WAF
+  cost trade-off above is, rather than being decided silently. If it
+  proves to be a real problem in practice, AWS WAF supports a composite
+  aggregate key (e.g. source IP + `User-Agent`) on the same rule, which
+  narrows false positives without changing this ADR's core mechanism —
+  the same "tuning, not architectural" escape hatch the threshold number
+  itself already has.
 
 ## Alternatives considered
 
