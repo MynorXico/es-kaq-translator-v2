@@ -60,6 +60,27 @@ class FakeM2M100Model:
         weight = torch.zeros(vocab_size, dim)
         self._embeddings = FakeEmbedding(weight)
         self.saved_to: str | None = None
+        # Mirrors a real checkpoint's state right after
+        # `load_base_model_and_tokenizer`/`M2M100ForConditionalGeneration.
+        # from_pretrained`, which always ends in eval mode regardless of
+        # what mode the saved weights were in (confirmed directly against
+        # the real checkpoint -- `PreTrainedModel.from_pretrained` calls
+        # `model.eval()` unconditionally at the end of loading; see
+        # `tests/integration/test_save_reload_does_not_persist_train_mode.py`).
+        self.training = False
+
+    def eval(self) -> FakeM2M100Model:
+        self.training = False
+        return self
+
+    def train(self, mode: bool = True) -> FakeM2M100Model:
+        # Mirrors `Seq2SeqTrainer.train()` leaving the model in `.train()`
+        # mode once its own internal train/eval loop finishes (issue #175)
+        # -- `fake_trainer` below calls this to reproduce that real
+        # behavior faithfully, rather than a fake that happens to never
+        # exhibit the bug in the first place.
+        self.training = mode
+        return self
 
     def get_input_embeddings(self) -> FakeEmbedding:
         return self._embeddings
@@ -140,6 +161,14 @@ def fake_trainer(model, tokenizer, train_examples, eval_examples, args):
             "epochs": args.epochs,
         }
     )
+    # Issue #175: a real `Seq2SeqTrainer.train()` call leaves the model in
+    # `.train()` mode (dropout active) once its own internal loop finishes
+    # -- it has no reason to switch back on its own. Reproduce that here so
+    # a test exercising `run_training_job` against this fake actually fails
+    # the way the real bug did, instead of a fake that's accidentally
+    # already eval-mode-safe.
+    if hasattr(model, "train"):
+        model.train()
     return model
 
 
@@ -150,6 +179,20 @@ def fake_translator(model, tokenizer, examples, **kwargs):
     # Deliberately not a real translation -- just proves the val examples
     # (and their target language tags) reached this step correctly.
     return [f"{DIRECTION_TAGS[ex.target_lang]}::{ex.target_text}" for ex in examples]
+
+
+def make_recording_translator(recorded_training_modes: list[bool]):
+    """Build a fake `translator` that records `model.training` at the
+    exact moment it's called, matching `run_training_job`'s own dependency-
+    injection pattern (issue #175 acceptance criterion: confirm the model
+    is in eval mode at the point `generate_translations` is invoked).
+    """
+
+    def _translator(model, tokenizer, examples, **kwargs):
+        recorded_training_modes.append(model.training)
+        return fake_translator(model, tokenizer, examples, **kwargs)
+
+    return _translator
 
 
 def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
@@ -226,6 +269,48 @@ def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
     #    checkpoint (evaluation.evaluate_checkpoint) can tell it apart from
     #    a pre-#125 checkpoint whose model card never recorded this field.
     assert f"- **vocab_extension_scoping**: {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY}" in card_text
+
+
+def test_run_training_job_puts_model_in_eval_mode_before_generating_translations(tmp_path):
+    """Issue #175: `Seq2SeqTrainer.train()` (here, `fake_trainer`, which
+    faithfully reproduces its real mode-leaving behavior -- see its own
+    comment) leaves the model in `.train()` mode. `run_training_job` must
+    switch it back to `.eval()` before calling `generate_translations` for
+    its own post-training BLEU/chrF, so that inline number isn't computed
+    with dropout still active (confirmed empirically to matter: dropout
+    noise measurably lowers BLEU on the same weights/examples -- see the
+    issue for the full real-run evidence).
+    """
+    fake_trainer.calls.clear()
+    recorded_training_modes: list[bool] = []
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--run-id",
+            "smoke-test-eval-mode-run",
+            "--epochs",
+            "1",
+        ]
+    )
+
+    run_training_job(
+        args,
+        model_loader=fake_model_loader,
+        trainer=fake_trainer,
+        translator=make_recording_translator(recorded_training_modes),
+    )
+
+    assert recorded_training_modes == [False]
 
 
 def _run_training_job_for_vocab_size(tmp_path, subdir: str, run_id: str) -> tuple[int, str]:

@@ -735,6 +735,29 @@ def run_training_job(
 
     model = trainer(model, tokenizer, train_examples, val_examples, args)
 
+    # Issue #175: `Seq2SeqTrainer.train()` leaves `model` in whatever mode
+    # its own last internal training step used -- typically `.train()`
+    # (dropout active) -- since it has no reason to switch back once its
+    # internal train/eval loop finishes. Left uncorrected, the
+    # `generate_translations` call below runs with dropout still active,
+    # injecting real stochastic noise into generation and producing a
+    # systematically *worse* (noisier) BLEU/chrF than the checkpoint's true
+    # quality -- confirmed against the real checkpoint: forcing
+    # `model.train()` before generation on a fixed slice measurably lowered
+    # BLEU relative to `model.eval()` on the same weights/examples.
+    #
+    # Called before `save_model_and_tokenizer` too, though the order
+    # relative to that call doesn't actually matter for the *saved*
+    # artifact either way: `save_pretrained`/`from_pretrained` never
+    # persists train/eval mode at all -- confirmed directly against the
+    # real checkpoint, `PreTrainedModel.from_pretrained` unconditionally
+    # calls `model.eval()` itself at the end of loading, regardless of
+    # what mode the object being saved was in (see
+    # tests/integration/test_save_reload_does_not_persist_train_mode.py).
+    # What matters here is this function's own in-memory `model` object,
+    # which is what `generate_translations` actually runs against.
+    model.eval()
+
     save_model_and_tokenizer(model, tokenizer, args.model_dir)
 
     hypotheses = translator(model, tokenizer, val_examples, max_length=args.max_length)
