@@ -19,14 +19,25 @@ export interface TranslatorStageProps extends StageProps {
 // this by hand, in a reviewed commit/PR, whenever a better model is
 // approved -- see `MlHostingStack`'s own docstring for why this is a bare
 // version number (never a full ARN, which would embed a real AWS account
-// ID) and `ml/README.md`'s "Serving" section for how version 4 (BLEU 8.9 /
-// chrF 31.2, issue #82's subword-vocabulary run, repackaged with the fixed
-// custom inference handler) was registered. Version 3 -- the first
-// registration attempt -- was rejected: real endpoint testing found two
-// real bugs in its inference code (see ml/deployment/inference.py's
-// output_fn/_strip_leading_direction_tag docstrings), fixed before this
-// version was registered.
-const DEV_MODEL_PACKAGE_VERSION = 4;
+// ID) and `ml/README.md`'s "Serving" section for the full history:
+// - Version 3 (issue #82's subword-vocabulary run) -- rejected: real
+//   endpoint testing found two real bugs in its inference code (see
+//   ml/deployment/inference.py's output_fn/_strip_leading_direction_tag
+//   docstrings), fixed before the next registration.
+// - Version 4 (same weights as v3, repackaged with the fixed inference
+//   handler) -- approved and deployed. Originally registered at BLEU 8.9/
+//   chrF 31.2; corrected in place to BLEU 13.3/chrF 35.4 after issues #106
+//   (direction-tag leak) and #116 (word-boundary decode bug) were found to
+//   have been silently corrupting every prior evaluation.
+// - Version 5 (issue #125's vocab-scoping fix, a fresh 5-epoch run) --
+//   rejected: BLEU 6.0/chrF 26.3, but confounded by far less cumulative
+//   training exposure than v4's 3+5+5-epoch continuation chain (13 total
+//   epochs vs. 5), not evidence the fix itself hurts.
+// - Version 6 (issue #125's fix, a fresh 13-epoch run matching v4's
+//   cumulative training exposure for a clean comparison) -- approved and
+//   deployed here: BLEU 14.0/chrF 36.5, a real, uncounfounded improvement
+//   over v4, confirming the vocab-scoping fix helps modestly.
+const DEV_MODEL_PACKAGE_VERSION = 6;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
