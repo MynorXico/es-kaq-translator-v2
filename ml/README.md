@@ -336,7 +336,27 @@ scoping` reads it back from the checkpoint's own saved `model_card.md`
 the new Kaqchikel-only column only; if absent — true for every checkpoint
 trained before this field existed, including the currently-deployed
 `run-20260922T141956Z` (Model Package v4) — it falls back to the legacy
-"both columns" construction unchanged.
+"both columns" construction unchanged. A present-but-unrecognized value
+(neither `kaqchikel_only` nor absent — e.g. some future scoping scheme
+this function hasn't been updated for) prints a distinct WARNING rather
+than silently being folded into the "absent" case, and still falls back
+to the legacy construction as the safest available guess (PR #144 review).
+
+**Lineage, not just the checkpoint's own last run (PR #144 review).** A
+checkpoint's real vocabulary is the union of every run in its
+`--init-model` continuation chain, not just the final run's own
+contribution. `training.train.run_training_job` accounts for this at
+write time, not read time: it only records `vocab_extension_scoping` in
+its own model card when continuing from an ancestor whose *own* model
+card also recorded it (`_resolve_vocab_extension_scoping_for_model_card`)
+-- an inductive, one-hop check, since the ancestor's own recorded value
+already reflects *its* whole lineage. Continuing from any ancestor that
+predates issue #125 (or has no readable model card at all) means the
+field is omitted from every descendant's model card too, so
+`evaluation.evaluate_checkpoint` keeps correctly falling back to the safe,
+superset "both columns" reconstruction for the whole chain -- it never
+needs to (and structurally cannot, since a checkpoint's saved files don't
+record its ancestor's S3 URI) walk continuation lineage itself.
 
 Two independent diagnostics then run and print to stderr (never raise) if
 something looks wrong — see `_diagnose_word_boundary_reconstruction`'s own

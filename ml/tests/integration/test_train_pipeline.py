@@ -470,3 +470,133 @@ def test_run_training_job_resumes_from_init_model_when_given(tmp_path):
 
     # Loaded from the checkpoint, not the base pretrained model.
     assert fake_model_loader.calls == [str(checkpoint_dir)]
+
+
+def test_run_training_job_propagates_kaqchikel_only_scoping_across_a_fully_scoped_chain(tmp_path):
+    """PR #144 review finding: recording a fixed `vocab_extension_scoping`
+    on every run regardless of continuation lineage is only correct if the
+    *entire* chain behind `--init-model` was itself fully Kaqchikel-only
+    scoped. Continuing from an ancestor whose own model card also records
+    `kaqchikel_only` means the whole lineage is scoped -- the new run's
+    model card must say so too.
+    """
+    checkpoint_dir = tmp_path / "prior-checkpoint"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "model_card.md").write_text(
+        "# Model card: run-ancestor\n\n## Hyperparameters\n\n"
+        "- **new_tokens_added**: 10\n"
+        f"- **vocab_extension_scoping**: {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY}\n",
+        encoding="utf-8",
+    )
+    model_dir = tmp_path / "model"
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--init-model",
+            str(checkpoint_dir),
+            "--run-id",
+            "smoke-test-scoped-chain",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert f"- **vocab_extension_scoping**: {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY}" in card_text
+
+
+def test_run_training_job_omits_scoping_when_continuing_from_a_pre_125_checkpoint(tmp_path):
+    """The core PR #144 review finding: continuing from a checkpoint whose
+    own model card never recorded `vocab_extension_scoping` (every
+    checkpoint trained before issue #125, e.g. the currently-deployed
+    `run-20260922T141956Z`) must NOT let the new run's model card claim
+    `kaqchikel_only` for the whole checkpoint -- that would make
+    evaluation.evaluate_checkpoint drop the Spanish column during
+    reconstruction and silently miss the earlier chain's Spanish-derived
+    whole-word tokens, reintroducing issue #116's glued-word bug for them.
+    The field must be omitted entirely, falling back to the same legacy
+    (safe, superset) reconstruction the checkpoint's real mixed vocabulary
+    actually needs.
+    """
+    checkpoint_dir = tmp_path / "prior-checkpoint"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "model_card.md").write_text(
+        "# Model card: run-ancestor\n\n## Hyperparameters\n\n- **new_tokens_added**: 10\n",
+        encoding="utf-8",
+    )
+    model_dir = tmp_path / "model"
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--init-model",
+            str(checkpoint_dir),
+            "--run-id",
+            "smoke-test-unscoped-chain",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "vocab_extension_scoping" not in card_text
+
+
+def test_run_training_job_omits_scoping_when_ancestor_checkpoint_has_no_model_card(tmp_path):
+    """Same defensive fallback as the pre-#125 case above, for a checkpoint
+    directory that has no `model_card.md` at all (e.g. one not produced by
+    `run_training_job` itself) -- never crash, and never claim a scoping
+    this script can't actually verify.
+    """
+    checkpoint_dir = tmp_path / "prior-checkpoint"
+    checkpoint_dir.mkdir()
+    model_dir = tmp_path / "model"
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--init-model",
+            str(checkpoint_dir),
+            "--run-id",
+            "smoke-test-no-ancestor-card",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "vocab_extension_scoping" not in card_text

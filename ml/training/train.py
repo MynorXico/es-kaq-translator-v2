@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import tempfile
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -91,18 +92,98 @@ from training.tokenizer_extension import (
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 
-# Issue #143: the value `run_training_job` records in every model card's
-# `vocab_extension_scoping` hyperparameter, going forward. Issue #125 fully
-# replaced the old ("both languages mixed in") whole-word/character
-# vocab-extension behavior in code -- there is no runtime flag choosing
-# between old and new, every run from here on uses this scoping -- so this
+# Issue #143: the value `run_training_job` records in a run's own model
+# card's `vocab_extension_scoping` hyperparameter, when (and only when --
+# see `_resolve_vocab_extension_scoping_for_model_card` below, PR #144
+# review) that run's *entire* `--init-model` continuation lineage was
+# scoped this way. Issue #125 fully replaced the old ("both languages
+# mixed in") whole-word/character vocab-extension behavior in code -- every
+# run from here on always uses this scoping *for its own step* -- so this
 # is a fixed value, not a CLI-configurable one. Its purpose is purely
 # provenance: a checkpoint's saved model card recording this value (or, for
-# any checkpoint trained before this field existed, *not* recording it at
-# all) is how `evaluation.evaluate_checkpoint` tells a post-#125 checkpoint
-# apart from a pre-#125 one when reconstructing issue #116's word-boundary
-# fix (see that module's docstring/`_build_train_sample_texts`).
+# any checkpoint whose lineage includes a run that predates this field,
+# *not* recording it at all) is how `evaluation.evaluate_checkpoint` tells
+# a fully post-#125-scoped checkpoint apart from one with any pre-#125
+# ancestry when reconstructing issue #116's word-boundary fix (see that
+# module's docstring/`_build_train_sample_texts`).
 VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY = "kaqchikel_only"
+
+_VOCAB_EXTENSION_SCOPING_RE = re.compile(r"-\s*\*\*vocab_extension_scoping\*\*:\s*(\S+)")
+
+
+def _read_ancestor_vocab_extension_scoping(model_source: str) -> str | None:
+    """Best-effort read of the `vocab_extension_scoping` hyperparameter from
+    an `--init-model` ancestor checkpoint's own saved `model_card.md`
+    (mirrors `evaluation.evaluate_checkpoint`'s "never raises" reader
+    contract for the same field). `model_source` here is already the
+    *resolved* local directory of that ancestor checkpoint (see
+    `resolve_model_source`) -- a plain local directory in the common case,
+    or a Hugging Face Hub model id when there's no `--init-model` at all
+    (never has a local `model_card.md`, so this correctly returns `None`).
+
+    Returns `None` both when the ancestor genuinely predates issue #125
+    (never wrote this field) and when there's no readable model card at
+    all (e.g. a checkpoint not produced by this script) -- either way, the
+    caller (`_resolve_vocab_extension_scoping_for_model_card`) must treat
+    the whole lineage as not fully Kaqchikel-only scoped.
+    """
+    model_card_path = Path(model_source) / "model_card.md"
+    try:
+        if not model_card_path.is_file():
+            return None
+        text = model_card_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _VOCAB_EXTENSION_SCOPING_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _resolve_vocab_extension_scoping_for_model_card(
+    *, init_model: str | None, model_source: str
+) -> str | None:
+    """Decide what (if anything) this run's own model card should record
+    for `vocab_extension_scoping` (issue #143, PR #144 review).
+
+    This run's *own* whole-word/character vocab-extension step always uses
+    Kaqchikel-only scoping (issue #125 fully replaced the old behavior in
+    code -- there's no other option any more). But a checkpoint's real
+    vocabulary is the union of every run in its `--init-model` continuation
+    chain, not just this run's own contribution: continuing from an
+    ancestor whose *own* recorded scoping is anything other than
+    `VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY` (including `None` -- an
+    ancestor that predates issue #125 entirely, e.g. the currently-deployed
+    `run-20260922T141956Z`) means the checkpoint being produced here still
+    carries pre-#125, unscoped (Spanish-inclusive) whole-word tokens from
+    that ancestor. Recording `kaqchikel_only` unconditionally here would
+    tell `evaluation.evaluate_checkpoint` to reconstruct against the
+    Kaqchikel-only column alone, which would never re-mark those
+    inherited Spanish-derived tokens for issue #116's leading-space
+    decoding fix -- silently reintroducing that exact bug for them.
+
+    - No `--init-model` at all (`init_model` falsy): this run's checkpoint
+      has no pre-existing vocabulary to inherit, so its whole lineage
+      (i.e. just itself) is trivially fully Kaqchikel-only scoped.
+    - `--init-model` given: only propagate `VOCAB_EXTENSION_SCOPING_
+      KAQCHIKEL_ONLY` forward if the ancestor's *own* model card also
+      recorded exactly that value (i.e. the ancestor's own lineage was
+      already confirmed fully scoped, by the same inductive argument one
+      level up). Anything else -- `None`, or some unrecognized value --
+      means the field must be omitted from this run's own model card too,
+      so a fully-mixed-lineage checkpoint keeps falling back to
+      `evaluation.evaluate_checkpoint`'s legacy (safe, superset)
+      reconstruction, exactly like a checkpoint that predates issue #125
+      outright.
+
+    `model_source` is the already-resolved local checkpoint directory (see
+    `resolve_model_source`) when `init_model` is truthy.
+    """
+    if not init_model:
+        return VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY
+
+    ancestor_scoping = _read_ancestor_vocab_extension_scoping(model_source)
+    if ancestor_scoping == VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY:
+        return VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY
+    return None
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -632,6 +713,16 @@ def run_training_job(
     val_examples = build_direction_examples(val_pairs, args.direction)
 
     model_source = resolve_model_source(args.init_model) if args.init_model else args.base_model
+    # Computed before training touches anything -- see this function's own
+    # docstring / `_resolve_vocab_extension_scoping_for_model_card` (issue
+    # #143, PR #144 review) for why this can't just always be
+    # `VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY`: a `--init-model` ancestor
+    # whose own lineage wasn't fully Kaqchikel-only scoped means this
+    # checkpoint's real vocabulary still carries pre-#125, unscoped tokens
+    # inherited from it.
+    vocab_extension_scoping_for_card = _resolve_vocab_extension_scoping_for_model_card(
+        init_model=args.init_model, model_source=model_source
+    )
     tokenizer, model = model_loader(model_source)
 
     added_tokens = extend_vocabulary_for_examples(
@@ -672,6 +763,28 @@ def run_training_job(
         )
     notes = " ".join(notes_parts) or None
 
+    hyperparameters = {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "max_length": args.max_length,
+        "seed": args.seed,
+        "warmup_ratio": args.warmup_ratio,
+        "weight_decay": args.weight_decay,
+        "label_smoothing": args.label_smoothing,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "subword_vocab_size": args.subword_vocab_size,
+        "new_tokens_added": len(added_tokens),
+        "resumed_from_checkpoint": bool(args.init_model),
+    }
+    # Omitted entirely (rather than recorded as some "unscoped" sentinel)
+    # when the lineage isn't fully Kaqchikel-only scoped -- matching
+    # evaluation.evaluate_checkpoint's existing "field absent = legacy"
+    # convention for every checkpoint that predates issue #125 outright
+    # (issue #143, PR #144 review).
+    if vocab_extension_scoping_for_card is not None:
+        hyperparameters["vocab_extension_scoping"] = vocab_extension_scoping_for_card
+
     run_metadata = {
         "run_id": run_id,
         "timestamp": datetime.now(UTC).isoformat(),
@@ -679,21 +792,7 @@ def run_training_job(
         "direction": args.direction,
         "corpus_version": args.corpus_version,
         "train_sentence_count": len(train_pairs),
-        "hyperparameters": {
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "learning_rate": args.learning_rate,
-            "max_length": args.max_length,
-            "seed": args.seed,
-            "warmup_ratio": args.warmup_ratio,
-            "weight_decay": args.weight_decay,
-            "label_smoothing": args.label_smoothing,
-            "gradient_accumulation_steps": args.gradient_accumulation_steps,
-            "subword_vocab_size": args.subword_vocab_size,
-            "new_tokens_added": len(added_tokens),
-            "resumed_from_checkpoint": bool(args.init_model),
-            "vocab_extension_scoping": VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY,
-        },
+        "hyperparameters": hyperparameters,
         "notes": notes,
     }
 

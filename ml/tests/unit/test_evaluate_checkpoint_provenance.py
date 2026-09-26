@@ -94,3 +94,46 @@ def test_build_train_sample_texts_uses_kaqchikel_only_column_for_post_125_proven
     assert texts == ["Utz awäch", "Matyox", *ALL_DIRECTION_TAG_TOKENS]
     assert "Buenos días" not in texts
     assert "Gracias" not in texts
+
+
+def test_build_train_sample_texts_warns_on_an_unrecognized_but_present_scoping_value(capsys):
+    """PR #144 review finding: a `vocab_extension_scoping` value that's
+    present but not one this function actually knows how to build sample
+    texts for (e.g. some future scoping scheme introduced without updating
+    this function) must not be silently treated the same as `None` (a
+    checkpoint that genuinely predates issue #125) -- that would quietly
+    reintroduce this issue's over-reconstruction bug with no signal
+    anything's wrong. Must warn distinctly, and still fall back to the
+    legacy "both columns" construction (the broadest, safest guess).
+    """
+    texts = _build_train_sample_texts(TRAIN_PAIRS, "some_future_scoping_scheme")
+
+    assert texts == [
+        "Buenos días",
+        "Gracias",
+        "Utz awäch",
+        "Matyox",
+        *ALL_DIRECTION_TAG_TOKENS,
+    ]
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "some_future_scoping_scheme" in captured.err
+
+
+def test_build_train_sample_texts_does_not_warn_for_legacy_none_scoping(capsys):
+    """The ordinary "checkpoint predates issue #125, field simply absent"
+    case must stay silent -- only a *present-but-unrecognized* value is a
+    genuine anomaly worth warning about (PR #144 review: distinct from the
+    "field absent" case).
+    """
+    _build_train_sample_texts(TRAIN_PAIRS, None)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_build_train_sample_texts_does_not_warn_for_the_known_scoping_value(capsys):
+    _build_train_sample_texts(TRAIN_PAIRS, VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY)
+
+    captured = capsys.readouterr()
+    assert captured.err == ""

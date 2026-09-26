@@ -354,31 +354,6 @@ def load_base_tokenizer_vocab(base_model: str) -> dict[str, int]:
 
 
 _NEW_TOKENS_ADDED_RE = re.compile(r"-\s*\*\*new_tokens_added\*\*:\s*(\d+)")
-
-
-def _read_checkpoint_new_tokens_added(checkpoint_dir: str) -> int | None:
-    """Best-effort read of the `new_tokens_added` hyperparameter from the
-    checkpoint's own saved `model_card.md` (`training.train.
-    run_training_job` writes this alongside the model artifact, in the
-    same directory `save_model_and_tokenizer` saves the tokenizer to).
-    Used only as an auxiliary sanity bound for word-boundary
-    reconstruction (`_diagnose_word_boundary_reconstruction`) -- never
-    required. Returns `None` (never raises) if `checkpoint_dir` isn't a
-    real local path, the file is missing, or the field can't be found --
-    a missing/unreadable model card must never crash an otherwise-valid
-    eval-only run over a best-effort diagnostic.
-    """
-    model_card_path = Path(checkpoint_dir) / "model_card.md"
-    try:
-        if not model_card_path.is_file():
-            return None
-        text = model_card_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    match = _NEW_TOKENS_ADDED_RE.search(text)
-    return int(match.group(1)) if match else None
-
-
 _VOCAB_EXTENSION_SCOPING_RE = re.compile(r"-\s*\*\*vocab_extension_scoping\*\*:\s*(\S+)")
 
 # Label recorded on *this script's own* re-evaluation model card for
@@ -389,32 +364,80 @@ _VOCAB_EXTENSION_SCOPING_RE = re.compile(r"-\s*\*\*vocab_extension_scoping\*\*:\
 _LEGACY_UNSCOPED_VOCAB_EXTENSION_LABEL = "legacy_unscoped_pre_125"
 
 
-def _read_checkpoint_vocab_extension_scoping(checkpoint_dir: str) -> str | None:
-    """Best-effort read of the `vocab_extension_scoping` hyperparameter from
-    the checkpoint's own saved `model_card.md` (mirrors `_read_checkpoint_
-    new_tokens_added`'s "never raises" contract above -- a missing/
-    unreadable model card, or a real path that just predates issue #125's
-    fix, must never crash an otherwise-valid eval-only run).
+def _read_checkpoint_model_card_text(checkpoint_dir: str) -> str | None:
+    """Best-effort, single read of the checkpoint's own saved
+    `model_card.md` text (`training.train.run_training_job` writes this
+    alongside the model artifact, in the same directory
+    `save_model_and_tokenizer` saves the tokenizer to). Returns `None`
+    (never raises) if `checkpoint_dir` isn't a real local path or the file
+    is missing/unreadable -- a missing/unreadable model card must never
+    crash an otherwise-valid eval-only run over a best-effort diagnostic.
+
+    Shared by every field-specific reader below (`_read_checkpoint_
+    new_tokens_added` / `_read_checkpoint_vocab_extension_scoping`) and by
+    `run_checkpoint_evaluation` directly, so a checkpoint's model card is
+    only ever read from disk once per evaluation run rather than once per
+    field (PR #144 review).
+    """
+    model_card_path = Path(checkpoint_dir) / "model_card.md"
+    try:
+        if not model_card_path.is_file():
+            return None
+        return model_card_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _extract_new_tokens_added(model_card_text: str | None) -> int | None:
+    """Parse the `new_tokens_added` hyperparameter out of already-read
+    model card text (see `_read_checkpoint_model_card_text`). Used only as
+    an auxiliary sanity bound for word-boundary reconstruction
+    (`_diagnose_word_boundary_reconstruction`) -- never required.
+    """
+    if model_card_text is None:
+        return None
+    match = _NEW_TOKENS_ADDED_RE.search(model_card_text)
+    return int(match.group(1)) if match else None
+
+
+def _extract_vocab_extension_scoping(model_card_text: str | None) -> str | None:
+    """Parse the `vocab_extension_scoping` hyperparameter out of
+    already-read model card text (see `_read_checkpoint_model_card_text`).
 
     Returns `None` for a checkpoint trained before issue #125 (its own
     `training.train.run_training_job` run never wrote this field at all --
     this is the *expected*, common case for every checkpoint trained so
     far, including the currently-deployed `run-20260922T141956Z`), and
     `training.train.VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY` for one trained
-    under issue #125's fix. See `_build_train_sample_texts`, which uses
-    this to pick the correct `train_sample_texts` construction by the
-    checkpoint's own provenance rather than a caller-supplied flag (issue
-    #143).
+    under issue #125's fix with a fully Kaqchikel-only-scoped
+    `--init-model` lineage (see `training.train.run_training_job`'s own
+    docstring on how it propagates this across continuation runs -- PR
+    #144 review). See `_build_train_sample_texts`, which uses this to pick
+    the correct `train_sample_texts` construction by the checkpoint's own
+    provenance rather than a caller-supplied flag (issue #143).
     """
-    model_card_path = Path(checkpoint_dir) / "model_card.md"
-    try:
-        if not model_card_path.is_file():
-            return None
-        text = model_card_path.read_text(encoding="utf-8")
-    except OSError:
+    if model_card_text is None:
         return None
-    match = _VOCAB_EXTENSION_SCOPING_RE.search(text)
+    match = _VOCAB_EXTENSION_SCOPING_RE.search(model_card_text)
     return match.group(1) if match else None
+
+
+def _read_checkpoint_new_tokens_added(checkpoint_dir: str) -> int | None:
+    """Convenience wrapper: read + extract in one call. Prefer
+    `_read_checkpoint_model_card_text` + `_extract_new_tokens_added`
+    directly when also reading another field from the same checkpoint in
+    the same call site, to avoid reading the file twice.
+    """
+    return _extract_new_tokens_added(_read_checkpoint_model_card_text(checkpoint_dir))
+
+
+def _read_checkpoint_vocab_extension_scoping(checkpoint_dir: str) -> str | None:
+    """Convenience wrapper: read + extract in one call. Prefer
+    `_read_checkpoint_model_card_text` + `_extract_vocab_extension_scoping`
+    directly when also reading another field from the same checkpoint in
+    the same call site, to avoid reading the file twice.
+    """
+    return _extract_vocab_extension_scoping(_read_checkpoint_model_card_text(checkpoint_dir))
 
 
 def _build_train_sample_texts(
@@ -440,10 +463,35 @@ def _build_train_sample_texts(
     ALL_DIRECTION_TAG_TOKENS`) are always appended -- they need real,
     warm-started embedding rows regardless of which vocab-extension scoping
     produced them, and were never excluded by issue #125's fix.
+
+    A `vocab_extension_scoping` that is *present but not recognized* (not
+    `VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY`, and not `None`) is deliberately
+    **not** silently folded into the `None`/legacy case (PR #144 review): a
+    future scoping scheme this function hasn't been updated to know about
+    would otherwise be treated as an ordinary pre-#125 checkpoint with zero
+    signal anything's off, quietly reintroducing this issue's
+    over-reconstruction bug the moment such a checkpoint is evaluated. This
+    prints a distinct WARNING to stderr (never raises -- consistent with
+    `_diagnose_word_boundary_reconstruction`'s "don't crash an expensive
+    real run over a diagnostic" policy) and falls back to the legacy "both
+    columns" construction as the broadest, safest available guess.
     """
     if vocab_extension_scoping == VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY:
         sample_texts = [target for _, target in train_pairs]
     else:
+        if vocab_extension_scoping is not None:
+            print(
+                "WARNING: checkpoint recorded an unrecognized "
+                f"vocab_extension_scoping value {vocab_extension_scoping!r} "
+                "-- this script only knows how to build train_sample_texts "
+                f"for {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY!r} or no "
+                "recorded value at all (a checkpoint predating issue #125). "
+                "Falling back to the legacy 'both columns' construction, "
+                "which may not correctly match what this checkpoint was "
+                "actually trained with -- update _build_train_sample_texts "
+                "if this is a genuinely new vocab-extension scoping scheme.",
+                file=sys.stderr,
+            )
         sample_texts = [source for source, _ in train_pairs] + [
             target for _, target in train_pairs
         ]
@@ -603,13 +651,17 @@ def run_checkpoint_evaluation(
     # provenance, not a caller-supplied flag (issue #143) -- see
     # `_build_train_sample_texts`.
     train_pairs = read_tsv_pairs(args.train)
-    vocab_extension_scoping = _read_checkpoint_vocab_extension_scoping(model_source)
+    # Single read of the checkpoint's own model card, shared by both fields
+    # pulled from it below (PR #144 review: avoid reading the same file
+    # twice).
+    checkpoint_model_card_text = _read_checkpoint_model_card_text(model_source)
+    vocab_extension_scoping = _extract_vocab_extension_scoping(checkpoint_model_card_text)
     train_sample_texts = _build_train_sample_texts(train_pairs, vocab_extension_scoping)
     base_vocab = base_vocab_loader(args.base_model)
     boundary_tokens = patch_word_boundary_decoding_for_checkpoint(
         tokenizer, base_vocab, train_sample_texts
     )
-    checkpoint_new_tokens_added = _read_checkpoint_new_tokens_added(model_source)
+    checkpoint_new_tokens_added = _extract_new_tokens_added(checkpoint_model_card_text)
     _diagnose_word_boundary_reconstruction(
         boundary_tokens, tokenizer, base_vocab, checkpoint_new_tokens_added
     )
