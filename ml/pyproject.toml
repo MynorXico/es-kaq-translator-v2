@@ -10,7 +10,7 @@ dependencies = [
     "torch>=2.2",
     "transformers>=4.40",
     "sentencepiece>=0.2",
-    "sagemaker>=2.257,<3",
+    "sagemaker>=3.4,<4",
     # Required by transformers.Trainer/TrainingArguments for device setup
     # (issue #79) -- confirmed via a real ImportError when constructing
     # Seq2SeqTrainingArguments with fp16=True without it, not assumed.

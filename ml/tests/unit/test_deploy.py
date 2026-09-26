@@ -4,6 +4,11 @@ deployable SageMaker Model Package version (issue #8). Every AWS/
 `sagemaker` SDK touchpoint is mocked, mirroring
 `tests/unit/test_submit_job.py`'s approach -- this suite never makes a
 real AWS call or resolves a real container image.
+
+`deploy.py`'s only `sagemaker` SDK dependency is `image_uris.retrieve`,
+relocated (not renamed) from `sagemaker.image_uris` to
+`sagemaker.core.image_uris` in SDK v3 (issue #155, GHSA-5r2p-pjr8-7fh7) --
+`deploy._retrieve_image_uri` is mocked here exactly as before.
 """
 
 from __future__ import annotations

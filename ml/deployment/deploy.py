@@ -48,7 +48,7 @@ container *variant* (CPU vs. GPU) gets resolved -- Serverless Inference
 never actually provisions a persistent instance of that type.
 
 ```python
-from sagemaker.image_uris import config_for_framework, retrieve
+from sagemaker.core.image_uris import config_for_framework, retrieve
 inference_versions = config_for_framework("huggingface")["inference"]["versions"]
 sorted(inference_versions)  # -> [..., "4.48.0", "4.49.0", "4.51.3"]
 inference_versions["4.49.0"]
@@ -64,6 +64,18 @@ retrieve(framework="huggingface", region="us-east-1", version="4.49.0",
 
 Re-run this after any future `sagemaker` SDK upgrade to confirm the
 constants below are still valid, same as `submit_job.py`.
+
+## SageMaker Python SDK v3 (issue #155, GHSA-5r2p-pjr8-7fh7)
+
+This module's only `sagemaker` SDK dependency, `image_uris.retrieve` (a
+pure local lookup against the installed SDK's bundled compatibility
+tables -- no AWS/network call), moved from `sagemaker.image_uris` to
+`sagemaker.core.image_uris` in SDK v3; the function itself is unchanged.
+Unlike `training/submit_job.py`, this module never constructs a
+`sagemaker.train.ModelTrainer` (or the v2 `HuggingFace`/`HuggingFaceModel`
+estimator classes it replaced) -- deployment here goes straight through
+`boto3`'s `sagemaker` client (`create_model_package`), so v3's other,
+more invasive API changes don't reach this file at all.
 """
 
 from __future__ import annotations
@@ -78,7 +90,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from sagemaker.image_uris import retrieve as _retrieve_image_uri
+from sagemaker.core.image_uris import retrieve as _retrieve_image_uri
 
 from deployment.package_model import build_inference_code_dir, repackage_model_artifact
 from training.submit_job import (
