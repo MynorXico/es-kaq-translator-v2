@@ -133,14 +133,30 @@ export class MlHostingStack extends Stack {
     const namePrefix = `${MODEL_PACKAGE_GROUP_NAME}-${props.environmentName}`;
     this.endpointName = namePrefix;
 
+    // Model/EndpointConfig names are version-qualified (unlike the
+    // Endpoint's own name below) -- a real incident, not a hypothetical:
+    // bumping `modelPackageVersion` with a *fixed* Model name failed to
+    // deploy with "Cannot create already existing model ... (AlreadyExists)".
+    // CloudFormation's default replacement strategy creates the new
+    // resource before deleting the old one whenever a property (like
+    // `containers[].modelPackageName`) requires replacement -- which only
+    // works if the new resource's physical name actually differs from the
+    // old one's. The Endpoint's own name deliberately stays fixed
+    // (`namePrefix`, this stack's public `endpointName` contract, consumed
+    // by ApiStack's `SAGEMAKER_ENDPOINT_NAME`) -- SageMaker updates an
+    // existing Endpoint in place to point at a new EndpointConfig, so its
+    // name has no reason to change and every consumer of a stable
+    // endpoint name would break if it did.
+    const versionedNamePrefix = `${namePrefix}-v${props.modelPackageVersion}`;
+
     const model = new CfnModel(this, "Model", {
-      modelName: namePrefix,
+      modelName: versionedNamePrefix,
       executionRoleArn: executionRole.roleArn,
       containers: [{ modelPackageName: modelPackageArn }],
     });
 
     const endpointConfig = new CfnEndpointConfig(this, "EndpointConfig", {
-      endpointConfigName: namePrefix,
+      endpointConfigName: versionedNamePrefix,
       productionVariants: [
         {
           variantName: "AllTraffic",

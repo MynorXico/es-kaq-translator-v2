@@ -122,4 +122,39 @@ describe("MlHostingStack", () => {
       }),
     });
   });
+
+  it("gives the Model and EndpointConfig a version-qualified name, so bumping DEV_MODEL_PACKAGE_VERSION is a safe CloudFormation replacement, not a name collision", () => {
+    // Real incident: bumping modelPackageVersion previously failed to
+    // deploy with "Cannot create already existing model ... (AlreadyExists)"
+    // -- CloudFormation's default create-new-before-delete-old replacement
+    // strategy can't create the new Model/EndpointConfig if their physical
+    // names are the same fixed string every version uses. Model/
+    // EndpointConfig names must change whenever the version does; the
+    // Endpoint's own name (this stack's public `endpointName` contract,
+    // consumed by ApiStack's SAGEMAKER_ENDPOINT_NAME) must NOT change, or
+    // every consumer of a stable endpoint name would break instead.
+    const { template: templateV3 } = synthMlHostingStack(3);
+    const { template: templateV4 } = synthMlHostingStack(4);
+
+    const modelNameV3 = Object.values(templateV3.findResources("AWS::SageMaker::Model"))[0]
+      .Properties.ModelName;
+    const modelNameV4 = Object.values(templateV4.findResources("AWS::SageMaker::Model"))[0]
+      .Properties.ModelName;
+    expect(modelNameV3).not.toBe(modelNameV4);
+
+    const configNameV3 = Object.values(
+      templateV3.findResources("AWS::SageMaker::EndpointConfig"),
+    )[0].Properties.EndpointConfigName;
+    const configNameV4 = Object.values(
+      templateV4.findResources("AWS::SageMaker::EndpointConfig"),
+    )[0].Properties.EndpointConfigName;
+    expect(configNameV3).not.toBe(configNameV4);
+
+    const endpointNameV3 = Object.values(templateV3.findResources("AWS::SageMaker::Endpoint"))[0]
+      .Properties.EndpointName;
+    const endpointNameV4 = Object.values(templateV4.findResources("AWS::SageMaker::Endpoint"))[0]
+      .Properties.EndpointName;
+    expect(endpointNameV3).toBe(endpointNameV4);
+    expect(endpointNameV3).toBe("traductor-kaqchikel-es-cak-test");
+  });
 });
