@@ -33,11 +33,24 @@ export interface TranslatorStageProps extends StageProps {
 //   rejected: BLEU 6.0/chrF 26.3, but confounded by far less cumulative
 //   training exposure than v4's 3+5+5-epoch continuation chain (13 total
 //   epochs vs. 5), not evidence the fix itself hurts.
-// - Version 6 (issue #125's fix, a fresh 13-epoch run matching v4's
-//   cumulative training exposure for a clean comparison) -- approved and
-//   deployed here: BLEU 14.0/chrF 36.5, a real, uncounfounded improvement
-//   over v4, confirming the vocab-scoping fix helps modestly.
-const DEV_MODEL_PACKAGE_VERSION = 6;
+// - Version 6 -- never deployed. Registered by hand directly via
+//   `aws sagemaker create-model-package` (skipping `ml/deployment/
+//   deploy.py`'s repackaging step) with customer metadata only and no
+//   `InferenceSpecification`, which `MlHostingStack`'s `Model` resource
+//   requires -- deploying it failed with "Inference specification is not
+//   present". Deleted; version numbers are never reused after deletion.
+// - Version 7 (same underlying run as the deleted v6: issue #125's fix, a
+//   fresh 13-epoch run matching v4's cumulative training exposure for a
+//   clean comparison) -- registered correctly via `deployment.deploy`,
+//   approved, and deployed here. `deploy.py` auto-parses BLEU/chrF from
+//   the training run's own inline eval (12.3/35.1); customer metadata was
+//   corrected in place to 14.0/36.5, a dedicated `evaluate_checkpoint.py`
+//   re-eval on the same full validation set and weights -- a real,
+//   uncounfounded improvement over v4 (13.3/35.4), confirming the
+//   vocab-scoping fix helps modestly. The two measurements' gap (14.0 vs.
+//   12.3) is not yet reconciled -- see the model package's own
+//   `metric_note` and issue #125.
+const DEV_MODEL_PACKAGE_VERSION = 7;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
