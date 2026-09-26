@@ -123,38 +123,33 @@ describe("MlHostingStack", () => {
     });
   });
 
-  it("gives the Model and EndpointConfig a version-qualified name, so bumping DEV_MODEL_PACKAGE_VERSION is a safe CloudFormation replacement, not a name collision", () => {
-    // Real incident: bumping modelPackageVersion previously failed to
+  it("leaves the Model and EndpointConfig unnamed, so any replacement-forcing change is a safe CloudFormation replacement, not a name collision", () => {
+    // Real incident: giving Model/EndpointConfig a fixed name failed to
     // deploy with "Cannot create already existing model ... (AlreadyExists)"
-    // -- CloudFormation's default create-new-before-delete-old replacement
-    // strategy can't create the new Model/EndpointConfig if their physical
-    // names are the same fixed string every version uses. Model/
-    // EndpointConfig names must change whenever the version does; the
-    // Endpoint's own name (this stack's public `endpointName` contract,
-    // consumed by ApiStack's SAGEMAKER_ENDPOINT_NAME) must NOT change, or
-    // every consumer of a stable endpoint name would break instead.
-    const { template: templateV3 } = synthMlHostingStack(3);
-    const { template: templateV4 } = synthMlHostingStack(4);
+    // the first time DEV_MODEL_PACKAGE_VERSION was ever bumped after this
+    // stack's initial deployment. Neither resource supports in-place update
+    // for any property -- a fixed name means CloudFormation's create-new-
+    // before-delete-old replacement strategy can never create the new one,
+    // for *any* replacement-forcing change (not just a version bump: the
+    // serverless memory/concurrency config or the execution role would hit
+    // the same collision). Leaving the name unset lets CloudFormation
+    // auto-generate a fresh physical name on every replacement, unlike the
+    // Endpoint's own name below, which is a real external contract
+    // (`endpointName`, consumed by ApiStack's SAGEMAKER_ENDPOINT_NAME) that
+    // must stay fixed -- SageMaker updates an existing Endpoint in place to
+    // point at a new EndpointConfig, so it has no reason to change.
+    const { template } = synthMlHostingStack();
 
-    const modelNameV3 = Object.values(templateV3.findResources("AWS::SageMaker::Model"))[0]
-      .Properties.ModelName;
-    const modelNameV4 = Object.values(templateV4.findResources("AWS::SageMaker::Model"))[0]
-      .Properties.ModelName;
-    expect(modelNameV3).not.toBe(modelNameV4);
+    const modelProps = Object.values(template.findResources("AWS::SageMaker::Model"))[0]
+      .Properties;
+    expect(modelProps.ModelName).toBeUndefined();
 
-    const configNameV3 = Object.values(
-      templateV3.findResources("AWS::SageMaker::EndpointConfig"),
-    )[0].Properties.EndpointConfigName;
-    const configNameV4 = Object.values(
-      templateV4.findResources("AWS::SageMaker::EndpointConfig"),
-    )[0].Properties.EndpointConfigName;
-    expect(configNameV3).not.toBe(configNameV4);
+    const configProps = Object.values(template.findResources("AWS::SageMaker::EndpointConfig"))[0]
+      .Properties;
+    expect(configProps.EndpointConfigName).toBeUndefined();
 
-    const endpointNameV3 = Object.values(templateV3.findResources("AWS::SageMaker::Endpoint"))[0]
-      .Properties.EndpointName;
-    const endpointNameV4 = Object.values(templateV4.findResources("AWS::SageMaker::Endpoint"))[0]
-      .Properties.EndpointName;
-    expect(endpointNameV3).toBe(endpointNameV4);
-    expect(endpointNameV3).toBe("traductor-kaqchikel-es-cak-test");
+    const endpointProps = Object.values(template.findResources("AWS::SageMaker::Endpoint"))[0]
+      .Properties;
+    expect(endpointProps.EndpointName).toBe("traductor-kaqchikel-es-cak-test");
   });
 });

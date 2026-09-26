@@ -133,30 +133,34 @@ export class MlHostingStack extends Stack {
     const namePrefix = `${MODEL_PACKAGE_GROUP_NAME}-${props.environmentName}`;
     this.endpointName = namePrefix;
 
-    // Model/EndpointConfig names are version-qualified (unlike the
-    // Endpoint's own name below) -- a real incident, not a hypothetical:
-    // bumping `modelPackageVersion` with a *fixed* Model name failed to
-    // deploy with "Cannot create already existing model ... (AlreadyExists)".
-    // CloudFormation's default replacement strategy creates the new
-    // resource before deleting the old one whenever a property (like
-    // `containers[].modelPackageName`) requires replacement -- which only
-    // works if the new resource's physical name actually differs from the
-    // old one's. The Endpoint's own name deliberately stays fixed
-    // (`namePrefix`, this stack's public `endpointName` contract, consumed
-    // by ApiStack's `SAGEMAKER_ENDPOINT_NAME`) -- SageMaker updates an
-    // existing Endpoint in place to point at a new EndpointConfig, so its
-    // name has no reason to change and every consumer of a stable
-    // endpoint name would break if it did.
-    const versionedNamePrefix = `${namePrefix}-v${props.modelPackageVersion}`;
-
+    // Model/EndpointConfig deliberately get NO explicit name -- unlike the
+    // Endpoint below. A real incident, not a hypothetical: giving them a
+    // fixed name failed to deploy with "Cannot create already existing
+    // model ... (AlreadyExists)" the first time `modelPackageVersion` was
+    // ever bumped after this stack's initial deployment. Neither
+    // `AWS::SageMaker::Model` nor `AWS::SageMaker::EndpointConfig` supports
+    // in-place update for *any* of their properties -- changing
+    // `modelPackageVersion`, `SERVERLESS_MEMORY_SIZE_IN_MB`,
+    // `SERVERLESS_MAX_CONCURRENCY`, or the execution role all force
+    // CloudFormation to replace them, which needs a genuinely new physical
+    // name every time, not just when the version number happens to change.
+    // Leaving `modelName`/`endpointConfigName` unset lets CloudFormation
+    // auto-generate a unique name on every replacement -- the standard CDK
+    // pattern for exactly this class of problem, and strictly more robust
+    // than hand-rolling a version suffix (which would still collide if a
+    // later change forces replacement without bumping the version, or if a
+    // version number is ever reused after a prior deploy of it failed to
+    // fully clean up). Nothing external depends on either name -- only the
+    // Endpoint's own name below is a real contract (`this.endpointName`,
+    // consumed by ApiStack's `SAGEMAKER_ENDPOINT_NAME`), and SageMaker
+    // updates an existing Endpoint in place to point at a new
+    // EndpointConfig, so that name has no reason to change either.
     const model = new CfnModel(this, "Model", {
-      modelName: versionedNamePrefix,
       executionRoleArn: executionRole.roleArn,
       containers: [{ modelPackageName: modelPackageArn }],
     });
 
     const endpointConfig = new CfnEndpointConfig(this, "EndpointConfig", {
-      endpointConfigName: versionedNamePrefix,
       productionVariants: [
         {
           variantName: "AllTraffic",
