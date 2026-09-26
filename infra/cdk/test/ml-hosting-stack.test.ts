@@ -122,4 +122,34 @@ describe("MlHostingStack", () => {
       }),
     });
   });
+
+  it("leaves the Model and EndpointConfig unnamed, so any replacement-forcing change is a safe CloudFormation replacement, not a name collision", () => {
+    // Real incident: giving Model/EndpointConfig a fixed name failed to
+    // deploy with "Cannot create already existing model ... (AlreadyExists)"
+    // the first time DEV_MODEL_PACKAGE_VERSION was ever bumped after this
+    // stack's initial deployment. Neither resource supports in-place update
+    // for any property -- a fixed name means CloudFormation's create-new-
+    // before-delete-old replacement strategy can never create the new one,
+    // for *any* replacement-forcing change (not just a version bump: the
+    // serverless memory/concurrency config or the execution role would hit
+    // the same collision). Leaving the name unset lets CloudFormation
+    // auto-generate a fresh physical name on every replacement, unlike the
+    // Endpoint's own name below, which is a real external contract
+    // (`endpointName`, consumed by ApiStack's SAGEMAKER_ENDPOINT_NAME) that
+    // must stay fixed -- SageMaker updates an existing Endpoint in place to
+    // point at a new EndpointConfig, so it has no reason to change.
+    const { template } = synthMlHostingStack();
+
+    const modelProps = Object.values(template.findResources("AWS::SageMaker::Model"))[0]
+      .Properties;
+    expect(modelProps.ModelName).toBeUndefined();
+
+    const configProps = Object.values(template.findResources("AWS::SageMaker::EndpointConfig"))[0]
+      .Properties;
+    expect(configProps.EndpointConfigName).toBeUndefined();
+
+    const endpointProps = Object.values(template.findResources("AWS::SageMaker::Endpoint"))[0]
+      .Properties;
+    expect(endpointProps.EndpointName).toBe("traductor-kaqchikel-es-cak-test");
+  });
 });
