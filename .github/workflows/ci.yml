@@ -79,7 +79,7 @@ jobs:
       # tests/integration/test_tokenizer_extension_real_model.py. Cache the
       # Hugging Face Hub cache dir so this only happens once per model
       # version, not on every CI run.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           key: hf-hub-m2m100_418M-${{ hashFiles('ml/tests/integration/test_tokenizer_extension_real_model.py') }}
