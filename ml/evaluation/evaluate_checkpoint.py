@@ -149,6 +149,12 @@ checkpoint download or a real `model.generate()` call.
 unit-tested directly against a fake S3 client
 (`tests/unit/test_evaluate_checkpoint_source.py`), mirroring
 `training.train.resolve_model_source`'s local-only equivalent.
+`load_checkpoint_tokenizer_and_model`'s CUDA device placement (issue #170)
+is unit-tested indirectly via its extracted `_move_model_to_cuda_if_available`
+helper against a duck-typed fake model
+(`tests/unit/test_evaluate_checkpoint_device.py`) -- see that helper's own
+docstring for why the real `from_pretrained`-calling wrapper itself isn't
+tested directly.
 """
 
 from __future__ import annotations
@@ -323,6 +329,35 @@ def resolve_checkpoint_source(source: str, *, s3_client: Any = None) -> str:
     return resolve_model_source(source)
 
 
+def _move_model_to_cuda_if_available(model: Any) -> Any:
+    """Move `model` onto a CUDA device when one is available, otherwise
+    leave it untouched (issue #170).
+
+    Mirrors `training.train.build_training_arguments`'s existing
+    `fp16=torch.cuda.is_available()` pattern, but for device placement:
+    `training.train.generate_translations` already moves every encoded
+    input batch to `model.device` before calling `model.generate` (see
+    that function's docstring), but the model itself was never actually
+    moved onto a GPU in the first place -- `from_pretrained` always loads
+    onto CPU by default, so `model.device` stayed `"cpu"` regardless of
+    the environment's real hardware, and the whole generation pass ran on
+    CPU even in a GPU-capable environment. A real eval run (7,218
+    validation examples, beam=5) took ~12 hours on a CPU-only environment
+    because of this; a local smoke test confirmed the same generation is
+    trivially GPU-capable (peak ~2.3GB at the script's real default
+    `--batch-size 16`) once the model is explicitly moved here.
+
+    On a CPU-only environment (including this repo's own CI runners),
+    `torch.cuda.is_available()` is `False` and this is a no-op -- no
+    behavior or performance change there.
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        return model.to("cuda")
+    return model
+
+
 def load_checkpoint_tokenizer_and_model(source: str) -> tuple[Any, Any]:
     """Load the real `M2M100Tokenizer` + `M2M100ForConditionalGeneration`
     directly from `source` (a local checkpoint directory produced by a
@@ -330,11 +365,15 @@ def load_checkpoint_tokenizer_and_model(source: str) -> tuple[Any, Any]:
     is already extended and its weights already fine-tuned -- nothing
     further to load or extend here. Lazily imports `transformers`, same
     laziness pattern as `training.train.load_base_model_and_tokenizer`.
+
+    Moves the model to a CUDA device when one is available (issue #170) --
+    see `_move_model_to_cuda_if_available`'s docstring for why this matters.
     """
     from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 
     tokenizer = M2M100Tokenizer.from_pretrained(source)
     model = M2M100ForConditionalGeneration.from_pretrained(source)
+    model = _move_model_to_cuda_if_available(model)
     return tokenizer, model
 
 
