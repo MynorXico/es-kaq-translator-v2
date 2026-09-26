@@ -145,8 +145,23 @@ export class ApiStack extends Stack {
       // was no existing explicit config here to carry over.
     });
 
-    new CfnOutput(this, "ApiUrl", { value: this.restApi.url });
+    // `LambdaRestApi.url` always has a trailing slash (e.g. ".../dev/"),
+    // unlike the old `HttpApi.apiEndpoint`. apps/web builds requests as
+    // `${apiBaseUrl}/v1/translate...` (`apps/web/src/api.ts`) -- leaving
+    // the trailing slash in would produce a double slash once
+    // concatenated, which API Gateway's exact-path resource matching
+    // won't route correctly. Stripped here, once, so nobody deploying
+    // this has to rediscover it by hand when copying this output's value
+    // into the `api-urls/<env>` SSM parameter `bin/app.ts` reads.
+    const apiUrl = this.restApi.url.replace(/\/$/, "");
+    new CfnOutput(this, "ApiUrl", { value: apiUrl });
     new CfnOutput(this, "ApiFunctionName", { value: this.apiFunction.functionName });
+
+    // Same per-environment origin `apps/api/app/config.py`'s
+    // `ALLOWED_ORIGINS` uses for `apps/api/app/main.py`'s CORSMiddleware
+    // -- kept in sync by hand across the CDK (TypeScript)/FastAPI (Python)
+    // boundary, since there's no shared config source between them.
+    const allowedOrigin = `https://${webHostName(props.environmentName)}`;
 
     // AWS WAF rate limiting (ADR 0005, issue #151): the abuse-protection
     // mechanism for the public, unauthenticated /v1/translate-jobs routes
@@ -188,10 +203,26 @@ export class ApiStack extends Stack {
               // correct status for rate limiting, and lets apps/web (a
               // companion ticket, #152) distinguish this from other 4xx
               // client errors by status code alone.
+              //
+              // CORS headers are required here too, not optional: WAF
+              // intercepts and returns this response *before* FastAPI's
+              // CORSMiddleware ever runs, so without them a blocked
+              // cross-origin request from apps/web has no
+              // Access-Control-Allow-Origin header at all -- the browser's
+              // `fetch()` then rejects it as an opaque CORS/network error
+              // (indistinguishable from a real network failure), never
+              // reaching apps/web's response-handling code far enough to
+              // see the 429 status and classify it as rate-limited. Method/
+              // header values mirror `apps/api/app/main.py`'s
+              // `CORSMiddleware` config exactly (`allow_methods=["POST"]`,
+              // `allow_headers=["Content-Type"]`).
               customResponse: {
                 responseCode: 429,
                 responseHeaders: [
                   { name: "Retry-After", value: `${WAF_RATE_LIMIT_WINDOW_SECONDS}` },
+                  { name: "Access-Control-Allow-Origin", value: allowedOrigin },
+                  { name: "Access-Control-Allow-Methods", value: "POST" },
+                  { name: "Access-Control-Allow-Headers", value: "Content-Type" },
                 ],
               },
             },

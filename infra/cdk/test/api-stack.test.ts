@@ -71,6 +71,28 @@ describe("ApiStack", () => {
       template.resourceCountIs("AWS::ApiGateway::UsagePlan", 0);
       template.resourceCountIs("AWS::ApiGateway::UsagePlanKey", 0);
     });
+
+    it("does not leave a trailing slash on the ApiUrl output (PR #154 review)", () => {
+      const { template } = synthApiStack();
+
+      // `LambdaRestApi.url` always ends in "/" (e.g. ".../dev/"), unlike
+      // the old `HttpApi.apiEndpoint`. apps/web builds requests as
+      // `${apiBaseUrl}/v1/translate...` -- a leftover trailing slash here
+      // would produce a double slash once concatenated, which API
+      // Gateway's exact-path resource matching won't route correctly.
+      const outputs = template.findOutputs("ApiUrl");
+      const [output] = Object.values(outputs);
+      const value = output.Value as { "Fn::Join"?: [string, unknown[]] };
+
+      expect(value["Fn::Join"]).toBeDefined();
+      const parts = value["Fn::Join"]?.[1] ?? [];
+      const lastPart = parts[parts.length - 1];
+
+      expect(lastPart).not.toBe("/");
+      if (typeof lastPart === "string") {
+        expect(lastPart.endsWith("/")).toBe(false);
+      }
+    });
   });
 
   describe("WAF rate limiting (issue #151, ADR 0005)", () => {
@@ -136,6 +158,43 @@ describe("ApiStack", () => {
                     ResponseCode: 429,
                     ResponseHeaders: Match.arrayWith([
                       Match.objectLike({ Name: "Retry-After" }),
+                    ]),
+                  }),
+                }),
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it("includes CORS headers on the 429 block response, matching apps/web's origin (PR #154 review)", () => {
+      const { template } = synthApiStack();
+
+      // WAF intercepts before FastAPI's CORSMiddleware ever runs, so a
+      // blocked cross-origin request gets no Access-Control-Allow-Origin
+      // unless WAF's own custom response supplies one -- otherwise the
+      // browser's fetch() rejects it as an opaque CORS/network error
+      // instead of a distinguishable 429 apps/web can classify (#152).
+      template.hasResourceProperties(
+        "AWS::WAFv2::WebACL",
+        Match.objectLike({
+          Rules: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.objectLike({
+                Block: Match.objectLike({
+                  CustomResponse: Match.objectLike({
+                    ResponseHeaders: Match.arrayWith([
+                      Match.objectLike({
+                        Name: "Access-Control-Allow-Origin",
+                        // Same per-environment origin apps/api/app/config.py's
+                        // ALLOWED_ORIGINS uses (`webHostName()`), not a
+                        // wildcard "*" -- matches the test above asserting
+                        // ALLOWED_ORIGINS is "https://app-test.traductorkaqchikel.com".
+                        Value: "https://app-test.traductorkaqchikel.com",
+                      }),
+                      Match.objectLike({ Name: "Access-Control-Allow-Methods" }),
+                      Match.objectLike({ Name: "Access-Control-Allow-Headers" }),
                     ]),
                   }),
                 }),
