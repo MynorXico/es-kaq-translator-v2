@@ -61,7 +61,7 @@ jobs:
         working-directory: apps/api
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync
       - run: uv run ruff check .
       - run: uv run pytest
@@ -74,7 +74,7 @@ jobs:
         working-directory: ml
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
       # facebook/m2m100_418M (ADR 0003) is a ~1.9GB download, pulled by
       # tests/integration/test_tokenizer_extension_real_model.py. Cache the
       # Hugging Face Hub cache dir so this only happens once per model
