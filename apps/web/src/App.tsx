@@ -168,7 +168,7 @@ type View = "translate" | "about";
 
 type CopyState = "idle" | "success" | "error";
 
-type TranslateErrorKind = "network" | "client" | "server" | "timeout";
+type TranslateErrorKind = "network" | "client" | "rateLimited" | "server" | "timeout";
 
 type TranslateState =
   | { status: "idle" }
@@ -180,6 +180,7 @@ type TranslateState =
 const ERROR_MESSAGES: Record<TranslateErrorKind, string> = {
   network: "No se pudo conectar. Revisa tu conexión a internet e inténtalo de nuevo.",
   client: "No se pudo traducir ese texto. Revisa lo que escribiste e inténtalo de nuevo.",
+  rateLimited: "Demasiadas solicitudes, inténtalo de nuevo en unos minutos.",
   server: "Hubo un problema en el servidor. Inténtalo de nuevo en unos minutos.",
   timeout: "El modelo está tardando más de lo esperado. Inténtalo de nuevo en unos minutos.",
 };
@@ -189,7 +190,10 @@ function classifyError(error: unknown): TranslateErrorKind {
     return "timeout";
   }
   if (error instanceof TranslateHttpError) {
-    return error.status >= 500 ? "server" : "client";
+    if (error.status >= 500) {
+      return "server";
+    }
+    return error.status === 429 ? "rateLimited" : "client";
   }
   return "network";
 }

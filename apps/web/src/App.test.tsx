@@ -200,6 +200,25 @@ describe("App translate flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a rate-limited error message for a 429 response", async () => {
+    mockedTranslate.mockRejectedValueOnce(new TranslateHttpError(429));
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    expect(
+      await screen.findByText(
+        "Demasiadas solicitudes, inténtalo de nuevo en unos minutos.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "No se pudo traducir ese texto. Revisa lo que escribiste e inténtalo de nuevo.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows a server error message for a 5xx response", async () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateHttpError(500));
     render(<App />);
