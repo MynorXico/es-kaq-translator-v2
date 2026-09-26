@@ -1,0 +1,37 @@
+version: 2
+
+updates:
+  # JS/TS workspace: apps/web and infra/cdk are pnpm workspace members
+  # sharing one root pnpm-lock.yaml (see pnpm-workspace.yaml). Dependabot's
+  # npm_and_yarn ecosystem understands pnpm workspaces natively -- pointing
+  # it at the workspace root ("/") is sufficient to cover both member
+  # packages' package.json files, rather than needing one entry per
+  # package directory.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # apps/api and ml are two independent uv-managed Python projects (each
+  # has its own pyproject.toml + uv.lock, not a shared uv workspace), so
+  # each needs its own entry. "uv" is a distinct package-ecosystem value
+  # from "pip" (added by Dependabot specifically for uv.lock-based
+  # projects) -- using "pip" here would not pick up uv.lock-pinned
+  # versions correctly.
+  - package-ecosystem: "uv"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "uv"
+    directory: "/ml"
+    schedule:
+      interval: "weekly"
+
+  # Keep the GitHub Actions workflows themselves (actions/checkout,
+  # github/codeql-action, etc.) up to date too -- a package ecosystem in
+  # its own right per Dependabot's docs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
