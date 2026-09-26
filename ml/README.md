@@ -755,18 +755,18 @@ uv run python -m training.submit_job                     # the real, billable su
 ```
 
 **Source packaging**: `train.py` imports sibling packages (`data.*`,
-`evaluation.*`, `training.*`), but `sagemaker.huggingface.HuggingFace`'s
-`source_dir` upload flattens *the contents of* whatever directory you give
-it into `/opt/ml/code/` inside the container -- it does not preserve that
-directory's own name. Pointing `source_dir` directly at `training/` (an
-earlier version of this script did exactly that) meant those sibling
-imports failed with `ModuleNotFoundError: No module named 'data'` the
-first time this ran for real -- a bug a mocked unit test can't catch,
-since it's about how the real SDK packages a real local directory, not
-about this script's own logic. `build_source_bundle()` fixes this by
+`evaluation.*`, `training.*`), but `sagemaker.train.ModelTrainer`'s
+`SourceCode.source_dir` upload flattens *the contents of* whatever
+directory you give it into `/opt/ml/code/` inside the container -- it does
+not preserve that directory's own name. Pointing `source_dir` directly at
+`training/` (an earlier version of this script did exactly that) meant
+those sibling imports failed with `ModuleNotFoundError: No module named
+'data'` the first time this ran for real -- a bug a mocked unit test can't
+catch, since it's about how the real SDK packages a real local directory,
+not about this script's own logic. `build_source_bundle()` fixes this by
 assembling a temp directory containing `data/`, `evaluation/`, and
 `training/` together before building the estimator, so
-`entry_point="training/train.py"` and its imports resolve exactly as they
+`entry_script="training/train.py"` and its imports resolve exactly as they
 do when running `train.py` locally from `ml/`.
 
 CLI flags (all optional, defaulting to `training/train.py`'s own defaults
@@ -875,11 +875,17 @@ follow-up, not addressed here. **That follow-up is issue #82** -- see
 "Kaqchikel subword vocabulary (`training/subword_vocab.py`)" above.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
-outputs (a free, read-only call) and prints the full would-be job config --
-resolved bucket/role, instance type, image version combination,
-hyperparameters, and channel S3 URIs -- as JSON, without ever constructing
-a `HuggingFace` estimator or calling `.fit()`. This is what the maintainer
-runs first to sanity-check before the real submission.
+outputs (a free, read-only call), resolves the training container image URI
+(a free, local-only lookup against the installed SDK's compatibility
+tables), and prints the full would-be job config -- resolved bucket/role,
+instance type, image version combination/URI, hyperparameters, and channel
+S3 URIs -- as JSON, without ever constructing a `ModelTrainer` or calling
+`.train()`. This is deliberate, not just an optimization: constructing a
+real `ModelTrainer` with a `role` triggers a live `iam:SimulatePrincipalPolicy`
+AWS call to validate that role (see `submit_job.py`'s module docstring), so
+building one during `--dry-run` could fail (or misleadingly succeed)
+depending on the caller's ambient AWS credentials. This is what the
+maintainer runs first to sanity-check before the real submission.
 
 **Channel path convention**: the `train`/`validation` channels point at the
 exact corpus object keys, `s3://<bucket>/corpus/almg/v1/train.tsv` and
@@ -890,10 +896,13 @@ this makes the container-side paths deterministic:
 `/opt/ml/input/data/validation/val.tsv`. `submit_job.py` passes those exact
 paths as the `--train`/`--validation` hyperparameters to `train.py`.
 
-`submit_job.py`'s module docstring documents why `ml/pyproject.toml` pins
-`sagemaker>=2.257,<3` (the `HuggingFace` estimator / `TrainingInput` API
-this ticket requires only exists in the SageMaker Python SDK's `2.x` line;
-the installed `3.x` line is an unrelated, incompatible rewrite) and how the
+`submit_job.py`'s module docstring documents the SageMaker Python SDK v3
+migration (issue #155, GHSA-5r2p-pjr8-7fh7 -- `ml/pyproject.toml` now pins
+`sagemaker>=3.4,<4`): `sagemaker.huggingface.HuggingFace` ->
+`sagemaker.train.ModelTrainer`, `sagemaker.inputs.TrainingInput` ->
+`sagemaker.core.training.configs.InputData`, `sagemaker.image_uris` ->
+`sagemaker.core.image_uris`, each verified against the real installed
+package rather than assumed. It also documents how the
 `transformers_version`/`pytorch_version`/`py_version` combination
 (`4.56.2`/`2.8.0`/`py312`) was derived from the installed SDK's own
 HuggingFace DLC compatibility table rather than guessed by hand -- re-check
@@ -943,10 +952,12 @@ assumed (see "Real deployment verification" below).
 
 ### Why the model artifact is repackaged (`deployment/package_model.py`)
 
-`sagemaker.huggingface.HuggingFaceModel`'s `entry_point`/`source_dir`
-kwargs are designed for the `Estimator -> Model` flow and upload a
-*separate* code tarball referenced via a `SAGEMAKER_SUBMIT_DIRECTORY`
-environment variable. A Model Registry model package's
+The SageMaker SDK's `HuggingFaceModel` convenience class (removed
+entirely in v3, but the same reasoning applied to it in v2 too) has
+`entry_point`/`source_dir` kwargs designed for the `Estimator -> Model`
+flow, which upload a *separate* code tarball referenced via a
+`SAGEMAKER_SUBMIT_DIRECTORY` environment variable. A Model Registry model
+package's
 `InferenceSpecification.Containers[]` only has `Image`, `ModelDataUrl`,
 and `Environment` fields -- no first-class separate-code-location concept
 -- so this project's registry-based deployment instead bundles the

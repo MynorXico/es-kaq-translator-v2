@@ -1,9 +1,18 @@
 """Unit tests for `training.submit_job` -- the SageMaker Training Job
 submission CLI for issue #66. Every AWS-touching call (CloudFormation,
-SageMaker, S3, and the `sagemaker` SDK's `HuggingFace` estimator) is
-mocked here -- this suite never makes a real AWS API call, never
-constructs a real `boto3`/`sagemaker` session, and never spends money.
-See `ml/README.md`'s "Job submission" section.
+SageMaker, S3, and the `sagemaker` v3 SDK's `ModelTrainer`) is mocked here
+-- this suite never makes a real AWS API call, never constructs a real
+`boto3`/`sagemaker` session, and never spends money. See `ml/README.md`'s
+"Job submission" section.
+
+Migrated off `sagemaker.huggingface.HuggingFace` (removed in SageMaker
+Python SDK v3, GHSA-5r2p-pjr8-7fh7 -- issue #155) onto v3's
+`sagemaker.train.ModelTrainer`. `ModelTrainer` is never constructed for
+real in this suite (only ever mocked): its constructor makes a live,
+read-only `iam:SimulatePrincipalPolicy` AWS call to validate the given
+role, a real behavioral difference from v2's `HuggingFace` estimator
+(side-effect-free at construction) -- see `training/submit_job.py`'s
+module docstring.
 """
 
 from __future__ import annotations
@@ -283,8 +292,8 @@ def test_build_training_inputs_includes_init_model_channel_when_given():
         "fake-bucket", init_model_s3_uri="s3://other-bucket/prior/model.tar.gz"
     )
 
-    assert set(inputs.keys()) == {"train", "validation", "init-model"}
-    init_model_uri = inputs["init-model"].config["DataSource"]["S3DataSource"]["S3Uri"]
+    assert {i.channel_name for i in inputs} == {"train", "validation", "init-model"}
+    init_model_uri = next(i.data_source for i in inputs if i.channel_name == "init-model")
     assert init_model_uri == "s3://other-bucket/prior/model.tar.gz"
 
 
@@ -292,7 +301,11 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
     args = submit_job.parse_args(["--run-id", "run-test"])
 
     config = submit_job.build_job_config(
-        bucket="fake-bucket", role="fake-role", args=args, source_dir="fake-bundle"
+        bucket="fake-bucket",
+        role="fake-role",
+        args=args,
+        source_dir="fake-bundle",
+        training_image="fake-training-image",
     )
 
     assert config["role"] == "fake-role"
@@ -306,6 +319,7 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
     assert config["transformers_version"]
     assert config["pytorch_version"]
     assert config["py_version"]
+    assert config["training_image"] == "fake-training-image"
     assert config["channels"] == {
         "train": "s3://fake-bucket/corpus/almg/v1/train.tsv",
         "validation": "s3://fake-bucket/corpus/almg/v1/val.tsv",
@@ -315,7 +329,9 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
 def test_build_job_config_respects_custom_instance_type_and_max_run():
     args = submit_job.parse_args(["--instance-type", "ml.p3.2xlarge", "--max-run", "3600"])
 
-    config = submit_job.build_job_config(bucket="b", role="r", args=args, source_dir="fake-bundle")
+    config = submit_job.build_job_config(
+        bucket="b", role="r", args=args, source_dir="fake-bundle", training_image="fake-image"
+    )
 
     assert config["instance_type"] == "ml.p3.2xlarge"
     assert config["max_run"] == 3600
@@ -325,7 +341,11 @@ def test_build_job_config_passes_through_source_dir_and_entry_point():
     args = submit_job.parse_args([])
 
     config = submit_job.build_job_config(
-        bucket="b", role="r", args=args, source_dir="/tmp/fake-bundle-dir"
+        bucket="b",
+        role="r",
+        args=args,
+        source_dir="/tmp/fake-bundle-dir",
+        training_image="fake-image",
     )
 
     assert config["source_dir"] == "/tmp/fake-bundle-dir"
@@ -333,59 +353,94 @@ def test_build_job_config_passes_through_source_dir_and_entry_point():
 
 
 # ---------------------------------------------------------------------------
+# resolve_training_image_uri
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_training_image_uri_uses_the_pinned_version_combination(monkeypatch):
+    fake_retrieve = MagicMock(return_value="fake-training-image-uri")
+    monkeypatch.setattr(submit_job, "_retrieve_image_uri", fake_retrieve)
+
+    image_uri = submit_job.resolve_training_image_uri("us-east-1")
+
+    assert image_uri == "fake-training-image-uri"
+    _, kwargs = fake_retrieve.call_args
+    assert kwargs["framework"] == "huggingface"
+    assert kwargs["region"] == "us-east-1"
+    assert kwargs["image_scope"] == "training"
+    assert kwargs["version"] == submit_job.TRANSFORMERS_VERSION
+    assert kwargs["base_framework_version"] == f"pytorch{submit_job.PYTORCH_VERSION}"
+
+
+# ---------------------------------------------------------------------------
 # build_estimator / build_training_inputs / submit_training_job
 # ---------------------------------------------------------------------------
 
 
-def test_build_estimator_constructs_huggingface_estimator_with_expected_kwargs(monkeypatch):
-    fake_huggingface_cls = MagicMock()
-    monkeypatch.setattr(submit_job, "HuggingFace", fake_huggingface_cls)
+def test_build_estimator_constructs_model_trainer_with_expected_kwargs(monkeypatch):
+    fake_model_trainer_cls = MagicMock()
+    monkeypatch.setattr(submit_job, "ModelTrainer", fake_model_trainer_cls)
 
     args = submit_job.parse_args(["--run-id", "run-test"])
     config = submit_job.build_job_config(
-        bucket="fake-bucket", role="fake-role", args=args, source_dir="/tmp/fake-bundle"
+        bucket="fake-bucket",
+        role="fake-role",
+        args=args,
+        source_dir="/tmp/fake-bundle",
+        training_image="fake-training-image",
     )
 
     estimator = submit_job.build_estimator(config)
 
-    assert estimator is fake_huggingface_cls.return_value
-    _, kwargs = fake_huggingface_cls.call_args
-    assert kwargs["entry_point"] == "training/train.py"
-    assert kwargs["source_dir"] == "/tmp/fake-bundle"
+    assert estimator is fake_model_trainer_cls.return_value
+    _, kwargs = fake_model_trainer_cls.call_args
+    assert kwargs["training_image"] == "fake-training-image"
     assert kwargs["role"] == "fake-role"
-    assert kwargs["instance_type"] == "ml.g4dn.xlarge"
-    assert kwargs["instance_count"] == 1
-    assert kwargs["max_run"] == 10800
-    assert kwargs["output_path"] == "s3://fake-bucket/model-artifacts/"
+    assert kwargs["base_job_name"] == config["base_job_name"]
     assert kwargs["hyperparameters"]["corpus-version"] == "almg-v1"
+
+    source_code = kwargs["source_code"]
+    assert source_code.source_dir == "/tmp/fake-bundle"
+    assert source_code.entry_script == "training/train.py"
+    assert source_code.requirements == "requirements.txt"
+
+    compute = kwargs["compute"]
+    assert compute.instance_type == "ml.g4dn.xlarge"
+    assert compute.instance_count == 1
+
+    assert kwargs["stopping_condition"].max_runtime_in_seconds == 10800
+    assert kwargs["output_data_config"].s3_output_path == "s3://fake-bucket/model-artifacts/"
 
 
 def test_build_training_inputs_uses_train_and_validation_channel_names():
     inputs = submit_job.build_training_inputs("fake-bucket")
 
-    assert set(inputs.keys()) == {"train", "validation"}
-    train_uri = inputs["train"].config["DataSource"]["S3DataSource"]["S3Uri"]
-    val_uri = inputs["validation"].config["DataSource"]["S3DataSource"]["S3Uri"]
-    assert train_uri == "s3://fake-bucket/corpus/almg/v1/train.tsv"
-    assert val_uri == "s3://fake-bucket/corpus/almg/v1/val.tsv"
+    assert {i.channel_name for i in inputs} == {"train", "validation"}
+    by_name = {i.channel_name: i.data_source for i in inputs}
+    assert by_name["train"] == "s3://fake-bucket/corpus/almg/v1/train.tsv"
+    assert by_name["validation"] == "s3://fake-bucket/corpus/almg/v1/val.tsv"
 
 
-def test_submit_training_job_calls_fit_with_inputs_and_wait_logs_flags():
+def test_submit_training_job_calls_train_with_inputs_and_wait_logs_flags():
     fake_estimator = MagicMock()
-    fake_inputs = {"train": MagicMock(), "validation": MagicMock()}
+    fake_inputs = [MagicMock(), MagicMock()]
 
     submit_job.submit_training_job(fake_estimator, fake_inputs, wait=False, logs=False)
 
-    fake_estimator.fit.assert_called_once_with(inputs=fake_inputs, wait=False, logs=False)
+    fake_estimator.train.assert_called_once_with(
+        input_data_config=fake_inputs, wait=False, logs=False
+    )
 
 
 def test_submit_training_job_defaults_to_waiting_and_streaming_logs():
     fake_estimator = MagicMock()
-    fake_inputs = {"train": MagicMock(), "validation": MagicMock()}
+    fake_inputs = [MagicMock(), MagicMock()]
 
     submit_job.submit_training_job(fake_estimator, fake_inputs)
 
-    fake_estimator.fit.assert_called_once_with(inputs=fake_inputs, wait=True, logs=True)
+    fake_estimator.train.assert_called_once_with(
+        input_data_config=fake_inputs, wait=True, logs=True
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,11 @@ AWS call, never downloads/uploads a real (multi-GB) model artifact, and
 never spends any money. The maintainer runs the real, one-off deployment
 separately (see `ml/README.md`'s "Serving" section) after this suite is
 green.
+
+`deploy.py`'s only `sagemaker` SDK dependency (`image_uris.retrieve`,
+mocked here as `deploy._retrieve_image_uri`) moved to
+`sagemaker.core.image_uris` in SDK v3 (issue #155, GHSA-5r2p-pjr8-7fh7);
+this suite's mocking boundary is unaffected.
 """
 
 from __future__ import annotations

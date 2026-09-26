@@ -17,12 +17,12 @@ module is never exercised against real AWS in this repo's test suite.
    away the sibling packages `train.py` actually imports, which surfaced
    as a real `ModuleNotFoundError` the first time this ran for real).
    `build_job_config` / `build_estimator` -- build a
-   `sagemaker.huggingface.HuggingFace` estimator wired to that bundle
-   (`entry_point="training/train.py"`, `source_dir=<bundle path>`), with a
+   `sagemaker.train.ModelTrainer` wired to that bundle
+   (`entry_script="training/train.py"`, `source_dir=<bundle path>`), with a
    `max_run` safety cap so a runaway job can't rack up unbounded cost.
 3. `build_training_inputs` / `submit_training_job` -- point the `train`/
    `validation` channels at the exact private-corpus object keys and call
-   `estimator.fit(...)`.
+   `estimator.train(...)`.
 4. `register_model` -- after a job completes, registers the resulting model
    in SageMaker Model Registry (idempotent Model Package Group creation,
    then a new Model Package with corpus version/hyperparameters/BLEU/chrF
@@ -30,32 +30,77 @@ module is never exercised against real AWS in this repo's test suite.
    `PendingManualApproval` so a human reviews the eval metrics before an
    approved model can be deployed.
 5. `main` -- CLI entrypoint tying the above together, with a `--dry-run`
-   flag that prints the would-be job config without ever calling `.fit()`.
+   flag that prints the would-be job config without ever calling `.train()`.
 
-## Why `sagemaker<3`
+## SageMaker Python SDK v3 migration (issue #155, GHSA-5r2p-pjr8-7fh7)
 
-As of this writing, PyPI's `sagemaker` package has two incompatible major
-lines installable side by side in name only: the classic SDK (`2.x`, last
-release `2.257.6`), which provides `sagemaker.huggingface.HuggingFace`,
-`sagemaker.inputs.TrainingInput`, and `sagemaker.image_uris`; and a new,
-unrelated `3.x` "next-generation" SDK that does **not** expose any of
-those (`sagemaker.huggingface` doesn't exist there at all -- see
-`sagemaker/__init__.py`'s submodule list: `ai_registry`, `core`, `lineage`,
-`mlops`, `serve`, `train`). Since this ticket's required interface
-(`sagemaker.huggingface.HuggingFace`, `sagemaker.inputs.TrainingInput`) only
-exists in the `2.x` line, `ml/pyproject.toml` pins `sagemaker>=2.257,<3`
-deliberately, not out of caution about breaking changes within `2.x`.
+This module was originally written against the SDK's classic `2.x` line
+(`sagemaker.huggingface.HuggingFace`, `sagemaker.inputs.TrainingInput`,
+`sagemaker.image_uris`), pinned `sagemaker>=2.257,<3` because the `3.x`
+"next-generation" SDK exposed none of those names. `2.x` never received a
+patch for GHSA-5r2p-pjr8-7fh7 (`eval()` on attacker-controlled input in
+JumpStart's `search_hub()`, fixed in `3.4.0`) -- this codebase never calls
+`search_hub()`/any JumpStart search function, so the real exploitability
+was low, but staying on an unpatched, unpatchable major version
+indefinitely wasn't a real fix. `ml/pyproject.toml` now pins
+`sagemaker>=3.4,<4`, and this module targets v3's actual replacement API,
+verified against the real installed package (`sagemaker==3.23.0` at
+migration time), not assumed:
+
+- `sagemaker.huggingface.HuggingFace` -> `sagemaker.train.ModelTrainer`,
+  configured with `sagemaker.core.training.configs.SourceCode` (source
+  dir/entry script/requirements file -- replaces `entry_point`/
+  `source_dir`), `Compute` (instance type/count), and
+  `sagemaker.core.shapes.{StoppingCondition,OutputDataConfig}` (max
+  runtime / output path). Unlike `HuggingFace`, `ModelTrainer` doesn't
+  resolve a training container image from
+  `transformers_version`/`pytorch_version`/`py_version` -- callers must
+  resolve and pass `training_image` explicitly (`resolve_training_image_uri`
+  does this, the same way `deployment/deploy.py` already did for the
+  inference image).
+- `sagemaker.inputs.TrainingInput` -> `sagemaker.core.training.configs.
+  InputData(channel_name=..., data_source=<s3 uri string>)`, passed to
+  `ModelTrainer.train(input_data_config=[...])` as a **list**, not a
+  `{channel_name: TrainingInput}` dict -- `estimator.fit(inputs=...)`
+  becomes `estimator.train(input_data_config=...)`.
+- `sagemaker.image_uris` -> `sagemaker.core.image_uris` (same
+  `retrieve`/`config_for_framework` functions, just relocated).
+- Hyperparameters are still passed through to `train.py` as literal
+  `--<key> <value>` CLI flags -- confirmed against v3's actual training
+  driver (`sagemaker.train.container_drivers.distributed_drivers.
+  basic_script_driver.hyperparameters_to_cli_args`), not assumed. No
+  change needed to `build_hyperparameters`' hyphenated keys.
+
+**Behavioral difference that matters for `--dry-run`:** constructing a
+`ModelTrainer` with a `role` triggers an eager, real (though read-only)
+`iam:SimulatePrincipalPolicy` AWS call to validate that role --
+confirmed directly against the real SDK, where this raised an uncaught
+`botocore.exceptions.ClientError` for a placeholder role ARN in a
+nonexistent account. `HuggingFace` (v2) was side-effect-free at
+construction. This is why `main()`'s `--dry-run` path builds and prints
+the job config dict but, exactly as before, never calls `build_estimator`
+at all -- doing so would make `--dry-run` sometimes fail or succeed
+depending on the caller's ambient AWS credentials/role, which defeats the
+point of a dry run.
+
+After a waited-for `.train()` call, the resulting model artifact S3 URI
+comes from `estimator._latest_training_job.model_artifacts.
+s3_model_artifacts` (populated once the training job resource is
+refreshed to a terminal state) rather than the old `estimator.model_data`
+attribute; the image URI is simply `estimator.training_image`, since this
+module resolves and passes it in explicitly rather than letting the
+estimator resolve it lazily.
 
 ## How the HuggingFace DLC version combination was determined
 
 `transformers_version`/`pytorch_version`/`py_version` must name an image
 that actually exists in AWS's HuggingFace Deep Learning Container
-repository, or `HuggingFace.fit()` fails immediately with an image-not-found
-error. Rather than guessing a tuple by hand, this was derived from the
-installed SDK's own compatibility data:
+repository, or the training job fails immediately with an
+image-not-found error. Rather than guessing a tuple by hand, this was
+derived from the installed SDK's own compatibility data:
 
 ```python
-from sagemaker.image_uris import config_for_framework, retrieve
+from sagemaker.core.image_uris import config_for_framework, retrieve
 training_versions = config_for_framework("huggingface")["training"]["versions"]
 sorted(training_versions)  # -> [..., "4.49.0", "4.55.0", "4.56.2"]
 training_versions["4.56.2"]
@@ -69,14 +114,14 @@ retrieve(framework="huggingface", region="us-east-1", version="4.56.2",
 #     :2.8.0-transformers4.56.2-gpu-py312-cu129-ubuntu22.04"
 ```
 
-`4.56.2` is the highest (most recent) `transformers` version in the
-installed SDK's training compatibility table with a GPU container variant,
-`2.8.0` is its paired PyTorch version, and `py312` is the only Python
-version that combination ships. Re-run the snippet above after any future
-`sagemaker` SDK upgrade to confirm the constants below are still valid
-before submitting a real job -- an SDK upgrade can add newer combinations
-or (per the `sagemaker<3` note above) remove the whole `HuggingFace`
-estimator API.
+`4.56.2` is the highest `transformers` version in the installed SDK's
+training compatibility table this project has validated end-to-end (a
+newer `5.3.0` combination now also exists in the table, unrelated to this
+migration -- switching to it is a separate, deliberate decision, not a
+side effect of the SDK bump). `2.8.0` is `4.56.2`'s paired PyTorch
+version, and `py312` is the only Python version that combination ships.
+Re-run the snippet above after any future `sagemaker` SDK upgrade to
+confirm the constants below are still valid before submitting a real job.
 """
 
 from __future__ import annotations
@@ -94,8 +139,10 @@ from typing import Any
 
 import boto3
 import botocore.exceptions
-from sagemaker.huggingface import HuggingFace
-from sagemaker.inputs import TrainingInput
+from sagemaker.core.image_uris import retrieve as _retrieve_image_uri
+from sagemaker.core.shapes import OutputDataConfig, StoppingCondition
+from sagemaker.core.training.configs import Compute, InputData, SourceCode
+from sagemaker.train import ModelTrainer
 
 from training.direction import DIRECTION_CHOICES
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
@@ -128,6 +175,12 @@ DEFAULT_MAX_RUN_SECONDS = 3 * 60 * 60  # 3 hours -- a runaway job can't run fore
 DEFAULT_MODEL_PACKAGE_GROUP_NAME = "traductor-kaqchikel-es-cak"
 DEFAULT_APPROVAL_STATUS = "PendingManualApproval"
 
+# Single source of truth for the region this project lives in (matches
+# infra/cdk/bin/app.ts and deployment/deploy.py's DEFAULT_REGION) -- needed
+# explicitly now that this module resolves its own training container image
+# URI instead of relying on the (removed) HuggingFace estimator to do it.
+DEFAULT_REGION = "us-east-1"
+
 # --- HuggingFace DLC version combination (see module docstring) ------------
 TRANSFORMERS_VERSION = "4.56.2"
 PYTORCH_VERSION = "2.8.0"
@@ -139,6 +192,10 @@ PY_VERSION = "py312"
 # `build_source_bundle`. entry_point is relative to that bundle root.
 ENTRY_POINT = "training/train.py"
 BUNDLED_PACKAGES = ("data", "evaluation", "training")
+# `build_source_bundle` always copies `training/requirements.txt` to this
+# fixed, bundle-root-relative path -- ModelTrainer's `SourceCode.requirements`
+# wants a path *within* source_dir, not an absolute one.
+REQUIREMENTS_FILENAME = "requirements.txt"
 
 REQUIRED_STACK_OUTPUTS = ("TrainingDataBucketName", "SageMakerExecutionRoleArn")
 
@@ -167,6 +224,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--environment",
         default="dev",
         help="Environment whose DataStack CloudFormation outputs to resolve (dev/qa/prod).",
+    )
+    parser.add_argument(
+        "--region",
+        default=DEFAULT_REGION,
+        help=(
+            f"AWS region to resolve the training container image URI for "
+            f"(default: {DEFAULT_REGION}, matching this project's single region)."
+        ),
     )
     parser.add_argument(
         "--instance-type",
@@ -405,17 +470,44 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
     return hyperparameters
 
 
+def resolve_training_image_uri(
+    region: str = DEFAULT_REGION, *, instance_type: str = DEFAULT_INSTANCE_TYPE
+) -> str:
+    """Resolve the real HuggingFace **training** DLC URI for this project's
+    pinned version combination (module docstring) via the v3 SDK's
+    `sagemaker.core.image_uris.retrieve` -- a pure local lookup against the
+    installed SDK's bundled compatibility tables, no AWS/network call.
+
+    v2's `HuggingFace` estimator resolved its own training image internally
+    from `transformers_version`/`pytorch_version`/`py_version`; v3's
+    `ModelTrainer` requires the resolved `training_image` URI upfront (see
+    `build_estimator`), so this module now does explicitly what
+    `deployment/deploy.py`'s `resolve_inference_image_uri` already did for
+    the inference image.
+    """
+    return _retrieve_image_uri(
+        framework="huggingface",
+        region=region,
+        version=TRANSFORMERS_VERSION,
+        py_version=PY_VERSION,
+        instance_type=instance_type,
+        image_scope="training",
+        base_framework_version=f"pytorch{PYTORCH_VERSION}",
+    )
+
+
 def build_job_config(
-    *, bucket: str, role: str, args: argparse.Namespace, source_dir: str
+    *, bucket: str, role: str, args: argparse.Namespace, source_dir: str, training_image: str
 ) -> dict[str, Any]:
-    """Assemble every value the `HuggingFace` estimator needs, as a plain
+    """Assemble every value the `ModelTrainer` estimator needs, as a plain
     dict -- used both to build the real estimator (`build_estimator`) and to
     print the `--dry-run` preview, so the two can never drift apart.
 
-    `source_dir` is required (not defaulted here) so this function stays a
-    pure dict-builder with no filesystem side effects -- callers build the
-    real bundle via `build_source_bundle()` (see `main`) and pass its path
-    in; tests pass a fake placeholder string instead.
+    `source_dir`/`training_image` are required (not defaulted here) so this
+    function stays a pure dict-builder with no filesystem/network side
+    effects -- callers build the real bundle via `build_source_bundle()` and
+    resolve the real image via `resolve_training_image_uri()` (see `main`)
+    and pass both in; tests pass fake placeholder strings instead.
     """
     hyperparameters = build_hyperparameters(args)
     return {
@@ -427,6 +519,7 @@ def build_job_config(
         "transformers_version": TRANSFORMERS_VERSION,
         "pytorch_version": PYTORCH_VERSION,
         "py_version": PY_VERSION,
+        "training_image": training_image,
         "hyperparameters": hyperparameters,
         "base_job_name": f"traductor-kaqchikel-{hyperparameters['run-id']}",
         "channels": build_channel_uris(bucket, init_model_s3_uri=args.init_model_s3_uri),
@@ -437,37 +530,54 @@ def build_job_config(
     }
 
 
-def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None) -> HuggingFace:
-    """Build the `sagemaker.huggingface.HuggingFace` estimator wired to
-    `training/train.py`. Never calls `.fit()` -- see `submit_training_job`.
+def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None) -> ModelTrainer:
+    """Build the v3 SDK's `sagemaker.train.ModelTrainer` wired to
+    `training/train.py`. Never calls `.train()` -- see `submit_training_job`.
+
+    Note: constructing `ModelTrainer` with a real `role` triggers an eager,
+    read-only `iam:SimulatePrincipalPolicy` AWS call to validate that role
+    -- a real behavioral difference from v2's `HuggingFace` estimator,
+    which was side-effect-free at construction time (see module docstring).
+    This is why `main()`'s `--dry-run` path never calls this function.
     """
-    return HuggingFace(
-        entry_point=job_config["entry_point"],
+    source_code = SourceCode(
         source_dir=job_config["source_dir"],
-        role=job_config["role"],
+        entry_script=job_config["entry_point"],
+        requirements=REQUIREMENTS_FILENAME,
+    )
+    compute = Compute(
         instance_type=job_config["instance_type"],
         instance_count=job_config["instance_count"],
-        max_run=job_config["max_run"],
-        output_path=job_config["output_path"],
-        transformers_version=job_config["transformers_version"],
-        pytorch_version=job_config["pytorch_version"],
-        py_version=job_config["py_version"],
-        hyperparameters=job_config["hyperparameters"],
+    )
+    stopping_condition = StoppingCondition(max_runtime_in_seconds=job_config["max_run"])
+    output_data_config = OutputDataConfig(s3_output_path=job_config["output_path"])
+    return ModelTrainer(
+        training_image=job_config["training_image"],
+        source_code=source_code,
+        role=job_config["role"],
         base_job_name=job_config["base_job_name"],
+        compute=compute,
+        stopping_condition=stopping_condition,
+        output_data_config=output_data_config,
+        hyperparameters=job_config["hyperparameters"],
         sagemaker_session=sagemaker_session,
     )
 
 
 def build_training_inputs(
     bucket: str, *, init_model_s3_uri: str | None = None
-) -> dict[str, TrainingInput]:
+) -> list[InputData]:
     """`train`/`validation` channels pointing at the exact corpus object
     keys (not the whole prefix) -- see module docstring. Includes the
     optional `init-model` channel (issue #75) when `init_model_s3_uri` is
     given.
+
+    Returns a **list** of `InputData`, not a `{channel_name: TrainingInput}`
+    dict -- `ModelTrainer.train(input_data_config=...)`'s v3 shape, unlike
+    v2's `HuggingFace.fit(inputs=...)`.
     """
     channels = build_channel_uris(bucket, init_model_s3_uri=init_model_s3_uri)
-    return {name: TrainingInput(s3_data=uri) for name, uri in channels.items()}
+    return [InputData(channel_name=name, data_source=uri) for name, uri in channels.items()]
 
 
 # ---------------------------------------------------------------------------
@@ -476,17 +586,17 @@ def build_training_inputs(
 
 
 def submit_training_job(
-    estimator: HuggingFace,
-    inputs: dict[str, TrainingInput],
+    estimator: ModelTrainer,
+    inputs: list[InputData],
     *,
     wait: bool = True,
     logs: bool = True,
-) -> HuggingFace:
+) -> ModelTrainer:
     """Submit the job. `wait=True` (default) blocks until the job completes
     or fails, streaming CloudWatch Logs when `logs=True` -- matching issue
     #66's "monitor the job to completion" scope.
     """
-    estimator.fit(inputs=inputs, wait=wait, logs=logs)
+    estimator.train(input_data_config=inputs, wait=wait, logs=logs)
     return estimator
 
 
@@ -656,6 +766,7 @@ def _print_dry_run_config(outputs: dict[str, str], config: dict[str, Any]) -> No
             "transformers_version": config["transformers_version"],
             "pytorch_version": config["pytorch_version"],
             "py_version": config["py_version"],
+            "training_image": config["training_image"],
             "base_job_name": config["base_job_name"],
             "hyperparameters": config["hyperparameters"],
         },
@@ -674,24 +785,35 @@ def main(argv: list[str] | None = None) -> int:
     bucket = outputs["TrainingDataBucketName"]
     role = outputs["SageMakerExecutionRoleArn"]
 
+    # Pure local lookup (module docstring) -- safe to resolve unconditionally,
+    # including in --dry-run, unlike building the estimator itself below.
+    training_image = resolve_training_image_uri(args.region, instance_type=args.instance_type)
+
     bundle_dir = build_source_bundle()
     try:
         config = build_job_config(
-            bucket=bucket, role=role, args=args, source_dir=str(bundle_dir)
+            bucket=bucket,
+            role=role,
+            args=args,
+            source_dir=str(bundle_dir),
+            training_image=training_image,
         )
 
         if args.dry_run:
             _print_dry_run_config(outputs, config)
             return 0
 
+        # Only reached for a real (non-dry-run) submission: constructing
+        # ModelTrainer makes a live IAM call to validate `role` (module
+        # docstring) -- never do this on the --dry-run path.
         estimator = build_estimator(config)
         inputs = build_training_inputs(bucket, init_model_s3_uri=args.init_model_s3_uri)
 
         submit_training_job(estimator, inputs, wait=not args.no_wait, logs=not args.no_logs)
     finally:
-        # Safe to remove once HuggingFace(...)/estimator.fit() has returned --
-        # the source_dir tarball is uploaded to S3 synchronously during
-        # estimator construction/fit, not read lazily afterward.
+        # Safe to remove once ModelTrainer(...)/estimator.train() has
+        # returned -- the source_dir tarball is uploaded to S3 synchronously
+        # during training-job creation, not read lazily afterward.
         shutil.rmtree(bundle_dir, ignore_errors=True)
 
     if args.no_wait or args.no_register:
@@ -717,14 +839,25 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
 
+    # v3's ModelTrainer doesn't expose `.model_data`/`.image_uri` the way
+    # v2's HuggingFace estimator did -- the completed job's model artifact
+    # URI lives on the underlying TrainingJob resource (refreshed to a
+    # terminal state by the waited-for `.train()` call above), and the image
+    # URI is simply what this module resolved and passed in itself (module
+    # docstring). `_latest_training_job` is the SDK's own documented way to
+    # reach the created job (see `sagemaker.train.ModelTrainer`'s docstring).
+    training_job = estimator._latest_training_job
+    model_data_url = training_job.model_artifacts.s3_model_artifacts
+    image_uri = estimator.training_image
+
     sm_client = boto3.client("sagemaker")
     s3_client = boto3.client("s3")
     model_package_arn = register_model(
         sm_client,
         s3_client,
         model_package_group_name=args.model_package_group_name,
-        model_data_url=estimator.model_data,
-        image_uri=estimator.image_uri,
+        model_data_url=model_data_url,
+        image_uri=image_uri,
         run_metadata=run_metadata,
         approval_status=args.approval_status,
     )
