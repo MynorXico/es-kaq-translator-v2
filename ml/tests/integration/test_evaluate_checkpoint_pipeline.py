@@ -20,19 +20,32 @@ from data.corpus_io import read_tsv_pairs
 from evaluation.evaluate_checkpoint import parse_args, run_checkpoint_evaluation
 from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_TAGS
 from training.tokenizer_extension import reconstruct_whole_word_boundary_tokens
+from training.train import VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 
 
 def _expected_boundary_tokens(base_vocab: dict[str, int]) -> list[str]:
     """The real whole-word boundary tokens `sample_train.tsv` reconstructs
-    against `base_vocab` -- used by tests below to build a fake checkpoint
-    vocab that's a proper *superset* of what reconstruction will find, so
-    the over-reconstruction check doesn't spuriously fire while testing
-    the (separate) under-reconstruction check.
+    against `base_vocab` under the *legacy, pre-#125* "both columns"
+    construction -- used by tests below to build a fake checkpoint vocab
+    that's a proper *superset* of what reconstruction will find, so the
+    over-reconstruction check doesn't spuriously fire while testing the
+    (separate) under-reconstruction check.
     """
     pairs = read_tsv_pairs(str(FIXTURES / "sample_train.tsv"))
     sample_texts = [source for source, _ in pairs] + [target for _, target in pairs]
+    sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
+    return reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
+
+
+def _expected_kaqchikel_only_boundary_tokens(base_vocab: dict[str, int]) -> list[str]:
+    """The real whole-word boundary tokens `sample_train.tsv` reconstructs
+    against `base_vocab` under the *post-#125* Kaqchikel-only construction
+    -- the Kaqchikel (target) column only, plus direction tags.
+    """
+    pairs = read_tsv_pairs(str(FIXTURES / "sample_train.tsv"))
+    sample_texts = [target for _, target in pairs]
     sample_texts.extend(ALL_DIRECTION_TAG_TOKENS)
     return reconstruct_whole_word_boundary_tokens(base_vocab, sample_texts)
 
@@ -389,3 +402,114 @@ def test_run_checkpoint_evaluation_notes_unaccounted_tokens_without_a_model_card
     assert "NOTE" in captured.err
     assert "could not be cross-checked" in captured.err
     assert "WARNING" not in captured.err
+
+
+def test_run_checkpoint_evaluation_reconstructs_legacy_unscoped_tokens_without_a_recorded_scoping(
+    tmp_path, capsys
+):
+    """Issue #143: a checkpoint whose own model card never recorded
+    `vocab_extension_scoping` (every checkpoint trained before issue #125's
+    fix, including the currently-deployed `run-20260922T141956Z`) must keep
+    reconstructing against the legacy "both columns" construction -- and,
+    since this checkpoint's vocab genuinely includes Spanish-derived
+    boundary tokens (matching what it was actually trained with), this must
+    produce zero diagnostics.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "model_card.md").write_text(
+        "# Model card: run-legacy\n\n## Hyperparameters\n\n- **new_tokens_added**: 99\n",
+        encoding="utf-8",
+    )
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            base_vocab = fake_base_vocab_loader("unused")
+            vocab = dict(base_vocab)
+            for offset, token in enumerate(_expected_boundary_tokens(base_vocab)):
+                vocab[token] = len(base_vocab) + offset
+            return vocab
+
+    def resolve_to_checkpoint_dir(checkpoint: str) -> str:
+        return str(checkpoint_dir)
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    args, output_dir = _base_args(tmp_path)
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=resolve_to_checkpoint_dir,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+    card_text = (output_dir / "model_card.md").read_text(encoding="utf-8")
+    base_vocab = fake_base_vocab_loader("unused")
+    expected_count = len(_expected_boundary_tokens(base_vocab))
+    assert f"- **word_boundary_tokens_reconstructed**: {expected_count}" in card_text
+
+
+def test_run_checkpoint_evaluation_reconstructs_kaqchikel_only_tokens_for_a_post_125_checkpoint(
+    tmp_path, capsys
+):
+    """Issue #143's core scenario: a checkpoint retrained under issue #125's
+    fix only ever added Kaqchikel-derived whole-word boundary tokens -- if
+    this script still reconstructed against the legacy "both columns"
+    construction, it would try to reconstruct Spanish-derived tokens
+    (e.g. from "Buenos días"/"Gracias") that were never actually added,
+    which would misleadingly trip the over-reconstruction diagnostic. Given
+    the checkpoint's own recorded `vocab_extension_scoping: kaqchikel_only`,
+    this must instead reconstruct only against the Kaqchikel column and
+    produce zero diagnostics.
+    """
+    checkpoint_dir = tmp_path / "checkpoint"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "model_card.md").write_text(
+        "# Model card: run-post-125\n\n## Hyperparameters\n\n"
+        "- **new_tokens_added**: 99\n"
+        f"- **vocab_extension_scoping**: {VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY}\n",
+        encoding="utf-8",
+    )
+
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            base_vocab = fake_base_vocab_loader("unused")
+            vocab = dict(base_vocab)
+            for offset, token in enumerate(_expected_kaqchikel_only_boundary_tokens(base_vocab)):
+                vocab[token] = len(base_vocab) + offset
+            return vocab
+
+    def resolve_to_checkpoint_dir(checkpoint: str) -> str:
+        return str(checkpoint_dir)
+
+    def mismatched_model_loader(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    args, output_dir = _base_args(tmp_path)
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=resolve_to_checkpoint_dir,
+        model_loader=mismatched_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+    )
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+    card_text = (output_dir / "model_card.md").read_text(encoding="utf-8")
+    base_vocab = fake_base_vocab_loader("unused")
+    expected_count = len(_expected_kaqchikel_only_boundary_tokens(base_vocab))
+    assert f"- **word_boundary_tokens_reconstructed**: {expected_count}" in card_text
+    # The legacy "both columns" construction would have reconstructed
+    # strictly more tokens (it also includes the Spanish-derived ones) --
+    # confirm this run genuinely used the narrower, Kaqchikel-only set.
+    assert expected_count < len(_expected_boundary_tokens(base_vocab))
+    assert VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY in card_text
