@@ -5,12 +5,15 @@ FastAPI service exposing the Spanish<->Kaqchikel translation API:
 Serverless Inference endpoint (`app/translation.py`, issue #9) — see
 [`docs/adr/0001-initial-architecture.md`](../../docs/adr/0001-initial-architecture.md).
 
-Deployed as a Lambda container image behind an API Gateway HTTP API (see
+Deployed as a Lambda container image behind a regional API Gateway REST
+API (v1), fronted by an AWS WAF `WebACL` rate-limiting rule (see
 [`infra/cdk/lib/api-stack.ts`](../../infra/cdk/lib/api-stack.ts), issue
-#96). `app/lambda_handler.py` wraps the same `app.main.app` FastAPI
-instance with [Mangum](https://mangum.io/) so it runs unchanged locally
-(`uvicorn`) and in Lambda (API Gateway HTTP API, payload format 2.0). The
-`Dockerfile` builds the deployed image: it resolves this app's runtime
+#151/ADR 0005 -- migrated off an API Gateway HTTP API, v2, from issue #96,
+since AWS WAF cannot attach to that at all). `app/lambda_handler.py` wraps
+the same `app.main.app` FastAPI instance with [Mangum](https://mangum.io/)
+so it runs unchanged locally (`uvicorn`) and in Lambda (API Gateway REST
+API proxy integration). The `Dockerfile` builds the deployed image: it
+resolves this app's runtime
 dependencies from `uv.lock` into a plain `requirements.txt` (uv itself
 isn't shipped in the final image), then layers the app's own source on
 top of AWS's official Lambda Python base image.
@@ -65,7 +68,10 @@ success). The raw request/response translation text is never logged --
 metadata only (issue #47). Successful requests log at INFO, failed ones
 at WARNING, so the two are easy to filter on separately.
 
-`infra/cdk/lib/api-stack.ts` alarms on the API Gateway HTTP API's own
-built-in CloudWatch metrics (5xx count, p90 latency) rather than a
+`infra/cdk/lib/api-stack.ts` alarms on the API Gateway REST API's own
+built-in CloudWatch metrics (5XX count, p90 latency) rather than a
 log-based metric filter over these lines -- see that file's comments for
-why.
+why. It also alarms on the AWS WAF `WebACL`'s `BlockedRequests` metric
+(issue #151/ADR 0005), so a rate-limiting spike -- real abuse or an
+over-aggressive threshold -- isn't invisible to those two alarms, which
+only ever see traffic WAF already let through.

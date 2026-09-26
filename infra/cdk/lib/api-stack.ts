@@ -1,12 +1,23 @@
 import * as path from "node:path";
 import { CfnOutput, Duration, Stack, StackProps } from "aws-cdk-lib";
-import { HttpApi } from "aws-cdk-lib/aws-apigatewayv2";
-import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
-import { Alarm, ComparisonOperator, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
+import { EndpointType, LambdaRestApi } from "aws-cdk-lib/aws-apigateway";
+import { Alarm, ComparisonOperator, Metric, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { DockerImageCode, DockerImageFunction } from "aws-cdk-lib/aws-lambda";
+import { CfnWebACL, CfnWebACLAssociation } from "aws-cdk-lib/aws-wafv2";
 import type { Construct } from "constructs";
 import { webHostName } from "./config";
+
+/**
+ * Rate-based rule threshold (ADR 0005): requests per 5-minute trailing
+ * window per source IP before AWS WAF blocks that IP. "Low hundreds" per
+ * the ADR -- a tuning parameter, not an architectural one, adjustable
+ * without a new ADR. Also used as the `Retry-After` seconds value below,
+ * since it matches the rate-based rule's (default) 5-minute evaluation
+ * window.
+ */
+const WAF_RATE_LIMIT_PER_IP = 300;
+const WAF_RATE_LIMIT_WINDOW_SECONDS = 300;
 
 export interface ApiStackProps extends StackProps {
   environmentName: string;
@@ -31,11 +42,26 @@ export interface ApiStackProps extends StackProps {
 }
 
 /**
- * Deploys `apps/api` (FastAPI) as a Lambda container image behind an API
- * Gateway HTTP API (ADR 0001). See `apps/api/Dockerfile` for the image
- * build (uv-resolved runtime deps + app code, AWS's own Lambda Python base
- * image) and `apps/api/app/lambda_handler.py` for the Mangum ASGI adapter
- * that lets the same FastAPI app run locally (uvicorn) and in Lambda.
+ * Deploys `apps/api` (FastAPI) as a Lambda container image behind a
+ * regional API Gateway REST API (v1), fronted by an AWS WAF `WebACL` with a
+ * per-IP rate-based rule (ADR 0001, ADR 0005). See `apps/api/Dockerfile`
+ * for the image build (uv-resolved runtime deps + app code, AWS's own
+ * Lambda Python base image) and `apps/api/app/lambda_handler.py` for the
+ * Mangum ASGI adapter that lets the same FastAPI app run locally (uvicorn)
+ * and in Lambda.
+ *
+ * ## Why a REST API (v1), not an HttpApi (v2) -- issue #151, ADR 0005
+ *
+ * This stack originally used API Gateway's `HttpApi` (v2), which is
+ * cheaper per-request but cannot be associated with an AWS WAF `WebACL` at
+ * all -- WAF's `AssociateWebACL` only accepts a regional REST API (v1)
+ * stage ARN. ADR 0005 adopted AWS WAF as the abuse-protection mechanism
+ * for the public, unauthenticated `/v1/translate-jobs` routes fronting a
+ * pay-per-invocation SageMaker Serverless endpoint, which made this
+ * migration a required (if costlier) consequence, not a free side effect.
+ * `EndpointType.REGIONAL` (not the CDK default `EDGE`) is required too:
+ * an edge-optimized REST API is fronted by an AWS-managed CloudFront
+ * distribution that isn't directly WAF-associable either.
  *
  * ## Environment-variable contract (read from `os.environ` in `apps/api/app`)
  *
@@ -50,7 +76,8 @@ export interface ApiStackProps extends StackProps {
  */
 export class ApiStack extends Stack {
   public readonly apiFunction: DockerImageFunction;
-  public readonly httpApi: HttpApi;
+  public readonly restApi: LambdaRestApi;
+  public readonly webAcl: CfnWebACL;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
@@ -90,17 +117,133 @@ export class ApiStack extends Stack {
       }),
     );
 
-    this.httpApi = new HttpApi(this, "HttpApi", {
-      apiName: `traductor-kaqchikel-api-${props.environmentName}`,
+    this.restApi = new LambdaRestApi(this, "RestApi", {
+      restApiName: `traductor-kaqchikel-api-${props.environmentName}`,
       description: `Traductor Kaqchikel translation API (${props.environmentName})`,
+      handler: this.apiFunction,
       // apps/api owns its own routing (FastAPI); proxy every path/method
-      // straight through via a single $default route rather than
-      // re-declaring apps/api's routes here too.
-      defaultIntegration: new HttpLambdaIntegration("ApiIntegration", this.apiFunction),
+      // straight through via a single greedy {proxy+} resource + ANY
+      // method rather than re-declaring apps/api's routes here too --
+      // mirrors the HttpApi's single $default route this replaces.
+      proxy: true,
+      // Required for AWS WAF association (ADR 0005) -- see this class's
+      // doc comment for why EDGE (the CDK default) doesn't work.
+      endpointConfiguration: {
+        types: [EndpointType.REGIONAL],
+      },
+      // Named per environment (dev/qa/prod) rather than left at the CDK
+      // default ("prod" for every environment, which would confusingly
+      // collide with the literal "prod" *environment* name in its own
+      // stage path).
+      deployOptions: {
+        stageName: props.environmentName,
+      },
+      // No explicit stage-level throttling override: neither this stack's
+      // prior HttpApi nor this RestApi sets one, so both rely on the same
+      // AWS account/region default throttle limits as the coarse backstop
+      // ADR 0005 describes underneath the per-IP WAF rule below -- there
+      // was no existing explicit config here to carry over.
     });
 
-    new CfnOutput(this, "ApiUrl", { value: this.httpApi.apiEndpoint });
+    // `LambdaRestApi.url` always has a trailing slash (e.g. ".../dev/"),
+    // unlike the old `HttpApi.apiEndpoint`. apps/web builds requests as
+    // `${apiBaseUrl}/v1/translate...` (`apps/web/src/api.ts`) -- leaving
+    // the trailing slash in would produce a double slash once
+    // concatenated, which API Gateway's exact-path resource matching
+    // won't route correctly. Stripped here, once, so nobody deploying
+    // this has to rediscover it by hand when copying this output's value
+    // into the `api-urls/<env>` SSM parameter `bin/app.ts` reads.
+    const apiUrl = this.restApi.url.replace(/\/$/, "");
+    new CfnOutput(this, "ApiUrl", { value: apiUrl });
     new CfnOutput(this, "ApiFunctionName", { value: this.apiFunction.functionName });
+
+    // Same per-environment origin `apps/api/app/config.py`'s
+    // `ALLOWED_ORIGINS` uses for `apps/api/app/main.py`'s CORSMiddleware
+    // -- kept in sync by hand across the CDK (TypeScript)/FastAPI (Python)
+    // boundary, since there's no shared config source between them.
+    const allowedOrigin = `https://${webHostName(props.environmentName)}`;
+
+    // AWS WAF rate limiting (ADR 0005, issue #151): the abuse-protection
+    // mechanism for the public, unauthenticated /v1/translate-jobs routes
+    // fronting a pay-per-invocation SageMaker Serverless endpoint. A
+    // WebACL associated with the REST API's stage covers every route on
+    // it by default (stage-scoped, not route-scoped), so both
+    // /v1/translate-jobs and /v1/translate-jobs/{job_id} are covered
+    // without listing them explicitly.
+    const webAclName = `traductor-kaqchikel-api-${props.environmentName}`;
+    this.webAcl = new CfnWebACL(this, "ApiWebAcl", {
+      name: webAclName,
+      // WAFv2's own Description schema disallows parentheses (unlike most
+      // other AWS resources' free-text description fields in this stack),
+      // so this deliberately doesn't follow the "Name (env)" phrasing used
+      // elsewhere here.
+      description: `Rate limiting for the Traductor Kaqchikel API, ${props.environmentName} environment`,
+      // REGIONAL (not CLOUDFRONT): this WebACL protects a regional REST
+      // API stage, created in the same region/account as ApiStack itself.
+      scope: "REGIONAL",
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: `traductor-kaqchikel-api-${props.environmentName}`,
+        sampledRequestsEnabled: true,
+      },
+      rules: [
+        {
+          name: "RateLimitPerSourceIp",
+          priority: 0,
+          statement: {
+            rateBasedStatement: {
+              aggregateKeyType: "IP",
+              limit: WAF_RATE_LIMIT_PER_IP,
+            },
+          },
+          action: {
+            block: {
+              // Custom 429 (not WAF's default 403): the semantically
+              // correct status for rate limiting, and lets apps/web (a
+              // companion ticket, #152) distinguish this from other 4xx
+              // client errors by status code alone.
+              //
+              // CORS headers are required here too, not optional: WAF
+              // intercepts and returns this response *before* FastAPI's
+              // CORSMiddleware ever runs, so without them a blocked
+              // cross-origin request from apps/web has no
+              // Access-Control-Allow-Origin header at all -- the browser's
+              // `fetch()` then rejects it as an opaque CORS/network error
+              // (indistinguishable from a real network failure), never
+              // reaching apps/web's response-handling code far enough to
+              // see the 429 status and classify it as rate-limited. Method/
+              // header values mirror `apps/api/app/main.py`'s
+              // `CORSMiddleware` config exactly (`allow_methods=["POST"]`,
+              // `allow_headers=["Content-Type"]`).
+              customResponse: {
+                responseCode: 429,
+                responseHeaders: [
+                  { name: "Retry-After", value: `${WAF_RATE_LIMIT_WINDOW_SECONDS}` },
+                  { name: "Access-Control-Allow-Origin", value: allowedOrigin },
+                  { name: "Access-Control-Allow-Methods", value: "POST" },
+                  { name: "Access-Control-Allow-Headers", value: "Content-Type" },
+                ],
+              },
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: `traductor-kaqchikel-api-rate-limit-${props.environmentName}`,
+            sampledRequestsEnabled: true,
+          },
+        },
+      ],
+    });
+
+    // No higher-level RestApi/Stage construct prop exists for this
+    // (unlike CloudFront's `Distribution.webAclId`) -- an explicit,
+    // separate association resource is the only way to wire a WebACL to a
+    // REST API stage.
+    new CfnWebACLAssociation(this, "ApiWebAclAssociation", {
+      resourceArn: this.restApi.deploymentStage.stageArn,
+      webAclArn: this.webAcl.attrArn,
+    });
 
     // Basic cost/operational-visibility alarms (issue #47). SageMaker
     // Serverless Inference bills per invocation and scales to zero (ADR
@@ -108,7 +251,7 @@ export class ApiStack extends Stack {
     // problem and a signal something's gone wrong upstream (e.g. endpoint
     // cold starts, throttling, a bad model deployment) worth surfacing.
     //
-    // Sourced from the HTTP API's own built-in CloudWatch metrics (5xx
+    // Sourced from the REST API's own built-in CloudWatch metrics (5XX
     // count, p90 latency) rather than a custom metric filter over
     // `apps/api`'s structured request logs (see `app/observability.py`):
     // `TranslationServiceError` is caught and turned into a normal HTTP
@@ -122,7 +265,7 @@ export class ApiStack extends Stack {
     // separate concern this ticket doesn't scope.
     new Alarm(this, "ServerErrorRateAlarm", {
       alarmDescription: `Elevated 5xx error rate on the Traductor Kaqchikel API (${props.environmentName})`,
-      metric: this.httpApi.metricServerError({ period: Duration.minutes(5) }),
+      metric: this.restApi.metricServerError({ period: Duration.minutes(5) }),
       threshold: 5,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -135,7 +278,7 @@ export class ApiStack extends Stack {
 
     new Alarm(this, "HighLatencyAlarm", {
       alarmDescription: `Elevated latency on the Traductor Kaqchikel API (${props.environmentName})`,
-      metric: this.httpApi.metricLatency({ period: Duration.minutes(5), statistic: "p90" }),
+      metric: this.restApi.metricLatency({ period: Duration.minutes(5), statistic: "p90" }),
       // Generous relative to typical translation latency: SageMaker
       // Serverless Inference cold-starts (scale-to-zero) can take several
       // seconds on their own, so this should catch a genuinely degraded
@@ -143,6 +286,40 @@ export class ApiStack extends Stack {
       threshold: Duration.seconds(10).toMilliseconds(),
       evaluationPeriods: 3,
       comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+
+    // ADR 0005 requires this alarm, not as an optional nice-to-have: WAF
+    // intercepts and blocks requests before they ever reach API Gateway,
+    // so a block spike -- whether a real abuse pattern, or a threshold set
+    // too low and blocking real users -- is otherwise invisible to the
+    // two alarms above, which only ever see what WAF lets through.
+    //
+    // No CDK-native metric helper exists on `CfnWebACL` (unlike
+    // `RestApiBase.metricServerError`/`metricLatency` above), so this is
+    // a raw `Metric` against WAFv2's own published CloudWatch contract:
+    // namespace `AWS/WAFV2`, dimensions `WebACL` + `Rule` ("ALL" for the
+    // web-ACL-wide aggregate across every rule) + `Region`.
+    new Alarm(this, "WafBlockedRequestsAlarm", {
+      alarmDescription: `Elevated AWS WAF blocked-request rate on the Traductor Kaqchikel API (${props.environmentName})`,
+      metric: new Metric({
+        namespace: "AWS/WAFV2",
+        metricName: "BlockedRequests",
+        dimensionsMap: {
+          WebACL: webAclName,
+          Rule: "ALL",
+          Region: this.region,
+        },
+        statistic: "Sum",
+        period: Duration.minutes(5),
+      }),
+      // Any sustained blocking is worth a human looking at -- either real
+      // abuse (working as intended) or a threshold set too aggressively
+      // (a false-positive risk this ADR explicitly accepts and asks to be
+      // monitored for, e.g. a shared-IP NAT of legitimate users).
+      threshold: 1,
+      evaluationPeriods: 3,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
     });
   }
