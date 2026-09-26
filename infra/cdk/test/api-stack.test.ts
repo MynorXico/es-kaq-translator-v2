@@ -26,18 +26,159 @@ describe("ApiStack", () => {
     });
   });
 
-  it("exposes an API Gateway HTTP API in front of the Lambda", () => {
-    const { template } = synthApiStack();
+  describe("REST API migration (issue #151, ADR 0005)", () => {
+    it("exposes a regional API Gateway REST API in front of the Lambda, not an HttpApi", () => {
+      const { template } = synthApiStack();
 
-    template.hasResourceProperties("AWS::ApiGatewayV2::Api", {
-      ProtocolType: "HTTP",
+      // AWS WAF can only associate with a regional REST API (v1) stage --
+      // never with an HttpApi (v2) at all. See ADR 0005's amended Decision.
+      template.hasResourceProperties("AWS::ApiGateway::RestApi", {
+        EndpointConfiguration: {
+          Types: ["REGIONAL"],
+        },
+      });
+
+      // No v2 HTTP API left behind by the migration.
+      template.resourceCountIs("AWS::ApiGatewayV2::Api", 0);
     });
 
-    // Routed via a Lambda proxy integration (AWS_PROXY), not some other
-    // integration type, so every path/method reaches the FastAPI app.
-    template.hasResourceProperties("AWS::ApiGatewayV2::Integration", {
-      IntegrationType: "AWS_PROXY",
-      PayloadFormatVersion: "2.0",
+    it("routes every path/method to the Lambda via a greedy proxy resource, AWS_PROXY integration", () => {
+      const { template } = synthApiStack();
+
+      // The `{proxy+}` resource that LambdaRestApi's `proxy: true` creates,
+      // covering both /v1/translate-jobs routes (ADR 0005) and everything
+      // else apps/api's own FastAPI routing handles -- mirrors the
+      // single $default route the HttpApi used to have.
+      template.hasResourceProperties("AWS::ApiGateway::Resource", {
+        PathPart: "{proxy+}",
+      });
+
+      template.hasResourceProperties(
+        "AWS::ApiGateway::Method",
+        Match.objectLike({
+          HttpMethod: "ANY",
+          Integration: Match.objectLike({
+            Type: "AWS_PROXY",
+          }),
+        }),
+      );
+    });
+
+    it("does not create any API key or usage-plan resources (ADR 0005 rejected that mechanism)", () => {
+      const { template } = synthApiStack();
+
+      template.resourceCountIs("AWS::ApiGateway::ApiKey", 0);
+      template.resourceCountIs("AWS::ApiGateway::UsagePlan", 0);
+      template.resourceCountIs("AWS::ApiGateway::UsagePlanKey", 0);
+    });
+  });
+
+  describe("WAF rate limiting (issue #151, ADR 0005)", () => {
+    it("creates a regional WebACL with CloudWatch metrics enabled", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::WAFv2::WebACL",
+        Match.objectLike({
+          Scope: "REGIONAL",
+          VisibilityConfig: Match.objectLike({
+            CloudWatchMetricsEnabled: true,
+          }),
+        }),
+      );
+    });
+
+    it("has exactly one rate-based rule aggregating by source IP, blocking over the threshold", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::WAFv2::WebACL",
+        Match.objectLike({
+          Rules: Match.arrayWith([
+            Match.objectLike({
+              Statement: Match.objectLike({
+                RateBasedStatement: Match.objectLike({
+                  AggregateKeyType: "IP",
+                  // Low hundreds of requests per 5-minute window, per ADR 0005.
+                  Limit: Match.anyValue(),
+                }),
+              }),
+              Action: Match.objectLike({
+                Block: Match.anyValue(),
+              }),
+            }),
+          ]),
+        }),
+      );
+
+      const webAcls = template.findResources("AWS::WAFv2::WebACL");
+      const [webAcl] = Object.values(webAcls);
+      const rules = webAcl.Properties.Rules as Array<{
+        Statement: { RateBasedStatement?: { Limit: number } };
+      }>;
+      const rateBasedRules = rules.filter((rule) => rule.Statement.RateBasedStatement);
+      expect(rateBasedRules.length).toBe(1);
+      expect(rateBasedRules[0].Statement.RateBasedStatement?.Limit).toBeGreaterThanOrEqual(100);
+      expect(rateBasedRules[0].Statement.RateBasedStatement?.Limit).toBeLessThan(1000);
+    });
+
+    it("uses a custom 429 block response with a Retry-After header, not WAF's default 403", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::WAFv2::WebACL",
+        Match.objectLike({
+          Rules: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.objectLike({
+                Block: Match.objectLike({
+                  CustomResponse: Match.objectLike({
+                    ResponseCode: 429,
+                    ResponseHeaders: Match.arrayWith([
+                      Match.objectLike({ Name: "Retry-After" }),
+                    ]),
+                  }),
+                }),
+              }),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it("associates the WebACL with the REST API's deployment stage", () => {
+      const { template } = synthApiStack();
+
+      const webAcls = template.findResources("AWS::WAFv2::WebACL");
+      const webAclLogicalIds = Object.keys(webAcls);
+      expect(webAclLogicalIds.length).toBe(1);
+
+      const associations = template.findResources("AWS::WAFv2::WebACLAssociation");
+      const associationList = Object.values(associations);
+      expect(associationList.length).toBe(1);
+
+      const [association] = associationList;
+      const resourceArnStr = JSON.stringify(association.Properties.ResourceArn);
+      // The REST API stage ARN shape WAF's AssociateWebACL requires --
+      // .../restapis/{api-id}/stages/{stage-name} -- not a bare API ARN.
+      expect(resourceArnStr).toContain("/restapis/");
+      expect(resourceArnStr).toContain("/stages/");
+
+      const webAclArnStr = JSON.stringify(association.Properties.WebACLArn);
+      expect(webAclArnStr).toContain(webAclLogicalIds[0]);
+    });
+
+    it("alarms on the WebACL's BlockedRequests metric (AWS/WAFV2), not left invisible", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties(
+        "AWS::CloudWatch::Alarm",
+        Match.objectLike({
+          MetricName: "BlockedRequests",
+          Namespace: "AWS/WAFV2",
+          ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+        }),
+      );
     });
   });
 
@@ -124,20 +265,23 @@ describe("ApiStack", () => {
   });
 
   describe("CloudWatch alarms (issue #47)", () => {
-    it("alarms on an elevated 5xx error rate from the HTTP API", () => {
+    it("alarms on an elevated 5xx error rate from the REST API", () => {
       const { template } = synthApiStack();
 
+      // RestApi's canned server-error metric is named "5XXError" (v1),
+      // unlike HttpApi's "5xx" (v2) -- a real metric-name change from the
+      // HttpApi -> RestApi migration (issue #151).
       template.hasResourceProperties(
         "AWS::CloudWatch::Alarm",
         Match.objectLike({
-          MetricName: "5xx",
+          MetricName: "5XXError",
           Namespace: "AWS/ApiGateway",
           ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
         }),
       );
     });
 
-    it("alarms on elevated latency from the HTTP API", () => {
+    it("alarms on elevated latency from the REST API", () => {
       const { template } = synthApiStack();
 
       template.hasResourceProperties(
@@ -150,11 +294,13 @@ describe("ApiStack", () => {
       );
     });
 
-    it("does not silently treat missing data as breaching for either alarm", () => {
+    it("does not silently treat missing data as breaching for any alarm", () => {
       const { template } = synthApiStack();
 
       const alarms = template.findResources("AWS::CloudWatch::Alarm");
-      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(2);
+      // ServerErrorRateAlarm, HighLatencyAlarm, and (issue #151) the new
+      // WAF BlockedRequestsAlarm.
+      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(3);
       for (const alarm of Object.values(alarms)) {
         expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
       }

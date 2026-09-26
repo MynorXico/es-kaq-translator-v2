@@ -19,9 +19,12 @@ per-environment deploy scripts. Currently:
   still missing: the custom domain).
 - `DataStack` — private training data bucket + SageMaker execution role.
 - `ApiStack` — `apps/api` (FastAPI) deployed as a Lambda container image
-  behind an API Gateway HTTP API (see its doc comment in
-  `lib/api-stack.ts` for the environment-variable contract used to wire in
-  the SageMaker Serverless Inference endpoint from issue #8/#9).
+  behind a regional API Gateway REST API (v1), fronted by an AWS WAF
+  `WebACL` with a per-IP rate-based rule (issue #151, ADR 0005 — a
+  migration off the originally-used `HttpApi`, v2, since AWS WAF cannot
+  attach to that at all). See its doc comment in `lib/api-stack.ts` for
+  the environment-variable contract used to wire in the SageMaker
+  Serverless Inference endpoint from issue #8/#9.
 
 `WebStack` doesn't have its custom `app[-<env>].traductorkaqchikel.com`
 domain wired up yet (reachable at its CloudFront distribution's default
