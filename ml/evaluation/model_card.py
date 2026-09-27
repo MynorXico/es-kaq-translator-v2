@@ -31,6 +31,14 @@ class ModelCardData:
     hyperparameters: dict[str, Any]
     metrics: MetricsResult
     notes: str | None = field(default=None)
+    # Issue #178: per-direction BLEU/chrF (e.g. "es->cak"/"cak->es" ->
+    # MetricsResult), in the order they should be rendered. `None` when the
+    # caller didn't supply direction labels (e.g. a very old model card
+    # predating this field, or a caller that genuinely has none) -- omitted
+    # from the rendered card entirely rather than rendered as an empty
+    # section, so a card without direction data reads no differently than
+    # before this field existed.
+    per_direction_metrics: dict[str, MetricsResult] | None = field(default=None)
 
 
 def render_model_card(data: ModelCardData) -> str:
@@ -59,6 +67,23 @@ def render_model_card(data: ModelCardData) -> str:
         f"- **chrF**: {data.metrics.chrf:.1f}",
         f"- **Sentences evaluated**: {data.metrics.num_sentences:,}",
     ]
+
+    if data.per_direction_metrics:
+        lines += [
+            "",
+            "## Metrics by direction",
+            "",
+        ]
+        for direction, direction_metrics in data.per_direction_metrics.items():
+            lines += [
+                f"### {direction}",
+                "",
+                f"- **BLEU**: {direction_metrics.bleu:.1f}",
+                f"- **chrF**: {direction_metrics.chrf:.1f}",
+                f"- **Sentences evaluated**: {direction_metrics.num_sentences:,}",
+                "",
+            ]
+        lines.pop()  # drop the trailing blank line from the last direction block
 
     if data.notes:
         lines += [

@@ -264,7 +264,15 @@ def test_run_training_job_wires_corpus_through_to_model_card(tmp_path):
     assert "both" in card_text
     assert "**Validation sentences**: 4" in card_text
 
-    # 5. Issue #143: every run going forward must record which
+    # 5. Issue #178: per-direction BLEU/chrF must be computed and reported
+    #    on the model card too, not just the combined score -- the fixture
+    #    corpus has 2 pairs x 2 directions ("both"), so both direction
+    #    labels must show up.
+    assert "## Metrics by direction" in card_text
+    assert "es->cak" in card_text
+    assert "cak->es" in card_text
+
+    # 6. Issue #143: every run going forward must record which
     #    vocab-extension scoping it used, so a future re-evaluation of this
     #    checkpoint (evaluation.evaluate_checkpoint) can tell it apart from
     #    a pre-#125 checkpoint whose model card never recorded this field.

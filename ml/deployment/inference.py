@@ -161,7 +161,18 @@ def translate(
     `training.train.generate_translations`'s direction-tag mechanism for a
     single real-time request instead of a batch of evaluation examples:
     prepend the target language's direction tag to the source text, use it
-    as `forced_bos_token_id`, and greedily generate.
+    as `forced_bos_token_id`, and generate.
+
+    No `num_beams` is passed to `model.generate()` here, same as
+    `generate_translations` -- decode strategy comes entirely from the
+    loaded checkpoint's own `generation_config.json`. Issue #178 confirmed
+    directly against the real v7 checkpoint that this is beam search
+    (`num_beams: 5`, inherited unmodified from `facebook/m2m100_418M`'s own
+    `generation_config.json`), not greedy decoding -- this docstring
+    previously (incorrectly) said "greedily generate", which was never
+    actually true for a checkpoint whose generation config specifies beam
+    search. See `ml/README.md`'s "Decode configuration" section for the
+    full verification.
 
     Moves the encoded batch to `model.device` before calling `generate`,
     same reasoning as `generate_translations` -- `tokenizer(...,

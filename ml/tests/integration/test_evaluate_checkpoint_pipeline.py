@@ -183,6 +183,12 @@ def test_run_checkpoint_evaluation_wires_checkpoint_through_to_model_card(tmp_pa
     assert "**Validation sentences**: 4" in card_text
     assert "reevaluation" in card_text.lower()
 
+    # 4. Issue #178: per-direction BLEU/chrF must be reported too, wired
+    #    into this script's own model card, not just a one-off check.
+    assert "## Metrics by direction" in card_text
+    assert "es->cak" in card_text
+    assert "cak->es" in card_text
+
 
 def test_run_checkpoint_evaluation_never_extends_vocabulary(tmp_path):
     args, _ = _base_args(tmp_path)

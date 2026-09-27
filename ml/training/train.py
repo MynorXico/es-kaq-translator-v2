@@ -616,7 +616,18 @@ def generate_translations(
 
     Groups examples by target language so each batch uses the correct
     `forced_bos_token_id` (the direction tag token for that target
-    language -- see `training.direction`), then generates greedily.
+    language -- see `training.direction`).
+
+    No `num_beams` (or other decode-strategy kwarg) is passed to
+    `model.generate()` here -- decode strategy comes entirely from
+    whatever the loaded checkpoint's own `generation_config.json`
+    specifies. This function's docstring previously (incorrectly) said
+    "generates greedily"; issue #178 confirmed directly against the real
+    v7 checkpoint that generation is actually beam search (`num_beams: 5`,
+    inherited unmodified from `facebook/m2m100_418M`'s own
+    `generation_config.json` through every fine-tuning save/reload), not
+    greedy decoding -- see `ml/README.md`'s "Decode configuration" section
+    for the full verification.
 
     Moves each batch's encoded tensors to `model.device` before calling
     `generate` -- `tokenizer(..., return_tensors="pt")` always returns
@@ -762,13 +773,20 @@ def run_training_job(
 
     hypotheses = translator(model, tokenizer, val_examples, max_length=args.max_length)
     references = [example.target_text for example in val_examples]
+    # Issue #178: recorded alongside predictions/references so BLEU/chrF can
+    # be bucketed per direction (es->cak vs. cak->es) rather than only ever
+    # reported as one combined number -- see evaluation.run.run_evaluation's
+    # `directions_path` and evaluation.metrics.compute_metrics_by_direction.
+    directions = [f"{example.source_lang}->{example.target_lang}" for example in val_examples]
 
     output_dir = Path(args.output_data_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = output_dir / "predictions.txt"
     references_path = output_dir / "references.txt"
+    directions_path = output_dir / "directions.txt"
     predictions_path.write_text("\n".join(hypotheses) + "\n", encoding="utf-8")
     references_path.write_text("\n".join(references) + "\n", encoding="utf-8")
+    directions_path.write_text("\n".join(directions) + "\n", encoding="utf-8")
 
     notes_parts = []
     if args.direction == "both":
@@ -821,7 +839,11 @@ def run_training_job(
 
     model_card_path = Path(args.model_dir) / "model_card.md"
     _metrics, model_card_path = run_evaluation(
-        predictions_path, references_path, run_metadata, model_card_path
+        predictions_path,
+        references_path,
+        run_metadata,
+        model_card_path,
+        directions_path=directions_path,
     )
     return model_card_path
 
