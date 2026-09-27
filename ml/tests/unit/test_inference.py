@@ -241,6 +241,29 @@ def test_translate_leaves_output_without_a_leading_tag_untouched():
 # ---------------------------------------------------------------------------
 
 
+def test_translate_passes_the_default_num_beams_to_generate():
+    # Issue #180: num_beams must be an explicit, configurable parameter on
+    # the real serving path, not silently inherited from the base model's
+    # own generation_config.json.
+    tokenizer = FakeTokenizer()
+    model = FakeModel()
+    request = InferenceRequest(source_lang="es", target_lang="cak", text="hola")
+
+    translate(model, tokenizer, request)
+
+    assert model.generate_called_with["num_beams"] == 5
+
+
+def test_translate_passes_a_caller_supplied_num_beams_to_generate():
+    tokenizer = FakeTokenizer()
+    model = FakeModel()
+    request = InferenceRequest(source_lang="es", target_lang="cak", text="hola")
+
+    translate(model, tokenizer, request, num_beams=8)
+
+    assert model.generate_called_with["num_beams"] == 8
+
+
 def test_predict_fn_returns_a_translated_text_dict():
     tokenizer = FakeTokenizer()
     model = FakeModel()

@@ -175,6 +175,7 @@ from training.subword_vocab import WORD_BOUNDARY_MARKER
 from training.tokenizer_extension import patch_word_boundary_decoding_for_checkpoint
 from training.train import (
     DEFAULT_BASE_MODEL,
+    DEFAULT_NUM_BEAMS,
     VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY,
     generate_translations,
     resolve_model_source,
@@ -289,6 +290,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument(
+        "--num-beams",
+        type=int,
+        default=DEFAULT_NUM_BEAMS,
+        help=(
+            "Beam width for beam-search decoding, passed through to "
+            "training.train.generate_translations()/model.generate() "
+            "(issue #180). Defaults to DEFAULT_NUM_BEAMS (5), matching the "
+            "base model's own generation_config.json value -- previously "
+            "this was never a configurable parameter anywhere, silently "
+            "inherited from whatever generation_config.json the checkpoint "
+            "carried. Override this (e.g. --num-beams 8) to validate issue "
+            "#178's decode-parameter sweep finding at scale against a real "
+            "checkpoint."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -706,7 +723,12 @@ def run_checkpoint_evaluation(
     )
 
     hypotheses = translator(
-        model, tokenizer, val_examples, max_length=args.max_length, batch_size=args.batch_size
+        model,
+        tokenizer,
+        val_examples,
+        max_length=args.max_length,
+        batch_size=args.batch_size,
+        num_beams=args.num_beams,
     )
     references = [example.target_text for example in val_examples]
     # Issue #178: recorded alongside predictions/references so BLEU/chrF can
@@ -740,6 +762,7 @@ def run_checkpoint_evaluation(
             "source_checkpoint": args.checkpoint,
             "max_length": args.max_length,
             "batch_size": args.batch_size,
+            "num_beams": args.num_beams,
             "word_boundary_reconstruction_train": args.train,
             "word_boundary_tokens_reconstructed": len(boundary_tokens),
             "vocab_extension_scoping": (

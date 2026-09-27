@@ -416,8 +416,19 @@ uv run python -m evaluation.evaluate_checkpoint \
   --train s3://<training-data-bucket>/corpus/almg/v1/train.tsv \
   --corpus-version almg-v1 \
   --source-run-id <run-id> \
-  --output-dir ./eval-output
+  --output-dir ./eval-output \
+  --num-beams 5
 ```
+
+`--num-beams` (issue #180) defaults to `training.train.DEFAULT_NUM_BEAMS`
+(5, matching the base model's own `generation_config.json`) and is passed
+straight through to `generate_translations`/`model.generate()`, then
+recorded in the rendered model card's hyperparameters for traceability.
+Before issue #180, beam width was never a parameter anywhere in this
+project's code at all -- it was silently inherited from whatever
+`generation_config.json` a given checkpoint happened to carry. See
+"Decode configuration" under the training entrypoint section below for why
+this now matters and the real at-scale validation result.
 
 Test coverage follows this project's "duck-type and fixture" convention
 (`tests/integration/test_evaluate_checkpoint_pipeline.py`, mirroring
@@ -756,13 +767,81 @@ silently-greedy fallback bug.
 
 A decode-parameter sweep (`num_beams` in {3, 5, 8}, plus
 `length_penalty`/`no_repeat_ngram_size` variations) was run against the
-same v7 checkpoint on a representative sample of the validation set; see
-issue #125's comment thread for the full numeric results and
-recommendation. This was a pure diagnostic (no retraining, no code
-change to `generate_translations`'s decode parameters) — if a decode
-config change is adopted from that sweep, it should land as its own
-follow-up ticket with its own test coverage, not folded silently into
-this one.
+same v7 checkpoint on a small sample of the validation set (n=80); see
+issue #125's comment thread for the full numeric results. That sweep's own
+author flagged it explicitly as **not yet validated enough to adopt**:
+`num_beams=8` looked like a >1 BLEU win (12.42 vs. 11.03), driven almost
+entirely by cak->es nearly doubling (3.33 → 6.47) — but the sample was
+tiny and the sweep ran under this same local GPU's severe thermal
+throttling (see "Real at-scale validation" below).
+
+### `num_beams`: now configurable, and issue #178's sweep does not hold up at scale (issue #180)
+
+Issue #180 did two things: made `num_beams` a real, explicit, tested
+parameter on `generate_translations`, `evaluate_checkpoint.py`'s CLI
+(`--num-beams`, defaulting to `training.train.DEFAULT_NUM_BEAMS`), and
+`deployment.inference.translate` (`deployment.inference.DEFAULT_NUM_BEAMS`)
+— rather than a value silently inherited from whatever
+`generation_config.json` a given checkpoint happened to carry — and then
+used that new parameter to re-run issue #178's `num_beams=8` finding at a
+much larger, balanced sample against the real v7 checkpoint.
+
+**Real at-scale validation.** This local GPU (a 4GB card with no active
+cooling) throttles too severely to run the full 7,218-example validation
+set in one sitting — confirmed directly, not assumed: temperature pinned
+at 92-95°C throughout, clock oscillating between roughly 300MHz and
+1700MHz, with wildly variable per-batch generation time as a direct
+result. Per this issue's own guidance, the comparison instead used 200
+pairs (400 examples) per direction, **the same 200 pairs scored under both
+`num_beams` settings** for a real apples-to-apples comparison (issue
+#178's own n=80 sweep mixed both directions into one combined-and-grouped
+sample, which — as this validation separately discovered — is a
+methodological trap: `training.direction.build_direction_examples("both")`
+groups every es->cak example before any cak->es example, so a
+time-boxed/truncated run can silently end up scoring only one direction):
+
+| direction | num_beams | BLEU | chrF | n |
+|---|---|---|---|---|
+| es->cak | 5 (current default) | 16.56 | 38.65 | 200 |
+| es->cak | 8 | 16.37 | 38.21 | 200 |
+| cak->es | 5 (current default) | 10.06 | 30.82 | 200 |
+| cak->es | 8 | **9.62** | 30.84 | 200 |
+
+**`num_beams=8` does not hold up at this larger, balanced sample size** —
+it's flat-to-slightly-worse on both directions, including cak->es, the
+exact direction issue #178's small sample reported nearly doubling.
+Issue #178's finding looks like small-sample noise, not a real effect —
+exactly the risk its own author called out before this validation ran.
+
+**Recommendation: no-go.** The current default (`num_beams=5`) is kept
+unchanged in `deployment/inference.py`. There's no quality upside to
+justify adopting `num_beams=8`, and there's a real downside: beam width 8
+also produced a genuine `CUDA out of memory` error at this evaluation
+script's batch size of 8 on this 4GB card (recovered by dropping to batch
+size 4 for that one run) — a concrete data point that higher beam widths
+cost more generation memory, on top of the latency/cost reasoning below.
+
+**Latency/cost, reasoned from this environment's numbers (an estimate, not
+a SageMaker measurement — no real endpoint invocation was in this ticket's
+scope).** At matched batch size (cak->es, batch size 8 for both settings),
+`num_beams=8` took 332.0s vs. `num_beams=5`'s 206.1s for the same 200
+examples — **~1.6x** the wall time, consistent with issue #178's own
+"roughly proportional to beam count" pattern (8/5 = 1.6). `/v1/translate`
+is still a synchronous call bound by API Gateway's 29-second timeout (ADR
+0008's async fix isn't implemented yet), and SageMaker Serverless bills
+per invocation duration — so adopting `num_beams=8` would mean paying
+~1.6x more per request for a quality change that, at this sample size, is
+not actually positive. Real single-request (batch size 1) serving latency
+on actual SageMaker hardware was not measured directly and would likely
+differ from this batched, thermally-throttled local number in absolute
+terms, but the *relative* ~1.6x multiplier is the more portable takeaway,
+and it points the same direction as the quality result: don't adopt.
+
+This was a pure diagnostic and configurability change — no retraining, no
+new SageMaker Model Registry model package, and (per the no-go
+recommendation above) no change to the deployed decode configuration
+either. Findings posted in full, with the same numbers as above, as a
+comment on issue #125.
 
 ### Direction handling: one multilingual model, tagged
 
@@ -998,6 +1077,18 @@ empty text, same source/target, wrong content type) raise `ValueError`
 from `input_fn`/`parse_request`, which SageMaker surfaces as a client
 error response -- confirmed against the real deployed endpoint, not
 assumed (see "Real deployment verification" below).
+
+`translate()`'s beam width (`num_beams`, issue #180) is a plain module-level
+constant, `deployment.inference.DEFAULT_NUM_BEAMS` (currently 5, matching
+`training.train.DEFAULT_NUM_BEAMS` and the base model's own
+`generation_config.json`), not a request-level field -- there's no
+per-request decode-quality/latency tradeoff exposed to callers, only a
+single fixed decode config for the whole deployed endpoint. Adopting a
+different value here (see "Decode configuration" under the training
+entrypoint section for the real at-scale validation this was based on) is
+a one-line change to this constant, requiring only re-registering/
+re-packaging the same v7 weights -- no retraining, no new Model Package
+version.
 
 ### Why the model artifact is repackaged (`deployment/package_model.py`)
 
