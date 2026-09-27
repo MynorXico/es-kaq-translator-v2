@@ -49,11 +49,40 @@ nothing about the actual decoder inputs the model would have used anyway
 from __future__ import annotations
 
 import torch
+import transformers.models.m2m_100.modeling_m2m_100 as real_m2m_100_module
 
 from training.train import attach_decoder_input_ids, shift_tokens_right
 
 PAD_TOKEN_ID = 1
 DECODER_START_TOKEN_ID = 2  # matches facebook/m2m100_418M's own eos_token_id
+
+
+def test_shift_tokens_right_delegates_to_the_real_transformers_implementation(monkeypatch):
+    """Code review on PR #183: `shift_tokens_right` must delegate to the
+    real `transformers.models.m2m_100.modeling_m2m_100.shift_tokens_right`
+    (the same function `M2M100ForConditionalGeneration.forward` already
+    calls internally -- see this function's own docstring) rather than
+    maintain an independent, from-scratch reimplementation that could
+    silently drift from upstream if a future transformers version changes
+    its semantics. Monkeypatches the real function with a spy and asserts
+    our wrapper's return value *is* the spy's return value (identity, not
+    just an equal-looking tensor computed separately), proving delegation
+    actually happened.
+    """
+    sentinel = object()
+    calls = []
+
+    def fake_shift_tokens_right(labels, pad_token_id, decoder_start_token_id):
+        calls.append((labels, pad_token_id, decoder_start_token_id))
+        return sentinel
+
+    monkeypatch.setattr(real_m2m_100_module, "shift_tokens_right", fake_shift_tokens_right)
+
+    labels = torch.tensor([[10, 11, 12]])
+    result = shift_tokens_right(labels, PAD_TOKEN_ID, DECODER_START_TOKEN_ID)
+
+    assert result is sentinel
+    assert calls == [(labels, PAD_TOKEN_ID, DECODER_START_TOKEN_ID)]
 
 
 def test_shift_tokens_right_prepends_start_token_and_drops_last_column():

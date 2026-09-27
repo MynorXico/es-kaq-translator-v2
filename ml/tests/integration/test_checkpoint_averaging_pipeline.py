@@ -7,13 +7,16 @@ against a tiny fixture, not the real checkpoint).
 
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 from pathlib import Path
 
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+from training import checkpoint_averaging
 from training.checkpoint_averaging import (
     WEIGHTS_FILENAME,
     average_checkpoints,
@@ -101,6 +104,54 @@ def test_average_checkpoints_averages_only_the_selected_last_n(tmp_path: Path):
     averaged_weights = load_file(str(output_dir / WEIGHTS_FILENAME))
     # (2.0 + 4.0) / 2 = 3.0 -- not influenced by the oldest checkpoint's 100.0.
     assert torch.allclose(averaged_weights["embedding.weight"], torch.full((2, 3), 3.0))
+
+
+def test_average_checkpoints_releases_earlier_checkpoints_before_loading_later_ones(
+    tmp_path: Path, monkeypatch
+):
+    """Code review on PR #183: `average_checkpoints` previously loaded every
+    checkpoint's full state dict into a list *before* averaging any of them
+    (`state_dicts = [_load_state_dict(cd) for cd in checkpoint_dirs]`),
+    so peak memory scaled with N instead of ~2 (current + running-sum
+    accumulator) -- a real risk for a utility meant to be run casually
+    (e.g. on a laptop), especially once real checkpoints are ~2GB each.
+
+    Proves the fix processes one checkpoint at a time: checkpoint 1's raw
+    state dict must already be garbage-collected by the time checkpoint 3
+    is loaded. A "load all N upfront" implementation would still be
+    holding checkpoint 1 alive (referenced by its own materialized list)
+    at that point, so this fails against the old implementation and passes
+    against the new one.
+    """
+    checkpoints_root = tmp_path / "checkpoints"
+    _make_fixture_checkpoint(checkpoints_root, 1, weight_value=1.0, config_marker="run")
+    _make_fixture_checkpoint(checkpoints_root, 2, weight_value=3.0, config_marker="run")
+    _make_fixture_checkpoint(checkpoints_root, 3, weight_value=5.0, config_marker="run")
+    checkpoint_dirs = find_checkpoint_dirs(checkpoints_root)
+
+    real_load = checkpoint_averaging._load_state_dict
+    live_refs: list[weakref.ReferenceType] = []
+
+    def tracking_load(checkpoint_dir):
+        if len(live_refs) == 2:
+            gc.collect()
+            assert live_refs[0]() is None, (
+                "checkpoint 1's weight tensor is still alive while loading "
+                "checkpoint 3 -- average_checkpoints is holding every "
+                "checkpoint's weights in memory at once instead of "
+                "accumulating incrementally."
+            )
+        state_dict = real_load(checkpoint_dir)
+        # Weakref the tensor value itself -- a plain dict doesn't support
+        # weakref, but a real torch.Tensor does.
+        live_refs.append(weakref.ref(state_dict["embedding.weight"]))
+        return state_dict
+
+    monkeypatch.setattr(checkpoint_averaging, "_load_state_dict", tracking_load)
+
+    average_checkpoints(checkpoint_dirs, tmp_path / "averaged")
+
+    assert len(live_refs) == 3  # sanity: all 3 checkpoints were actually loaded
 
 
 def test_average_checkpoints_rejects_empty_checkpoint_list(tmp_path: Path):

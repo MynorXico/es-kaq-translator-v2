@@ -851,24 +851,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_wait or args.no_register:
         return 0
 
+    submitted_hyperparameters = {
+        "epochs": config["hyperparameters"]["epochs"],
+        "batch_size": config["hyperparameters"]["batch-size"],
+        "learning_rate": config["hyperparameters"]["learning-rate"],
+        "max_length": config["hyperparameters"]["max-length"],
+        "seed": config["hyperparameters"]["seed"],
+        "warmup_ratio": config["hyperparameters"]["warmup-ratio"],
+        "weight_decay": config["hyperparameters"]["weight-decay"],
+        "label_smoothing": config["hyperparameters"]["label-smoothing"],
+        "gradient_accumulation_steps": config["hyperparameters"]["gradient-accumulation-steps"],
+        "subword_vocab_size": config["hyperparameters"]["subword-vocab-size"],
+    }
+    # Issue #182 code review: `build_hyperparameters` only adds these two to
+    # the *training job's* own hyperparameters when explicitly set (see its
+    # own docstring) -- this reconstruction must mirror that conditional
+    # inclusion exactly, or a real run using either flag would train
+    # correctly but leave no record of it in the Model Registry entry
+    # `_build_customer_metadata` builds from this dict.
+    if "dropout" in config["hyperparameters"]:
+        submitted_hyperparameters["dropout"] = config["hyperparameters"]["dropout"]
+    if "bpe-dropout-alpha" in config["hyperparameters"]:
+        submitted_hyperparameters["bpe_dropout_alpha"] = config["hyperparameters"][
+            "bpe-dropout-alpha"
+        ]
+
     run_metadata = {
         "corpus_version": config["hyperparameters"]["corpus-version"],
         "direction": config["hyperparameters"]["direction"],
         "run_id": config["hyperparameters"]["run-id"],
-        "hyperparameters": {
-            "epochs": config["hyperparameters"]["epochs"],
-            "batch_size": config["hyperparameters"]["batch-size"],
-            "learning_rate": config["hyperparameters"]["learning-rate"],
-            "max_length": config["hyperparameters"]["max-length"],
-            "seed": config["hyperparameters"]["seed"],
-            "warmup_ratio": config["hyperparameters"]["warmup-ratio"],
-            "weight_decay": config["hyperparameters"]["weight-decay"],
-            "label_smoothing": config["hyperparameters"]["label-smoothing"],
-            "gradient_accumulation_steps": config["hyperparameters"][
-                "gradient-accumulation-steps"
-            ],
-            "subword_vocab_size": config["hyperparameters"]["subword-vocab-size"],
-        },
+        "hyperparameters": submitted_hyperparameters,
     }
 
     # v3's ModelTrainer doesn't expose `.model_data`/`.image_uri` the way

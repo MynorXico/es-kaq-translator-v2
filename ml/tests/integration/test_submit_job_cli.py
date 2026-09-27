@@ -134,6 +134,61 @@ def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
     assert register_kwargs["InferenceSpecification"]["Containers"][0]["ModelDataUrl"] == (
         "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
     )
+    # Issue #182 code review: dropout/bpe-dropout-alpha are never set on
+    # this default (no --dropout/--bpe-dropout-alpha) submission, so their
+    # Model Registry metadata keys must not appear either.
+    assert "hp_dropout" not in register_kwargs["CustomerMetadataProperties"]
+    assert "hp_bpe-dropout-alpha" not in register_kwargs["CustomerMetadataProperties"]
+    assert "hp_bpe_dropout_alpha" not in register_kwargs["CustomerMetadataProperties"]
+
+
+def test_full_submission_records_dropout_and_bpe_dropout_alpha_in_registry_metadata_when_given(
+    monkeypatch,
+):
+    """Code review finding on PR #183: `main()`'s own `run_metadata`
+    reconstruction (used for `register_model`'s `CustomerMetadataProperties`)
+    hardcoded a fixed hyperparameter key list that predated `--dropout`/
+    `--bpe-dropout-alpha`, so a real run using either would train correctly
+    but leave the registry entry with no record of which experiment
+    produced it -- `build_hyperparameters` (the training job's own
+    hyperparameters) already included them, but `main()`'s *separate*
+    reconstruction of `run_metadata["hyperparameters"]` from
+    `config["hyperparameters"]` did not. This must not regress.
+    """
+    fake_cfn_client = _fake_cfn_client()
+    fake_sm_client = MagicMock()
+    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
+    fake_s3_client = MagicMock()
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3_client.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+
+    def fake_boto3_client(service, **kwargs):
+        return {
+            "cloudformation": fake_cfn_client,
+            "sagemaker": fake_sm_client,
+            "s3": fake_s3_client,
+        }[service]
+
+    monkeypatch.setattr(submit_job.boto3, "client", fake_boto3_client)
+    monkeypatch.setattr(submit_job, "_retrieve_image_uri", lambda **kw: "fake-training-image")
+
+    fake_estimator = MagicMock()
+    fake_estimator.training_image = "fake-training-image"
+    fake_estimator._latest_training_job.model_artifacts.s3_model_artifacts = (
+        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
+    fake_model_trainer_cls = MagicMock(return_value=fake_estimator)
+    monkeypatch.setattr(submit_job, "ModelTrainer", fake_model_trainer_cls)
+
+    exit_code = submit_job.main(
+        ["--run-id", "run-test", "--dropout", "0.3", "--bpe-dropout-alpha", "0.1"]
+    )
+
+    assert exit_code == 0
+    _, register_kwargs = fake_sm_client.create_model_package.call_args
+    assert register_kwargs["CustomerMetadataProperties"]["hp_dropout"] == "0.3"
+    assert register_kwargs["CustomerMetadataProperties"]["hp_bpe_dropout_alpha"] == "0.1"
 
 
 def test_no_wait_skips_registration(monkeypatch):

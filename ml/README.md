@@ -1076,7 +1076,13 @@ variable" discipline as issue #82's own subword-vocabulary follow-up.
    module tree in `tests/integration/test_dropout_real_checkpoint.py`.
    Deliberately never touches `M2M100Attention`'s own `.dropout` attribute
    (a different value, `config.attention_dropout`) -- this ticket doesn't
-   add a separate `--attention-dropout` flag.
+   add a separate `--attention-dropout` flag. Identifies attention modules
+   to skip via `isinstance(module, M2M100Attention)` (lazily imported from
+   `transformers.models.m2m_100.modeling_m2m_100`), not a
+   `type(module).__name__` string match -- PR #183 review flagged the
+   name-based version as fragile against a future transformers version
+   introducing an attention subclass (e.g. an SDPA/FlashAttention variant),
+   which `isinstance` still correctly recognizes via the class hierarchy.
 3. **`--bpe-dropout-alpha`** (default `None`, disabled) enables
    SentencePiece subword sampling ("BPE-dropout" / subword regularization,
    Kudo 2018, "Subword Regularization") for the *training* dataset's
@@ -1100,19 +1106,37 @@ variable" discipline as issue #82's own subword-vocabulary follow-up.
 4. **`save_strategy="epoch"` is the new default** (previously `"no"` --
    no intermediate checkpoint ever existed for any past training run,
    making checkpoint averaging structurally impossible: there was nothing
-   to average). `training/checkpoint_averaging.py` is the new,
+   to average). Paired with `save_total_limit=DEFAULT_SAVE_TOTAL_LIMIT`
+   (`training.checkpoint_averaging.DEFAULT_AVERAGE_N + 2`, derived from --
+   not independently hardcoded next to -- the averaging utility's own
+   default `N`) so per-epoch checkpoints (each a full model + optimizer +
+   scheduler + rng-state save) don't grow unbounded across a longer run
+   and risk filling a training instance's disk; `transformers`' own FIFO
+   eviction always keeps the most recent checkpoints, exactly the ones
+   averaging needs. `training/checkpoint_averaging.py` is the new,
    independent post-hoc utility this enables: `find_checkpoint_dirs` /
    `select_last_n_checkpoints` locate a training run's last N
    `checkpoint-<step>` directories (sorted numerically, not
    lexicographically), and `average_checkpoints` elementwise-averages
-   their `model.safetensors` weights (via `average_state_dicts`, tested
-   directly against plain tensors) into a new, standalone checkpoint
-   directory, copying over the checkpoint-invariant non-weight files
-   (`config.json`, `generation_config.json`, ...) from the most recent one
-   and explicitly excluding training-progress files (`optimizer.pt`,
-   `scheduler.pt`, `rng_state.pth`, `trainer_state.json`,
-   `training_args.bin`) that describe training progress, not the averaged
-   weights themselves. **Does not copy tokenizer files** -- `Seq2SeqTrainer`'s
+   their `model.safetensors` weights (via `average_state_dicts`) into a
+   new, standalone checkpoint directory, copying over the
+   checkpoint-invariant non-weight files (`config.json`,
+   `generation_config.json`, ...) from the most recent one and explicitly
+   excluding training-progress files (`optimizer.pt`, `scheduler.pt`,
+   `rng_state.pth`, `trainer_state.json`, `training_args.bin`) that
+   describe training progress, not the averaged weights themselves.
+   `average_state_dicts` processes checkpoints one at a time via a running
+   sum (accepting any `Iterable`, not just a `list`) rather than loading
+   every checkpoint's full weights into memory simultaneously -- PR #183
+   review flagged the original list-based version's peak memory scaling
+   with N as a real risk for a utility meant to be run casually (e.g. a
+   laptop) once N real ~2GB checkpoints are involved;
+   `average_checkpoints` passes a generator expression, never a
+   pre-built list, and a real, tracked-allocation test
+   (`tests/integration/test_checkpoint_averaging_pipeline.py`) confirms an
+   earlier checkpoint's weights are actually garbage-collected before a
+   later one is loaded, not just that the final result looks correct.
+   **Does not copy tokenizer files** -- `Seq2SeqTrainer`'s
    own per-checkpoint saves never include them (only
    `training.train.save_model_and_tokenizer`'s one final save, to the
    run's own `--model-dir`, does); copy those separately before loading an
@@ -1138,7 +1162,22 @@ change any future run's outcome unless a maintainer explicitly opts a
 specific run into one of them. `submit_job.py --dropout`/
 `--bpe-dropout-alpha` mirror `train.py`'s own flags and are omitted from a
 submitted job's hyperparameters entirely (rather than passed through as a
-literal `"None"`) when left at their defaults.
+literal `"None"`) when left at their defaults. `submit_job.py main()`'s own
+`run_metadata["hyperparameters"]` (used for `register_model`'s
+`CustomerMetadataProperties`, a *separate* dict reconstructed from the
+submitted job's hyperparameters rather than reusing them directly) mirrors
+that same conditional inclusion -- PR #183 review caught this
+reconstruction hardcoding a fixed key list that predated both flags, which
+would have silently left a real `--dropout`/`--bpe-dropout-alpha` run's
+Model Registry entry with no record of which experiment produced it, even
+though the job itself trained correctly.
+
+`training.train.shift_tokens_right` (the label-smoothing fix's core
+building block) delegates to the real
+`transformers.models.m2m_100.modeling_m2m_100.shift_tokens_right` rather
+than maintaining an independent reimplementation of the same transform --
+PR #183 review flagged the original reimplementation as a needless
+drift risk against future transformers versions.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call), resolves the training container image URI

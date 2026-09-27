@@ -73,6 +73,7 @@ from typing import Any
 
 from data.corpus_io import read_tsv_pairs
 from evaluation.run import run_evaluation
+from training.checkpoint_averaging import DEFAULT_AVERAGE_N
 from training.direction import (
     ALL_DIRECTION_TAG_TOKENS,
     DIRECTION_CHOICES,
@@ -92,6 +93,16 @@ from training.tokenizer_extension import (
 )
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
+
+# Issue #182 code review: an uncapped per-epoch checkpoint (each a full
+# model + optimizer + scheduler + rng-state save, on the order of ~2x model
+# size just from AdamW's own optimizer state) risks filling up a training
+# instance's disk on a longer run -- nothing bounded retention before this.
+# Derived from `checkpoint_averaging.DEFAULT_AVERAGE_N` (the utility this
+# checkpointing exists to feed) plus a small margin, rather than an
+# independently hardcoded number, so the two constants can't silently drift
+# apart and leave fewer checkpoints on disk than averaging actually needs.
+DEFAULT_SAVE_TOTAL_LIMIT = DEFAULT_AVERAGE_N + 2
 
 # Matches facebook/m2m100_418M's own generation_config.json default
 # (confirmed directly against the real v7 checkpoint artifact, issue #178).
@@ -452,8 +463,13 @@ def apply_dropout_config(model: Any, dropout: float | None) -> None:
     provenance/introspection, e.g. if the checkpoint's config is ever
     re-read later).
 
-    Deliberately skips any module named `M2M100Attention`: its own
-    `.dropout` attribute is a *different* config value
+    Deliberately skips every `M2M100Attention` instance (checked via
+    `isinstance`, not a class-name string match -- code review on PR #183:
+    a name match would silently stop excluding attention modules the
+    moment a future transformers version introduces a subclass or
+    alternate attention implementation, e.g. an SDPA/FlashAttention
+    variant, which `isinstance` correctly still recognizes via the class
+    hierarchy): its own `.dropout` attribute is a *different* config value
     (`config.attention_dropout`), not the general dropout this flag
     controls -- overwriting it too would silently change attention dropout
     as an undocumented side effect of `--dropout`. This project doesn't
@@ -463,14 +479,19 @@ def apply_dropout_config(model: Any, dropout: float | None) -> None:
     No-op when `dropout` is `None` -- `--dropout`'s own default, so a run
     that never passes the flag leaves the checkpoint's pretrained dropout
     completely untouched (baseline behavior for every past run is
-    unaffected unless someone explicitly opts in).
+    unaffected unless someone explicitly opts in). Lazily imports
+    `M2M100Attention` so this stays a no-cost no-op (no transformers import
+    at all) on that common path, mirroring this module's existing
+    lazy-import pattern (see `load_base_model_and_tokenizer`).
     """
     if dropout is None:
         return
 
+    from transformers.models.m2m_100.modeling_m2m_100 import M2M100Attention
+
     model.config.dropout = dropout
     for module in model.modules():
-        if type(module).__name__ == "M2M100Attention":
+        if isinstance(module, M2M100Attention):
             continue
         if isinstance(getattr(module, "dropout", None), float):
             module.dropout = dropout
@@ -720,20 +741,27 @@ def shift_tokens_right(labels: Any, pad_token_id: int, decoder_start_token_id: i
     teacher-forcing input, prepending `decoder_start_token_id` and
     replacing any `-100` loss-ignore padding with `pad_token_id`.
 
-    A pure reimplementation of
+    Delegates to the real
     `transformers.models.m2m_100.modeling_m2m_100.shift_tokens_right` (the
-    exact transform `M2M100ForConditionalGeneration.forward`'s own
-    `labels is not None` branch already performs internally) -- see
-    `attach_decoder_input_ids`'s docstring and
-    `tests/unit/test_decoder_input_ids.py` for why this needs to be
+    exact function `M2M100ForConditionalGeneration.forward`'s own `labels
+    is not None` branch already calls internally) rather than maintaining
+    an independent, from-scratch reimplementation of the same transform --
+    code review on PR #183: a hand-copied reimplementation could silently
+    drift from upstream if a future transformers version changes this
+    function's semantics, whereas delegating means any such change is
+    picked up automatically and this project's own behavior stays exactly
+    in sync with what the model's own forward pass would have done anyway.
+    See `attach_decoder_input_ids`'s docstring for why this needs to be
     precomputed explicitly rather than left to that internal branch alone
-    (issue #182's label-smoothing crash fix).
+    (issue #182's label-smoothing crash fix). Lazily imports `transformers`,
+    mirroring this module's existing lazy-import pattern (see
+    `load_base_model_and_tokenizer`).
     """
-    shifted = labels.new_zeros(labels.shape)
-    shifted[:, 1:] = labels[:, :-1].clone()
-    shifted[:, 0] = decoder_start_token_id
-    shifted.masked_fill_(shifted == -100, pad_token_id)
-    return shifted
+    from transformers.models.m2m_100.modeling_m2m_100 import (
+        shift_tokens_right as real_shift_tokens_right,
+    )
+
+    return real_shift_tokens_right(labels, pad_token_id, decoder_start_token_id)
 
 
 def attach_decoder_input_ids(
@@ -873,6 +901,14 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
         # comparable boundaries and isn't needed to make averaging
         # possible.
         save_strategy="epoch",
+        # Code review on PR #183: bounds disk usage regardless of epoch
+        # count -- see DEFAULT_SAVE_TOTAL_LIMIT's own module-level comment.
+        # transformers' own FIFO eviction (oldest checkpoint deleted first)
+        # is exactly what checkpoint averaging wants: it only ever needs the
+        # *most recent* N checkpoints, which are always the last ones
+        # standing under this policy regardless of how many epochs a run
+        # trains for.
+        save_total_limit=DEFAULT_SAVE_TOTAL_LIMIT,
         report_to=[],
     )
 

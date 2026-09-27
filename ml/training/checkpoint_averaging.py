@@ -32,10 +32,20 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 WEIGHTS_FILENAME = "model.safetensors"
+
+# Default number of final epoch checkpoints this utility averages, and the
+# same value `training.train.DEFAULT_SAVE_TOTAL_LIMIT` is derived from (with
+# a margin) for `Seq2SeqTrainingArguments(save_total_limit=...)` -- kept as
+# one shared constant, rather than two independently hardcoded numbers, so
+# a future change to one can't silently leave the other referring to a
+# retention window too small to actually average against (issue #182 code
+# review).
+DEFAULT_AVERAGE_N = 3
 
 _CHECKPOINT_DIR_RE = re.compile(r"^checkpoint-(\d+)$")
 
@@ -95,49 +105,83 @@ def select_last_n_checkpoints(checkpoint_dirs: list[Path], n: int) -> list[Path]
     return checkpoint_dirs[-n:]
 
 
-def average_state_dicts(state_dicts: list[dict[str, Any]]) -> dict[str, Any]:
-    """Elementwise-average a list of same-shaped state dicts (checkpoint
-    weight tensors).
+def average_state_dicts(state_dicts: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Elementwise-average a (possibly lazy) sequence of same-shaped state
+    dicts (checkpoint weight tensors).
+
+    Accepts any `Iterable`, not just a `list` -- in particular a one-shot
+    generator that loads one checkpoint's weights from disk at a time (see
+    `average_checkpoints` below). Processes `state_dicts` via a single
+    pass, accumulating a running per-key sum and dividing once at the end,
+    rather than materializing every state dict (or every per-key list of
+    tensors) at once -- peak memory here is O(1) state dicts plus the
+    running-sum accumulator, not O(N) (issue #182 code review: the
+    previous list-based implementation held all N checkpoints' full
+    weights in memory simultaneously before averaging any of them, a real
+    risk once N checkpoints of a ~2GB real model are involved). Since this
+    only ever iterates `state_dicts` once, a generator works correctly and
+    is never converted to a `list` -- indexing/slicing a generator would
+    raise `TypeError`, which is exactly what an accidental regression back
+    to list-like assumptions would surface immediately (see
+    `tests/unit/test_checkpoint_averaging.py`).
 
     Every state dict must have exactly the same set of keys and matching
     tensor shapes for each key -- raises `ValueError` rather than silently
     averaging a subset or broadcasting mismatched shapes, since that would
     otherwise produce a checkpoint that looks superficially valid but is
     actually meaningless (e.g. checkpoints accidentally taken from two
-    different runs/architectures).
+    different runs/architectures). Also raises `ValueError` if `state_dicts`
+    is empty -- detected by actually iterating (a generator is always
+    truthy, unlike a list, so `if not state_dicts` alone can't detect this).
 
-    Averages in `float32` regardless of the input dtype (so `float16`
+    Accumulates in `float32` regardless of the input dtype (so `float16`
     checkpoints, real for this project's GPU training runs -- `fp16=True`
     whenever CUDA is available, see `training.train.build_training_arguments`
     -- don't lose precision mid-average), then casts each result back to
     its original per-key dtype.
     """
-    import torch
+    accumulator: dict[str, Any] = {}
+    original_dtypes: dict[str, Any] = {}
+    reference_keys: set[str] | None = None
+    count = 0
 
-    if not state_dicts:
-        raise ValueError("state_dicts must be non-empty")
-
-    reference_keys = set(state_dicts[0])
-    for index, state_dict in enumerate(state_dicts[1:], start=1):
-        if set(state_dict) != reference_keys:
+    for index, state_dict in enumerate(state_dicts):
+        keys = set(state_dict)
+        if reference_keys is None:
+            reference_keys = keys
+        elif keys != reference_keys:
             raise ValueError(
                 f"state_dicts[{index}] has different keys than state_dicts[0] -- "
                 "checkpoints must be from the same training run/architecture."
             )
 
-    averaged: dict[str, Any] = {}
-    for key in reference_keys:
-        tensors = [state_dict[key] for state_dict in state_dicts]
-        first_shape = tensors[0].shape
-        for other_index, tensor in enumerate(tensors[1:], start=1):
-            if tensor.shape != first_shape:
-                raise ValueError(
-                    f"Mismatched shape for key {key!r}: state_dicts[0] has "
-                    f"{first_shape}, state_dicts[{other_index}] has {tensor.shape}."
-                )
-        stacked = torch.stack([tensor.float() for tensor in tensors])
-        averaged[key] = stacked.mean(dim=0).to(tensors[0].dtype)
-    return averaged
+        for key, tensor in state_dict.items():
+            if key not in accumulator:
+                original_dtypes[key] = tensor.dtype
+                # .clone() so the accumulator owns an independent tensor,
+                # never aliasing the just-loaded checkpoint's own storage
+                # (`.float()` alone is a no-op, returning the same tensor
+                # object, whenever a source is already float32).
+                accumulator[key] = tensor.float().clone()
+            else:
+                if tensor.shape != accumulator[key].shape:
+                    raise ValueError(
+                        f"Mismatched shape for key {key!r}: state_dicts[0] has "
+                        f"{accumulator[key].shape}, state_dicts[{index}] has {tensor.shape}."
+                    )
+                accumulator[key] += tensor.float()
+        count += 1
+        # `state_dict`/`tensor` go out of scope on the next loop iteration
+        # (or after the loop ends) with no other reference kept here, so
+        # the checkpoint just processed becomes eligible for garbage
+        # collection before the next one is loaded -- see
+        # `average_checkpoints`'s own docstring for the caller-side half
+        # of this (passing a generator rather than a pre-built list).
+
+    if count == 0:
+        raise ValueError("state_dicts must be non-empty")
+
+    return {key: (value / count).to(original_dtypes[key]) for key, value in accumulator.items()}
 
 
 def _load_state_dict(checkpoint_dir: Path) -> dict[str, Any]:
@@ -175,14 +219,23 @@ def average_checkpoints(checkpoint_dirs: list[Path], output_dir: Path) -> Path:
 
     Raises `ValueError` if `checkpoint_dirs` is empty, or if the
     checkpoints' weights don't actually match (see `average_state_dicts`).
+
+    Loads at most one checkpoint's full state dict into memory at a time
+    (issue #182 code review): passes a *generator expression* to
+    `average_state_dicts`, never a pre-built list, so each checkpoint's
+    weights are read from disk, folded into the running-sum accumulator,
+    and released before the next checkpoint is loaded -- confirmed against
+    a real, tracked checkpoint sequence in
+    `tests/integration/test_checkpoint_averaging_pipeline.py`.
     """
     if not checkpoint_dirs:
         raise ValueError("checkpoint_dirs must be non-empty")
 
     from safetensors.torch import save_file
 
-    state_dicts = [_load_state_dict(checkpoint_dir) for checkpoint_dir in checkpoint_dirs]
-    averaged = average_state_dicts(state_dicts)
+    averaged = average_state_dicts(
+        _load_state_dict(checkpoint_dir) for checkpoint_dir in checkpoint_dirs
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     save_file(averaged, str(output_dir / WEIGHTS_FILENAME))
@@ -211,8 +264,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n",
         type=int,
-        default=3,
-        help="Number of final (most recent) epoch checkpoints to average (default: 3).",
+        default=DEFAULT_AVERAGE_N,
+        help=f"Number of final (most recent) epoch checkpoints to average "
+        f"(default: {DEFAULT_AVERAGE_N}).",
     )
     return parser
 
