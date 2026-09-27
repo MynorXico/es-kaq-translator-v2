@@ -303,6 +303,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help=(
+            "Override the model's general dropout probability (issue #182). "
+            "Defaults to None (untouched, matching train.py's own default) "
+            "-- see train.py's --dropout help for the full rationale."
+        ),
+    )
+    parser.add_argument(
+        "--bpe-dropout-alpha",
+        type=float,
+        default=None,
+        help=(
+            "SentencePiece subword-sampling alpha for the training corpus "
+            "('BPE-dropout' / subword regularization, issue #182). "
+            "Defaults to None (disabled, matching train.py's own default) "
+            "-- see train.py's --bpe-dropout-alpha help for the full "
+            "rationale."
+        ),
+    )
+    parser.add_argument(
         "--model-package-group-name",
         default=DEFAULT_MODEL_PACKAGE_GROUP_NAME,
         help=f"SageMaker Model Registry group name (default: {DEFAULT_MODEL_PACKAGE_GROUP_NAME}).",
@@ -467,6 +489,16 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
     }
     if args.init_model_s3_uri:
         hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
+    # Issue #182: omitted (rather than always included, e.g. as `None`)
+    # when not explicitly set -- a hyperparameter value of `None` would
+    # serialize to the literal string "None" and get passed to train.py as
+    # `--dropout None`, which argparse's `type=float` can't parse. This
+    # also keeps a submission that never opts into either lever identical
+    # to one submitted before this ticket existed.
+    if args.dropout is not None:
+        hyperparameters["dropout"] = args.dropout
+    if args.bpe_dropout_alpha is not None:
+        hyperparameters["bpe-dropout-alpha"] = args.bpe_dropout_alpha
     return hyperparameters
 
 

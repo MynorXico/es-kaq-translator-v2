@@ -260,6 +260,29 @@ def test_build_hyperparameters_omits_init_model_by_default():
     assert "init-model" not in hyperparameters
 
 
+def test_build_hyperparameters_omits_dropout_and_bpe_dropout_alpha_by_default():
+    # Issue #182: both default to "untouched"/"disabled" -- landing this
+    # ticket's plumbing must not itself change any submitted job's
+    # hyperparameters unless explicitly opted into.
+    args = submit_job.parse_args([])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert "dropout" not in hyperparameters
+    assert "bpe-dropout-alpha" not in hyperparameters
+
+
+def test_build_hyperparameters_includes_dropout_and_bpe_dropout_alpha_when_given():
+    args = submit_job.parse_args(
+        ["--dropout", "0.3", "--bpe-dropout-alpha", "0.1"]
+    )
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["dropout"] == 0.3
+    assert hyperparameters["bpe-dropout-alpha"] == 0.1
+
+
 def test_build_hyperparameters_includes_init_model_container_path_when_given():
     args = submit_job.parse_args(
         [

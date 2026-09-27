@@ -61,11 +61,12 @@ same "duck-type and fixture" approach as `training/tokenizer_extension.py`
 from __future__ import annotations
 
 import argparse
+import contextlib
 import math
 import os
 import re
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -314,17 +315,29 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help=(
             "Label smoothing factor for the cross-entropy loss (issue #79). "
-            "Defaults to 0.0 (disabled): setting this above 0 crashes the "
-            "real 5th real-hyperparameter training run with `ValueError: "
-            "You cannot specify both decoder_input_ids and "
-            "decoder_inputs_embeds at the same time`, a real incompatibility "
-            "between the installed transformers version's label-smoothing "
-            "loss path and M2M100's forward signature -- confirmed by "
-            "reproducing it locally against the real checkpoint with a tiny "
-            "dataset (see tests/integration/test_fine_tune_real_checkpoint.py, "
-            "which guards against this specific regression), not assumed. "
-            "Only override this if a transformers upgrade is confirmed to "
-            "have fixed the interaction."
+            "Setting this above 0 used to crash (the real 5th "
+            "real-hyperparameter training run hit `ValueError: You cannot "
+            "specify both decoder_input_ids and decoder_inputs_embeds at "
+            "the same time`) -- root-caused and fixed in issue #182: "
+            "DataCollatorForSeq2Seq's usual decoder_input_ids construction "
+            "silently didn't apply to M2M100 on the installed transformers "
+            "version (see attach_decoder_input_ids's docstring for the full "
+            "trace), so decoder_input_ids ended up unset specifically "
+            "whenever label smoothing made Trainer pop `labels` out of the "
+            "batch before calling the model. `build_data_collator` computes "
+            "decoder_input_ids explicitly now, independent of that gap, and "
+            "a real training step with label_smoothing_factor > 0 is "
+            "exercised in tests/integration/test_fine_tune_real_checkpoint.py. "
+            "Still defaults to 0.0 (disabled) here -- literature on "
+            "low-resource NMT fine-tuning (Sennrich & Zhang 2019, "
+            "'Revisiting Low-Resource Neural Machine Translation: A Case "
+            "Study', which specifically studies larger label-smoothing "
+            "factors as one of several hyperparameters worth re-tuning for "
+            "low-resource settings) flags this as disproportionately "
+            "helpful at small data sizes, but actually changing this "
+            "default is a separate, deliberately maintainer-approved "
+            "experiment (billable real training run), not bundled into "
+            "this fix."
         ),
     )
     parser.add_argument(
@@ -353,6 +366,43 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "training/subword_vocab.py's hard_vocab_limit=False)."
         ),
     )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help=(
+            "Override the model's general (non-attention) dropout "
+            "probability before fine-tuning (issue #182) -- see "
+            "apply_dropout_config's docstring for why this can't just be "
+            "`model.config.dropout = ...` after loading. Defaults to `None` "
+            "(untouched): facebook/m2m100_418M's own pretrained dropout "
+            "(0.1) was never deliberately chosen for this fine-tuning "
+            "regime, but actually tuning it away from that default is a "
+            "separate, maintainer-approved experiment, not this flag's "
+            "own default."
+        ),
+    )
+    parser.add_argument(
+        "--bpe-dropout-alpha",
+        type=float,
+        default=None,
+        help=(
+            "SentencePiece subword-sampling alpha for the training corpus "
+            "only ('BPE-dropout' / subword regularization, issue #182; see "
+            "enable_subword_sampling's docstring). A real value (e.g. "
+            "0.1-0.2) makes each training example's source/target text get "
+            "re-segmented into subwords with a different random sample "
+            "each time it's encoded, instead of always the single "
+            "deterministic 'best' SentencePiece segmentation -- a "
+            "regularizer shown to help low-resource NMT fine-tuning "
+            "(Kudo 2018, 'Subword Regularization'). Defaults to `None` "
+            "(disabled, fully deterministic encoding, matching every past "
+            "training run) -- turning this on is a separate, "
+            "maintainer-approved experiment. Never applied to the "
+            "validation dataset, which must stay deterministic (see "
+            "TranslationDataset's docstring)."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -377,6 +427,53 @@ def resolve_model_source(source: str) -> str:
             tar.extractall(extract_dir, filter="data")
         return str(extract_dir)
     return source
+
+
+def apply_dropout_config(model: Any, dropout: float | None) -> None:
+    """Override `model`'s general (non-attention) dropout probability
+    in place, threading `--dropout` (issue #182) through to the
+    already-constructed submodules a loaded checkpoint carries, not just
+    its config object.
+
+    `facebook/m2m100_418M` is fine-tuned with whatever dropout probability
+    its own pretrained config happens to specify (`config.dropout`,
+    0.1) -- never deliberately set for this project's fine-tuning regime.
+    Simply assigning `model.config.dropout = dropout` after the model is
+    already loaded would silently do nothing to actual training behavior:
+    reading the installed transformers version's own `modeling_m2m_100.py`
+    shows `M2M100Encoder`/`M2M100Decoder`/`M2M100EncoderLayer`/
+    `M2M100DecoderLayer` each copy `config.dropout` into their own
+    `self.dropout` plain-float attribute exactly once, at `__init__` time
+    (`nn.functional.dropout(hidden_states, p=self.dropout, ...)`) -- and
+    `model` here is always already constructed (via `from_pretrained`)
+    before this function ever runs. This walks `model.modules()` and
+    overwrites each submodule's own `.dropout` attribute directly, in
+    addition to `model.config.dropout` (kept in sync mainly for
+    provenance/introspection, e.g. if the checkpoint's config is ever
+    re-read later).
+
+    Deliberately skips any module named `M2M100Attention`: its own
+    `.dropout` attribute is a *different* config value
+    (`config.attention_dropout`), not the general dropout this flag
+    controls -- overwriting it too would silently change attention dropout
+    as an undocumented side effect of `--dropout`. This project doesn't
+    expose a separate `--attention-dropout` flag; only the general
+    residual/hidden-state dropout is in scope for this ticket.
+
+    No-op when `dropout` is `None` -- `--dropout`'s own default, so a run
+    that never passes the flag leaves the checkpoint's pretrained dropout
+    completely untouched (baseline behavior for every past run is
+    unaffected unless someone explicitly opts in).
+    """
+    if dropout is None:
+        return
+
+    model.config.dropout = dropout
+    for module in model.modules():
+        if type(module).__name__ == "M2M100Attention":
+            continue
+        if isinstance(getattr(module, "dropout", None), float):
+            module.dropout = dropout
 
 
 def load_base_model_and_tokenizer(base_model: str) -> tuple[Any, Any]:
@@ -462,6 +559,75 @@ def extend_vocabulary_for_examples(
     return added_tokens
 
 
+DEFAULT_SUBWORD_SAMPLING_NBEST_SIZE = -1
+
+
+@contextlib.contextmanager
+def enable_subword_sampling(
+    tokenizer: Any, *, alpha: float, nbest_size: int = DEFAULT_SUBWORD_SAMPLING_NBEST_SIZE
+) -> Iterator[Any]:
+    """Context manager enabling SentencePiece subword sampling ("BPE-dropout"
+    / subword regularization, issue #182) on `tokenizer`, for the lifetime
+    of the `with` block only.
+
+    ## Why this needs to be a temporary, call-scoped patch
+
+    `M2M100Tokenizer._tokenize` calls `self.sp_model.encode(text,
+    out_type=str)` with no sampling kwargs at all (confirmed by reading the
+    installed transformers version's own `tokenization_m2m_100.py`).
+    SentencePiece's own `enable_sampling`/`nbest_size`/`alpha` support (see
+    the `sentencepiece` Python wrapper's `SentencePieceProcessor.Encode`
+    signature) can be supplied per call, or baked into a `sp_model_kwargs`
+    dict at tokenizer construction time -- but baking it in at construction
+    would apply to *every* future call on that tokenizer instance,
+    including this same training run's post-training validation-set
+    generation (`generate_translations`) and any later re-evaluation
+    (`evaluation.evaluate_checkpoint`), silently making those non-
+    deterministic too. Training uses one shared tokenizer instance for
+    vocabulary extension, fine-tuning, and generation (see `run_training_job`),
+    so this instead monkeypatches `tokenizer._tokenize` just for the
+    duration of this context, restoring the original afterward (even if the
+    `with` block raises) -- every other caller of the same tokenizer
+    instance, outside the `with` block, is completely unaffected and keeps
+    getting deterministic, "best" SentencePiece segmentation.
+
+    ## Pluggable without touching the vocab-extension pipeline
+
+    Deliberately independent of `training.vocab_extension`/`vocab_gap`/
+    `subword_vocab`: none of those call `tokenizer.sp_model.encode` on the
+    live fine-tuning tokenizer at all -- they either operate on plain vocab
+    dicts (`vocab_gap`/`vocab_extension`), or train an entirely separate,
+    throwaway SentencePiece model on Kaqchikel-only text
+    (`subword_vocab.train_subword_model`) whose *output* (which new tokens
+    to add) is unaffected by whether sampling is enabled on a completely
+    different, already-loaded tokenizer object. This function only ever
+    wraps `TranslationDataset`'s own training-time encoding calls (see
+    `TranslationDataset.__getitem__`).
+
+    No-ops for tokenizer-like objects without a real `sp_model` (e.g. the
+    duck-typed fakes used elsewhere in this test suite that only implement
+    `get_vocab`/`add_tokens`) -- lets callers exercise the wiring without a
+    full SentencePiece dependency.
+    """
+    if not hasattr(tokenizer, "sp_model"):
+        yield tokenizer
+        return
+
+    sp_model = tokenizer.sp_model
+    original_tokenize = tokenizer._tokenize
+
+    def _sampled_tokenize(text: str) -> list[str]:
+        return sp_model.encode(
+            text, out_type=str, enable_sampling=True, nbest_size=nbest_size, alpha=alpha
+        )
+
+    tokenizer._tokenize = _sampled_tokenize
+    try:
+        yield tokenizer
+    finally:
+        tokenizer._tokenize = original_tokenize
+
+
 class TranslationDataset:
     """Tokenizes `TranslationExample`s into `Seq2SeqTrainer`-ready dicts.
 
@@ -488,12 +654,33 @@ class TranslationDataset:
     entirely, and also keeps training consistent with generation: the
     decoder is trained to predict the exact same first token
     (`forced_bos_token_id`) it will later be forced to start from.
+
+    `subword_dropout_alpha` (issue #182, opt-in via `--bpe-dropout-alpha`,
+    default `None`/disabled) wraps both the source and target encoding
+    calls in `enable_subword_sampling`, so each call to `__getitem__`
+    -- i.e. potentially every epoch, since `Seq2SeqTrainer`'s dataloader
+    re-fetches each example every epoch -- can get a different sampled
+    subword segmentation of the same underlying text (subword
+    regularization / "BPE-dropout": Kudo 2018, "Subword Regularization").
+    Deliberately a per-instance setting rather than always-on: only the
+    *training* dataset should pass this (see `fine_tune`) -- the
+    evaluation dataset must stay deterministic, since sampled segmentation
+    would make validation-loss numbers vary run-to-run for reasons
+    unrelated to model quality.
     """
 
-    def __init__(self, examples: list[TranslationExample], tokenizer: Any, max_length: int):
+    def __init__(
+        self,
+        examples: list[TranslationExample],
+        tokenizer: Any,
+        max_length: int,
+        *,
+        subword_dropout_alpha: float | None = None,
+    ):
         self._examples = examples
         self._tokenizer = tokenizer
         self._max_length = max_length
+        self._subword_dropout_alpha = subword_dropout_alpha
 
     def __len__(self) -> int:
         return len(self._examples)
@@ -501,24 +688,124 @@ class TranslationDataset:
     def __getitem__(self, index: int) -> dict[str, Any]:
         example = self._examples[index]
         tagged_source = tag_source_text(example.source_text, example.target_lang)
-        model_inputs = self._tokenizer(
-            tagged_source, max_length=self._max_length, truncation=True
-        )
-
         target_tag_id = self._tokenizer.convert_tokens_to_ids(
             DIRECTION_TAGS[example.target_lang]
         )
         target_budget = max(1, self._max_length - 2)  # room for the tag + eos below
-        target_ids = self._tokenizer(
-            example.target_text,
-            add_special_tokens=False,
-            max_length=target_budget,
-            truncation=True,
-        )["input_ids"]
+
+        with self._encoding_context():
+            model_inputs = self._tokenizer(
+                tagged_source, max_length=self._max_length, truncation=True
+            )
+            target_ids = self._tokenizer(
+                example.target_text,
+                add_special_tokens=False,
+                max_length=target_budget,
+                truncation=True,
+            )["input_ids"]
+
         labels = [target_tag_id, *target_ids, self._tokenizer.eos_token_id]
 
         model_inputs["labels"] = labels
         return model_inputs
+
+    def _encoding_context(self) -> contextlib.AbstractContextManager[Any]:
+        if self._subword_dropout_alpha is None:
+            return contextlib.nullcontext(self._tokenizer)
+        return enable_subword_sampling(self._tokenizer, alpha=self._subword_dropout_alpha)
+
+
+def shift_tokens_right(labels: Any, pad_token_id: int, decoder_start_token_id: int) -> Any:
+    """Shift `labels` one position to the right to build the decoder's
+    teacher-forcing input, prepending `decoder_start_token_id` and
+    replacing any `-100` loss-ignore padding with `pad_token_id`.
+
+    A pure reimplementation of
+    `transformers.models.m2m_100.modeling_m2m_100.shift_tokens_right` (the
+    exact transform `M2M100ForConditionalGeneration.forward`'s own
+    `labels is not None` branch already performs internally) -- see
+    `attach_decoder_input_ids`'s docstring and
+    `tests/unit/test_decoder_input_ids.py` for why this needs to be
+    precomputed explicitly rather than left to that internal branch alone
+    (issue #182's label-smoothing crash fix).
+    """
+    shifted = labels.new_zeros(labels.shape)
+    shifted[:, 1:] = labels[:, :-1].clone()
+    shifted[:, 0] = decoder_start_token_id
+    shifted.masked_fill_(shifted == -100, pad_token_id)
+    return shifted
+
+
+def attach_decoder_input_ids(
+    batch: dict[str, Any], pad_token_id: int, decoder_start_token_id: int
+) -> dict[str, Any]:
+    """Mutate `batch` in place, adding a `decoder_input_ids` field computed
+    from its `labels` field via `shift_tokens_right` -- unless `batch` has
+    no (or a `None`) `labels` field, in which case this is a no-op.
+
+    ## Why this can't just be left to `DataCollatorForSeq2Seq`/the model
+
+    `DataCollatorForSeq2Seq(tokenizer, model=model)` only builds
+    `decoder_input_ids` itself when
+    `hasattr(model, "prepare_decoder_input_ids_from_labels")` -- a
+    convenience hook the installed `transformers` version's
+    `M2M100ForConditionalGeneration` no longer implements at all
+    (confirmed directly: `hasattr(...)` is `False` for this model class in
+    this version, though several other model families still define it).
+    Without label smoothing this silently doesn't matter, because
+    `Trainer.compute_loss` leaves `"labels"` in the batch it hands to
+    `model(**inputs)`, and `M2M100ForConditionalGeneration.forward`'s own
+    `if labels is not None: decoder_input_ids = shift_tokens_right(...)`
+    branch builds it internally instead. But `--label-smoothing > 0` makes
+    `Trainer` set a `label_smoother`, and `Trainer.compute_loss` then pops
+    `"labels"` out of the batch *before* calling the model (so it can
+    apply smoothing itself against the raw logits) -- so that internal
+    branch never fires, both `decoder_input_ids` and `decoder_inputs_embeds`
+    end up `None`, and `M2M100Decoder.forward`'s own "exactly one of these
+    two must be given" guard raises `ValueError: You cannot specify both
+    decoder_input_ids and decoder_inputs_embeds at the same time` -- a
+    real, confirmed (not assumed) incompatibility whose wording describes
+    the "both given" half of that guard, not the "neither given" half that
+    actually fires here. See `tests/unit/test_decoder_input_ids.py`'s
+    module docstring for the full traced call stack.
+
+    Computing `decoder_input_ids` here, unconditionally, *before*
+    `Trainer.compute_loss` gets a chance to pop `"labels"`, fixes this for
+    every value of `--label-smoothing` at once, without depending on a
+    model-specific hook this transformers version doesn't provide for
+    M2M100. It changes nothing for the existing (already-working, no
+    label smoothing) path: `shift_tokens_right` here computes the exact
+    same tensor the model's own internal branch would have, so passing it
+    in explicitly is a no-op change to what the decoder actually sees --
+    confirmed with a real training step in
+    `tests/integration/test_fine_tune_real_checkpoint.py`.
+    """
+    labels = batch.get("labels")
+    if labels is None:
+        return batch
+    batch["decoder_input_ids"] = shift_tokens_right(labels, pad_token_id, decoder_start_token_id)
+    return batch
+
+
+def build_data_collator(tokenizer: Any, model: Any) -> Callable[[list[dict[str, Any]]], Any]:
+    """Build the `data_collator` callable `fine_tune` passes to
+    `Seq2SeqTrainer`: the standard `transformers.DataCollatorForSeq2Seq`,
+    plus an explicit `attach_decoder_input_ids` pass (issue #182 -- see its
+    own docstring for the full label-smoothing-crash root cause) so
+    `decoder_input_ids` is always present in the collated batch, regardless
+    of whether `--label-smoothing` is enabled.
+    """
+    from transformers import DataCollatorForSeq2Seq
+
+    base_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+    pad_token_id = model.config.pad_token_id
+    decoder_start_token_id = model.config.decoder_start_token_id
+
+    def _collate(features: list[dict[str, Any]]) -> Any:
+        batch = base_collator(features)
+        return attach_decoder_input_ids(batch, pad_token_id, decoder_start_token_id)
+
+    return _collate
 
 
 def build_training_arguments(args: argparse.Namespace, num_train_examples: int) -> Any:
@@ -571,7 +858,21 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
         # to override.
         fp16=torch.cuda.is_available(),
         seed=args.seed,
-        save_strategy="no",
+        # Issue #182: per-epoch checkpoints, not "no" -- previously no
+        # intermediate checkpoint ever existed for any past run, which made
+        # checkpoint averaging (a cheap-tier quality lever worth measuring
+        # in its own dedicated future run) structurally impossible: there
+        # was nothing to average. `training/checkpoint_averaging.py`
+        # consumes the resulting `checkpoint-<step>` directories under
+        # `args.model_dir/checkpoints/`. Uses the epoch-based strategy
+        # (rather than a steps-based one) since "average the final N
+        # epochs" is this ticket's explicit framing and epoch boundaries
+        # are already meaningful checkpoints for this project's small
+        # per-run epoch counts (3-8 in every real run to date) -- a
+        # steps-based schedule would need its own tuning to land on
+        # comparable boundaries and isn't needed to make averaging
+        # possible.
+        save_strategy="epoch",
         report_to=[],
     )
 
@@ -593,15 +894,20 @@ def fine_tune(
     real multi-epoch fine-tune here would be issue #66's job, not this
     one's). `build_training_arguments` above is tested directly instead.
     """
-    from transformers import DataCollatorForSeq2Seq, Seq2SeqTrainer
+    from transformers import Seq2SeqTrainer
 
-    train_dataset = TranslationDataset(train_examples, tokenizer, args.max_length)
+    train_dataset = TranslationDataset(
+        train_examples,
+        tokenizer,
+        args.max_length,
+        subword_dropout_alpha=args.bpe_dropout_alpha,
+    )
     eval_dataset = (
         TranslationDataset(eval_examples, tokenizer, args.max_length) if eval_examples else None
     )
 
     training_args = build_training_arguments(args, len(train_examples))
-    data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
+    data_collator = build_data_collator(tokenizer, model)
 
     trainer = Seq2SeqTrainer(
         model=model,
@@ -757,6 +1063,7 @@ def run_training_job(
         init_model=args.init_model, model_source=model_source
     )
     tokenizer, model = model_loader(model_source)
+    apply_dropout_config(model, args.dropout)
 
     added_tokens = extend_vocabulary_for_examples(
         tokenizer,
@@ -840,6 +1147,15 @@ def run_training_job(
         "new_tokens_added": len(added_tokens),
         "resumed_from_checkpoint": bool(args.init_model),
     }
+    # Issue #182: both recorded only when explicitly set (mirroring
+    # vocab_extension_scoping's own "field absent = not applicable"
+    # convention just below), so a run that never opts into either lever
+    # renders an identical model card to one from before this ticket --
+    # no visual diff on every ordinary run just because these flags exist.
+    if args.dropout is not None:
+        hyperparameters["dropout"] = args.dropout
+    if args.bpe_dropout_alpha is not None:
+        hyperparameters["bpe_dropout_alpha"] = args.bpe_dropout_alpha
     # Omitted entirely (rather than recorded as some "unscoped" sentinel)
     # when the lineage isn't fully Kaqchikel-only scoped -- matching
     # evaluation.evaluate_checkpoint's existing "field absent = legacy"

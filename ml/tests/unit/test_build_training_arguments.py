@@ -50,6 +50,12 @@ def test_build_training_arguments_applies_regularization_and_schedule_defaults(t
     # fails at Trainer.train() time, not construction, so this can't be
     # left to callers to override).
     assert training_args.fp16 is torch.cuda.is_available()
+    # Issue #182: per-epoch checkpoints are the new default (previously
+    # "no" -- no intermediate checkpoints existed for any past run, making
+    # checkpoint averaging for a future run impossible). See
+    # training/checkpoint_averaging.py for the averaging utility this
+    # enables.
+    assert training_args.save_strategy == "epoch"
 
 
 def test_build_training_arguments_respects_cli_overrides(tmp_path):
