@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import torch
 
-from training.train import build_training_arguments, parse_args
+from training.checkpoint_averaging import DEFAULT_AVERAGE_N
+from training.train import DEFAULT_SAVE_TOTAL_LIMIT, build_training_arguments, parse_args
 
 
 def _args(tmp_path, **overrides):
@@ -50,6 +51,20 @@ def test_build_training_arguments_applies_regularization_and_schedule_defaults(t
     # fails at Trainer.train() time, not construction, so this can't be
     # left to callers to override).
     assert training_args.fp16 is torch.cuda.is_available()
+    # Issue #182: per-epoch checkpoints are the new default (previously
+    # "no" -- no intermediate checkpoints existed for any past run, making
+    # checkpoint averaging for a future run impossible). See
+    # training/checkpoint_averaging.py for the averaging utility this
+    # enables.
+    assert training_args.save_strategy == "epoch"
+    # Code review on PR #183: uncapped per-epoch checkpoints risk filling
+    # up a training instance's disk (each one is a full model + optimizer +
+    # scheduler + rng-state save). Bounded to a fixed margin above
+    # checkpoint_averaging's own default N, so the checkpoints averaging
+    # actually needs are never the ones a naive FIFO retention policy
+    # evicts first.
+    assert training_args.save_total_limit == DEFAULT_SAVE_TOTAL_LIMIT
+    assert DEFAULT_SAVE_TOTAL_LIMIT > DEFAULT_AVERAGE_N
 
 
 def test_build_training_arguments_respects_cli_overrides(tmp_path):

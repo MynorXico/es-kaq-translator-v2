@@ -658,6 +658,140 @@ def test_run_training_job_omits_scoping_when_continuing_from_a_pre_125_checkpoin
     assert "vocab_extension_scoping" not in card_text
 
 
+def test_run_training_job_applies_dropout_override_when_given(tmp_path, monkeypatch):
+    """Issue #182: `--dropout` must actually reach the loaded model, via
+    `apply_dropout_config` -- spied here rather than asserted against a
+    fully duck-typed fake model's internals, since the real submodule
+    shape this function depends on is only meaningful against the real
+    checkpoint (see tests/integration/test_dropout_real_checkpoint.py).
+    """
+    calls: list[float | None] = []
+
+    def spy_apply_dropout_config(model, dropout):
+        calls.append(dropout)
+
+    monkeypatch.setattr(train_module, "apply_dropout_config", spy_apply_dropout_config)
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--dropout",
+            "0.3",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    assert calls == [0.3]
+
+
+def test_run_training_job_does_not_apply_dropout_override_by_default(tmp_path, monkeypatch):
+    calls: list[float | None] = []
+
+    def spy_apply_dropout_config(model, dropout):
+        calls.append(dropout)
+
+    monkeypatch.setattr(train_module, "apply_dropout_config", spy_apply_dropout_config)
+
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(tmp_path / "model"),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    # apply_dropout_config is still called (it's a no-op on None itself --
+    # see its own unit tests), so run_training_job's wiring is
+    # unconditional; what must never happen is a *nonzero* override
+    # sneaking in when the flag was never passed.
+    assert calls == [None]
+
+
+def test_run_training_job_records_dropout_and_bpe_dropout_alpha_when_given(tmp_path, monkeypatch):
+    # apply_dropout_config's real submodule-walking logic needs a real
+    # model shape (config + modules()) -- covered separately by
+    # test_run_training_job_applies_dropout_override_when_given (spy) and
+    # tests/integration/test_dropout_real_checkpoint.py (real checkpoint).
+    # This test is only about model-card recording, so no-op it here.
+    monkeypatch.setattr(train_module, "apply_dropout_config", lambda model, dropout: None)
+    model_dir = tmp_path / "model"
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--dropout",
+            "0.3",
+            "--bpe-dropout-alpha",
+            "0.1",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "- **dropout**: 0.3" in card_text
+    assert "- **bpe_dropout_alpha**: 0.1" in card_text
+
+
+def test_run_training_job_omits_dropout_and_bpe_dropout_alpha_from_card_by_default(tmp_path):
+    model_dir = tmp_path / "model"
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "dropout" not in card_text
+    assert "bpe_dropout_alpha" not in card_text
+
+
 def test_run_training_job_omits_scoping_when_ancestor_checkpoint_has_no_model_card(tmp_path):
     """Same defensive fallback as the pre-#125 case above, for a checkpoint
     directory that has no `model_card.md` at all (e.g. one not produced by

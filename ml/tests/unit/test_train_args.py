@@ -45,6 +45,46 @@ def test_parse_args_reads_required_and_default_values(monkeypatch):
     # vocabulary trained fresh each run (issue #82) -- matches
     # training.subword_vocab.DEFAULT_VOCAB_SIZE.
     assert args.subword_vocab_size == 8000
+    # Issue #182: both new levers default to "off"/"untouched" so landing
+    # this ticket doesn't itself change any past run's default behavior --
+    # actually turning them on is a separate, maintainer-approved
+    # experiment.
+    assert args.dropout is None
+    assert args.bpe_dropout_alpha is None
+
+
+def test_parse_args_reads_dropout_override():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--dropout",
+            "0.3",
+        ]
+    )
+
+    assert args.dropout == 0.3
+
+
+def test_parse_args_reads_bpe_dropout_alpha_override():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--bpe-dropout-alpha",
+            "0.1",
+        ]
+    )
+
+    assert args.bpe_dropout_alpha == 0.1
 
 
 def test_parse_args_reads_subword_vocab_size_override():

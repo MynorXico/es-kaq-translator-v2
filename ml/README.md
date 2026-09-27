@@ -161,8 +161,10 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
 - `training/` — SageMaker training job entrypoint (`training/train.py`,
   see below), the code that submits/monitors a real training job and
   registers it in SageMaker Model Registry (`training/submit_job.py`, see
-  "Job submission" below), and tokenizer/vocabulary extension for
-  Kaqchikel (see below).
+  "Job submission" below), tokenizer/vocabulary extension for
+  Kaqchikel (see below), and a post-hoc checkpoint-averaging utility
+  (`training/checkpoint_averaging.py`, issue #182 -- see "Cheap-tier
+  quality-experiment prep" below).
 - `evaluation/` — BLEU/chrF evaluation harness and model card generation
   (see below).
 - `deployment/` — custom SageMaker inference handler and the script that
@@ -909,7 +911,9 @@ see "Continuing training from a checkpoint" below), `--epochs`,
 `--gradient-accumulation-steps` (regularization/schedule settings, issue
 #79 -- see "Regularization and schedule settings" below),
 `--subword-vocab-size` (default 8000, issue #82 -- see "Kaqchikel subword
-vocabulary" above),
+vocabulary" above), `--dropout`, `--bpe-dropout-alpha` (cheap-tier quality
+levers prepared -- not yet evaluated -- by issue #182; see "Cheap-tier
+quality-experiment prep" below),
 `--model-package-group-name`, `--approval-status` (default
 `PendingManualApproval` -- a human reviews BLEU/chrF before approving),
 `--no-wait` (submit without blocking/monitoring; also skips registration,
@@ -964,18 +968,60 @@ to `--batch-size * this`) to close that gap. `fp16=True` is also now
 hardcoded in `build_training_arguments` (a fixed real-GPU speed/cost
 optimization, not a per-run experiment).
 
-**`--label-smoothing` defaults to 0.0 (disabled), not the "cheap win"
-value it started as.** The first real run using these settings crashed
-immediately: `ValueError: You cannot specify both decoder_input_ids and
-decoder_inputs_embeds at the same time`, from `label_smoothing_factor >
-0`'s interaction with M2M100's forward signature under the installed
-`transformers` version -- reproduced locally against the real checkpoint
-with a tiny dataset (not assumed), isolated by testing each new setting
-independently: warmup/weight-decay/gradient-accumulation all work fine
-together, only label smoothing crashes.
-`tests/integration/test_fine_tune_real_checkpoint.py` guards against this
-regressing silently again. Cost of the real run that surfaced this: ~$0.08
-(371s billed, killed almost immediately).
+**`--label-smoothing` defaulted to 0.0 (disabled) from issue #79 through
+issue #182, not the "cheap win" value it started as.** The first real run
+using these settings crashed immediately: `ValueError: You cannot specify
+both decoder_input_ids and decoder_inputs_embeds at the same time` --
+reproduced locally against the real checkpoint with a tiny dataset (not
+assumed), isolated by testing each new setting independently: warmup/
+weight-decay/gradient-accumulation all worked fine together, only label
+smoothing crashed. Cost of the real run that surfaced this: ~$0.08 (371s
+billed, killed almost immediately).
+
+**Issue #182 root-caused and fixed this crash properly, instead of leaving
+the flag disabled indefinitely.** The error's own wording ("both ... at the
+same time") is misleading -- tracing the actual call stack against the
+installed `transformers` version showed the real defect is the opposite:
+*neither* `decoder_input_ids` nor `decoder_inputs_embeds` was reaching
+`M2M100Decoder.forward` at all when label smoothing was enabled.
+`transformers.DataCollatorForSeq2Seq(tokenizer, model=model)` only builds
+`decoder_input_ids` itself when
+`hasattr(model, "prepare_decoder_input_ids_from_labels")` -- and
+`M2M100ForConditionalGeneration` no longer defines that method at all in
+the installed `transformers` version (confirmed directly: `hasattr(...)`
+is `False`, though several other model families -- bart, t5, mbart,
+pegasus, ... -- still define it). This was invisible without label
+smoothing, because `M2M100ForConditionalGeneration.forward`'s own `if
+labels is not None: decoder_input_ids = shift_tokens_right(...)` branch
+built it internally in that case -- but `--label-smoothing > 0` makes
+`Trainer` pop `labels` out of the batch *before* calling the model (so it
+can apply smoothing itself against the raw logits), so that internal
+fallback never ran either, leaving both decoder-input fields unset and
+tripping `M2M100Decoder.forward`'s "exactly one of these must be given"
+guard.
+
+The fix (`training.train.build_data_collator`/
+`attach_decoder_input_ids`/`shift_tokens_right`) computes
+`decoder_input_ids` explicitly, unconditionally, in the data collator --
+before `Trainer.compute_loss` ever gets a chance to pop `labels` -- using
+a pure reimplementation of the exact shift-right transform the model's own
+(now effectively dead, for this use) internal branch performed, so it's a
+no-op change to what the decoder actually sees for every already-working
+(no label smoothing) run. `tests/integration/test_fine_tune_real_checkpoint.py`
+now runs a real training step with `label_smoothing_factor=0.2` and
+confirms it no longer crashes -- see
+`training.train.attach_decoder_input_ids`'s docstring and
+`tests/unit/test_decoder_input_ids.py`'s module docstring for the full
+traced root cause. `--label-smoothing` still defaults to 0.0: literature on
+low-resource NMT fine-tuning (Sennrich & Zhang 2019, "Revisiting
+Low-Resource Neural Machine Translation: A Case Study", ACL 2019 --
+specifically studies larger label-smoothing factors as one of several
+hyperparameters worth re-tuning for low-resource settings, as part of a
+broader set of best practices for adapting NMT systems to small data
+sizes) flags this as disproportionately helpful at small data sizes, but
+actually changing the default is a separate, maintainer-approved
+real-training-run experiment (issue #182's own scope is the code fix only,
+not evaluating it).
 
 `--warmup-ratio` is converted to an absolute `warmup_steps` count inside
 `build_training_arguments` rather than passed straight through --
@@ -1001,6 +1047,137 @@ adds entire Kaqchikel word-forms as atomic tokens rather than subwords,
 likely a bigger factor for an agglutinative language) was flagged as a
 follow-up, not addressed here. **That follow-up is issue #82** -- see
 "Kaqchikel subword vocabulary (`training/subword_vocab.py`)" above.
+
+### Cheap-tier quality-experiment prep (issue #182)
+
+A research pass on further model-improvement options identified four
+"cheap tier" levers -- each cheap to actually *run* (~$1.50-4 per real
+training job) but, until this ticket, not even possible to try, since the
+underlying code didn't support them. **This ticket is code-level prep
+only: no training job was submitted as part of it.** Each lever below
+still needs its own real, controlled, maintainer-approved training run to
+actually measure a BLEU/chrF effect -- changing only that one lever
+relative to the current best checkpoint's config, the same "isolate one
+variable" discipline as issue #82's own subword-vocabulary follow-up.
+
+1. **The label-smoothing crash is fixed** (not just left disabled) -- see
+   "Regularization and schedule settings" above for the full root cause
+   and fix. `--label-smoothing` still defaults to 0.0; the literature-
+   informed ~0.1-0.2 experiment is a separate future run.
+2. **`--dropout`** (default `None`, untouched) overrides the model's
+   general (non-attention) dropout probability before fine-tuning --
+   `training.train.apply_dropout_config`. Threading this through required
+   more than setting `model.config.dropout`: `M2M100Encoder`/
+   `M2M100Decoder`/`M2M100EncoderLayer`/`M2M100DecoderLayer` each copy
+   `config.dropout` into their own `self.dropout` plain-float attribute
+   once, at `__init__` time, so a loaded checkpoint's already-constructed
+   submodules need their own `.dropout` attribute overwritten directly --
+   confirmed against the real `facebook/m2m100_418M` checkpoint's actual
+   module tree in `tests/integration/test_dropout_real_checkpoint.py`.
+   Deliberately never touches `M2M100Attention`'s own `.dropout` attribute
+   (a different value, `config.attention_dropout`) -- this ticket doesn't
+   add a separate `--attention-dropout` flag. Identifies attention modules
+   to skip via `isinstance(module, M2M100Attention)` (lazily imported from
+   `transformers.models.m2m_100.modeling_m2m_100`), not a
+   `type(module).__name__` string match -- PR #183 review flagged the
+   name-based version as fragile against a future transformers version
+   introducing an attention subclass (e.g. an SDPA/FlashAttention variant),
+   which `isinstance` still correctly recognizes via the class hierarchy.
+3. **`--bpe-dropout-alpha`** (default `None`, disabled) enables
+   SentencePiece subword sampling ("BPE-dropout" / subword regularization,
+   Kudo 2018, "Subword Regularization") for the *training* dataset's
+   tokenization only, via `training.train.enable_subword_sampling`. Rather
+   than baking `enable_sampling=True` into the shared tokenizer instance at
+   construction time (`sp_model_kwargs`, which would also make post-
+   training validation-set generation and any later re-evaluation
+   non-deterministic), this monkeypatches `tokenizer._tokenize` only for
+   the lifetime of each training-time encode call inside
+   `TranslationDataset.__getitem__`, restoring the original immediately
+   after -- every other user of the same shared tokenizer instance (vocab
+   extension, `generate_translations`, `evaluation.evaluate_checkpoint`)
+   is unaffected. Confirmed against the real `facebook/m2m100_418M`
+   tokenizer that sampling genuinely produces different segmentations
+   across repeated calls at a real alpha
+   (`tests/integration/test_train_dataset_real_tokenizer.py`), not just
+   that the right kwargs reach a fake. Deliberately independent of
+   `training/vocab_extension.py`/`vocab_gap.py`/`subword_vocab.py`: none
+   of those call `tokenizer.sp_model.encode` on the live fine-tuning
+   tokenizer at all, so this needed no changes to that pipeline.
+4. **`save_strategy="epoch"` is the new default** (previously `"no"` --
+   no intermediate checkpoint ever existed for any past training run,
+   making checkpoint averaging structurally impossible: there was nothing
+   to average). Paired with `save_total_limit=DEFAULT_SAVE_TOTAL_LIMIT`
+   (`training.checkpoint_averaging.DEFAULT_AVERAGE_N + 2`, derived from --
+   not independently hardcoded next to -- the averaging utility's own
+   default `N`) so per-epoch checkpoints (each a full model + optimizer +
+   scheduler + rng-state save) don't grow unbounded across a longer run
+   and risk filling a training instance's disk; `transformers`' own FIFO
+   eviction always keeps the most recent checkpoints, exactly the ones
+   averaging needs. `training/checkpoint_averaging.py` is the new,
+   independent post-hoc utility this enables: `find_checkpoint_dirs` /
+   `select_last_n_checkpoints` locate a training run's last N
+   `checkpoint-<step>` directories (sorted numerically, not
+   lexicographically), and `average_checkpoints` elementwise-averages
+   their `model.safetensors` weights (via `average_state_dicts`) into a
+   new, standalone checkpoint directory, copying over the
+   checkpoint-invariant non-weight files (`config.json`,
+   `generation_config.json`, ...) from the most recent one and explicitly
+   excluding training-progress files (`optimizer.pt`, `scheduler.pt`,
+   `rng_state.pth`, `trainer_state.json`, `training_args.bin`) that
+   describe training progress, not the averaged weights themselves.
+   `average_state_dicts` processes checkpoints one at a time via a running
+   sum (accepting any `Iterable`, not just a `list`) rather than loading
+   every checkpoint's full weights into memory simultaneously -- PR #183
+   review flagged the original list-based version's peak memory scaling
+   with N as a real risk for a utility meant to be run casually (e.g. a
+   laptop) once N real ~2GB checkpoints are involved;
+   `average_checkpoints` passes a generator expression, never a
+   pre-built list, and a real, tracked-allocation test
+   (`tests/integration/test_checkpoint_averaging_pipeline.py`) confirms an
+   earlier checkpoint's weights are actually garbage-collected before a
+   later one is loaded, not just that the final result looks correct.
+   **Does not copy tokenizer files** -- `Seq2SeqTrainer`'s
+   own per-checkpoint saves never include them (only
+   `training.train.save_model_and_tokenizer`'s one final save, to the
+   run's own `--model-dir`, does); copy those separately before loading an
+   averaged checkpoint with `from_pretrained`. Only supports single-file
+   (non-sharded) `model.safetensors` checkpoints -- a real, current
+   limitation given every real training run's checkpoint fits comfortably
+   under the sharding threshold for this model's size, not a hypothetical
+   one designed around preemptively. Tested against tiny fixture
+   checkpoint directories (`tests/unit/test_checkpoint_averaging.py`,
+   `tests/integration/test_checkpoint_averaging_pipeline.py`), never a
+   real checkpoint -- this item has no retraining cost by itself, so
+   there's nothing that needs verifying against real weights the way, say,
+   `--dropout`'s submodule-walking logic did. Run it directly:
+   ```sh
+   uv run python -m training.checkpoint_averaging \
+     <model-dir>/checkpoints ./averaged-checkpoint --n 3
+   ```
+
+**All three tunable levers above (label smoothing, dropout, BPE-dropout)
+default to whatever leaves existing behavior completely unchanged** (0.0
+and `None`/`None` respectively) -- landing this ticket doesn't itself
+change any future run's outcome unless a maintainer explicitly opts a
+specific run into one of them. `submit_job.py --dropout`/
+`--bpe-dropout-alpha` mirror `train.py`'s own flags and are omitted from a
+submitted job's hyperparameters entirely (rather than passed through as a
+literal `"None"`) when left at their defaults. `submit_job.py main()`'s own
+`run_metadata["hyperparameters"]` (used for `register_model`'s
+`CustomerMetadataProperties`, a *separate* dict reconstructed from the
+submitted job's hyperparameters rather than reusing them directly) mirrors
+that same conditional inclusion -- PR #183 review caught this
+reconstruction hardcoding a fixed key list that predated both flags, which
+would have silently left a real `--dropout`/`--bpe-dropout-alpha` run's
+Model Registry entry with no record of which experiment produced it, even
+though the job itself trained correctly.
+
+`training.train.shift_tokens_right` (the label-smoothing fix's core
+building block) delegates to the real
+`transformers.models.m2m_100.modeling_m2m_100.shift_tokens_right` rather
+than maintaining an independent reimplementation of the same transform --
+PR #183 review flagged the original reimplementation as a needless
+drift risk against future transformers versions.
 
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call), resolves the training container image URI

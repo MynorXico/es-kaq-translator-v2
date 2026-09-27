@@ -25,6 +25,17 @@ from training.train import TranslationDataset
 
 MODEL_NAME = "facebook/m2m100_418M"
 
+# A source/target pair long and varied enough that SentencePiece's real
+# subword sampling (nbest_size=-1) has many valid segmentations to choose
+# between -- confirmed empirically (see this ticket's own investigation)
+# to produce different segmentations across repeated real encode() calls
+# at this alpha, unlike a short word/phrase with only one or two plausible
+# splits. Plain Latin-alphabet text only -- this test is purely about
+# confirming the sampling wiring against the real tokenizer, not about
+# realistic Kaqchikel content.
+_LONG_SOURCE_TEXT = "Buenos días, ¿cómo está usted el día de hoy en la comunidad?"
+_LONG_TARGET_TEXT = "Buenos días, ¿cómo está usted el día de hoy en la comunidad?"
+
 
 def _real_tokenizer() -> M2M100Tokenizer:
     tokenizer = M2M100Tokenizer.from_pretrained(MODEL_NAME)
@@ -63,6 +74,53 @@ def test_labels_start_with_the_direction_tag_token_and_end_with_eos():
     assert labels[-1] == tokenizer.eos_token_id
     # Real subword content in between -- not just the tag and eos.
     assert len(labels) > 2
+
+
+def test_subword_dropout_alpha_produces_varying_segmentations_across_calls():
+    """Issue #182: `subword_dropout_alpha` must actually change what
+    SentencePiece encodes to, against the real tokenizer -- a duck-typed
+    fake (see `tests/unit/test_subword_dropout.py`) can confirm the
+    *wiring* (the right kwargs reach `sp_model.encode`) but not that real
+    SentencePiece sampling genuinely varies output, which is the whole
+    point of BPE-dropout / subword regularization.
+    """
+    tokenizer = _real_tokenizer()
+    examples = [
+        TranslationExample(
+            source_text=_LONG_SOURCE_TEXT,
+            target_text=_LONG_TARGET_TEXT,
+            source_lang="es",
+            target_lang="cak",
+        ),
+    ]
+    dataset = TranslationDataset(
+        examples, tokenizer, max_length=64, subword_dropout_alpha=0.1
+    )
+
+    observed_input_id_sequences = {tuple(dataset[0]["input_ids"]) for _ in range(30)}
+
+    assert len(observed_input_id_sequences) > 1
+
+
+def test_subword_dropout_alpha_none_keeps_encoding_deterministic():
+    """Control case: without opting in, the same example must always
+    encode to the exact same ids (the pre-existing, deterministic
+    behavior every past training run relied on).
+    """
+    tokenizer = _real_tokenizer()
+    examples = [
+        TranslationExample(
+            source_text=_LONG_SOURCE_TEXT,
+            target_text=_LONG_TARGET_TEXT,
+            source_lang="es",
+            target_lang="cak",
+        ),
+    ]
+    dataset = TranslationDataset(examples, tokenizer, max_length=64)
+
+    observed_input_id_sequences = {tuple(dataset[0]["input_ids"]) for _ in range(10)}
+
+    assert len(observed_input_id_sequences) == 1
 
 
 def test_labels_respect_max_length_budget():
