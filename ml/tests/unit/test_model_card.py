@@ -61,3 +61,33 @@ def test_render_model_card_is_markdown_with_a_title():
     card = render_model_card(make_card_data())
 
     assert card.startswith("# ")
+
+
+def test_render_model_card_includes_per_direction_metrics_when_present():
+    # Issue #178: every combined-direction number mixes es->cak and cak->es
+    # -- the model card must be able to report both separately, which is
+    # also the concrete evidence ADR 0006 needs for one-model-vs-two.
+    card = render_model_card(
+        make_card_data(
+            per_direction_metrics={
+                "es->cak": MetricsResult(bleu=10.5, chrf=30.5, num_sentences=1867),
+                "cak->es": MetricsResult(bleu=20.5, chrf=40.5, num_sentences=1868),
+            }
+        )
+    )
+
+    assert "## Metrics by direction" in card
+    assert "es->cak" in card
+    assert "cak->es" in card
+    assert "10.5" in card
+    assert "30.5" in card
+    assert "20.5" in card
+    assert "40.5" in card
+    assert "1,867" in card or "1867" in card
+    assert "1,868" in card or "1868" in card
+
+
+def test_render_model_card_omits_per_direction_section_when_absent():
+    card = render_model_card(make_card_data(per_direction_metrics=None))
+
+    assert "Metrics by direction" not in card

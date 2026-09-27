@@ -81,6 +81,61 @@ def test_run_evaluation_keeps_a_blank_hypothesis_line_aligned(tmp_path):
     assert metrics.num_sentences == 4
 
 
+def test_run_evaluation_computes_per_direction_metrics_when_directions_path_given(tmp_path):
+    # Issue #178: bucket predictions/references by direction before scoring,
+    # and surface both directions' numbers on the model card, not just the
+    # combined score.
+    predictions = tmp_path / "predictions.txt"
+    references = tmp_path / "references.txt"
+    directions = tmp_path / "directions.txt"
+    predictions.write_text("Utz awäch.\nHola.\n", encoding="utf-8")
+    references.write_text("Utz awäch.\nAdios.\n", encoding="utf-8")
+    directions.write_text("es->cak\ncak->es\n", encoding="utf-8")
+
+    _metrics, card_path = run_evaluation(
+        predictions_path=predictions,
+        references_path=references,
+        run_metadata={
+            "run_id": "smoke-test-run",
+            "timestamp": "2026-09-14T00:00:00Z",
+            "base_model": "facebook/m2m100_418M",
+            "direction": "both",
+            "corpus_version": "fixture-v0",
+            "train_sentence_count": 100,
+            "hyperparameters": {},
+        },
+        output_path=tmp_path / "model-card.md",
+        directions_path=directions,
+    )
+
+    card_text = card_path.read_text(encoding="utf-8")
+    assert "## Metrics by direction" in card_text
+    assert "es->cak" in card_text
+    assert "cak->es" in card_text
+
+
+def test_run_evaluation_omits_per_direction_metrics_without_directions_path(tmp_path):
+    output_path = tmp_path / "model-card.md"
+
+    run_evaluation(
+        predictions_path=FIXTURES / "eval_predictions.txt",
+        references_path=FIXTURES / "eval_references.txt",
+        run_metadata={
+            "run_id": "smoke-test-run",
+            "timestamp": "2026-09-14T00:00:00Z",
+            "base_model": "facebook/m2m100_418M",
+            "direction": "cak-to-es",
+            "corpus_version": "fixture-v0",
+            "train_sentence_count": 100,
+            "hyperparameters": {"learning_rate": 3e-5, "epochs": 1},
+        },
+        output_path=output_path,
+    )
+
+    card_text = output_path.read_text(encoding="utf-8")
+    assert "Metrics by direction" not in card_text
+
+
 def test_run_evaluation_rejects_mismatched_line_counts(tmp_path):
     bad_predictions = tmp_path / "predictions.txt"
     bad_predictions.write_text("Only one line.\n")

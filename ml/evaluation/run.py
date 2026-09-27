@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from evaluation.metrics import MetricsResult, compute_metrics
+from evaluation.metrics import MetricsResult, compute_metrics, compute_metrics_by_direction
 from evaluation.model_card import ModelCardData, render_model_card
 
 
@@ -42,6 +42,8 @@ def run_evaluation(
     references_path: str | Path,
     run_metadata: dict[str, Any],
     output_path: str | Path,
+    *,
+    directions_path: str | Path | None = None,
 ) -> tuple[MetricsResult, Path]:
     """Compute metrics for one run and write its model card to `output_path`.
 
@@ -56,6 +58,14 @@ def run_evaluation(
             derived from `references_path`, not taken from this dict, so
             it can't drift out of sync with the actual file evaluated.
         output_path: where to write the rendered Markdown model card.
+        directions_path: optional file with one direction label per line
+            (e.g. `"es->cak"`/`"cak->es"`), aligned 1:1 with
+            `predictions_path`/`references_path` by line order (issue
+            #178). When given, per-direction BLEU/chrF is also computed
+            (`evaluation.metrics.compute_metrics_by_direction`) and
+            included on the rendered model card, in addition to the
+            combined score. When omitted, the model card has no
+            per-direction section at all, matching prior behavior.
 
     Returns:
         A tuple of the computed `MetricsResult` and the `Path` the model
@@ -65,6 +75,13 @@ def run_evaluation(
     references = _read_lines(references_path)
 
     metrics = compute_metrics(hypotheses=hypotheses, references=references)
+
+    per_direction_metrics = None
+    if directions_path is not None:
+        directions = _read_lines(directions_path)
+        per_direction_metrics = compute_metrics_by_direction(
+            hypotheses=hypotheses, references=references, directions=directions
+        )
 
     card_data = ModelCardData(
         run_id=run_metadata["run_id"],
@@ -76,6 +93,7 @@ def run_evaluation(
         validation_sentence_count=len(references),
         hyperparameters=run_metadata["hyperparameters"],
         metrics=metrics,
+        per_direction_metrics=per_direction_metrics,
         notes=run_metadata.get("notes"),
     )
 

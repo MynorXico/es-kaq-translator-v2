@@ -208,11 +208,29 @@ suite.
   the private ALMG corpus must never leak into what is effectively a
   public-facing artifact (ADR 0002).
 - `evaluation/run.py` — `run_evaluation(predictions_path, references_path,
-  run_metadata, output_path)` ties the two together: reads a predictions
-  file and a references file (one sentence per line, aligned by line
-  order), computes metrics, and writes a Markdown model card to
-  `output_path`. Every path is caller-supplied — nothing here hardcodes a
-  location for the real corpus.
+  run_metadata, output_path, *, directions_path=None)` ties the two
+  together: reads a predictions file and a references file (one sentence
+  per line, aligned by line order), computes metrics, and writes a
+  Markdown model card to `output_path`. Every path is caller-supplied —
+  nothing here hardcodes a location for the real corpus.
+- **Per-direction BLEU/chrF (issue #178).** Every combined-direction
+  number reported before this ticket mixed es->cak and cak->es into one
+  score, hiding whether one direction was starving the other under
+  shared, direction-tagged training — the concrete evidence
+  [ADR 0006](../docs/adr/0006-translation-direction-handling.md) (still
+  "Proposed") needs to decide one-model-vs-two.
+  `evaluation.metrics.compute_metrics_by_direction(hypotheses, references,
+  directions)` buckets hypotheses/references by an aligned direction label
+  (e.g. `"es->cak"`/`"cak->es"`) and scores each bucket separately.
+  `run_evaluation`'s optional `directions_path` (one direction label per
+  line, aligned with `predictions_path`/`references_path`) wires this into
+  the model card automatically via a new `## Metrics by direction` section
+  on `ModelCardData`/`render_model_card`. Both `training.train.
+  run_training_job` and `evaluation.evaluate_checkpoint.
+  run_checkpoint_evaluation` now write a `directions.txt` alongside their
+  `predictions.txt`/`references.txt` and pass it through, so every run's
+  model card going forward reports both directions, not just a one-off
+  check.
 - Per ADR 0001, every training run should be traceable: register the
   generated model card (corpus version + hyperparameters + metrics)
   alongside the model in SageMaker Model Registry rather than producing
@@ -714,6 +732,37 @@ reproduce the crash itself (`model.device` is always `"cpu"` there too),
 so `tests/unit/test_generate_translations.py` instead directly asserts
 the `.to(model.device)` call happened, via a spy on a fake encoding
 object, so this can't silently regress even without real GPU hardware.
+
+### Decode configuration: beam search, confirmed (issue #178)
+
+Neither `generate_translations` (here) nor `evaluate_checkpoint.py`'s
+generation call ever passes `num_beams` explicitly to `model.generate()`
+— only `forced_bos_token_id` and `max_length`. That means whatever decode
+strategy is actually in effect comes entirely from the checkpoint's own
+saved `generation_config.json`, not from anything in this repo's code.
+Issue #178 confirmed this directly against a real checkpoint (v7,
+`run-20260926T060000Z`) rather than assuming it either way: `tar xzf
+model.tar.gz generation_config.json` shows `"num_beams": 5,
+"early_stopping": true`, inherited unmodified from `facebook/m2m100_418M`'s
+own `generation_config.json` through every `save_pretrained`/
+`from_pretrained` round trip in the fine-tuning pipeline. Loading the real
+checkpoint and calling `model.generate()` exactly the way
+`generate_translations` does (no `num_beams` kwarg) produces output that
+measurably differs from an explicit `num_beams=1` (greedy) call on the
+same input, confirming beam search is genuinely active at generation time,
+not just present-but-ignored in the config file. **Generation has been
+using real beam search (width 5) all along** — this was not a
+silently-greedy fallback bug.
+
+A decode-parameter sweep (`num_beams` in {3, 5, 8}, plus
+`length_penalty`/`no_repeat_ngram_size` variations) was run against the
+same v7 checkpoint on a representative sample of the validation set; see
+issue #125's comment thread for the full numeric results and
+recommendation. This was a pure diagnostic (no retraining, no code
+change to `generate_translations`'s decode parameters) — if a decode
+config change is adopted from that sweep, it should land as its own
+follow-up ticket with its own test coverage, not folded silently into
+this one.
 
 ### Direction handling: one multilingual model, tagged
 

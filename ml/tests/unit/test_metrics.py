@@ -9,7 +9,7 @@ validation set.
 
 import pytest
 
-from evaluation.metrics import compute_metrics
+from evaluation.metrics import compute_metrics, compute_metrics_by_direction
 
 REFERENCES = [
     "Xa jun q'ij xub'än ri samaj.",
@@ -49,3 +49,41 @@ def test_compute_metrics_returns_bleu_and_chrf_fields():
 def test_compute_metrics_rejects_mismatched_lengths():
     with pytest.raises(ValueError):
         compute_metrics(hypotheses=["one", "two"], references=["only one reference"])
+
+
+def test_compute_metrics_by_direction_buckets_scores_per_direction():
+    # Issue #178: every reported number so far mixed es->cak and cak->es
+    # into a single score. A near-perfect es->cak bucket must not be
+    # diluted by a completely-wrong cak->es bucket, and vice versa.
+    hypotheses = [REFERENCES[0], "gibberish nonsense", REFERENCES[1], "más gibberish"]
+    references = [
+        REFERENCES[0],
+        "Buenas tardes a todos ustedes.",
+        REFERENCES[1],
+        "Buenos días a todos.",
+    ]
+    directions = ["es->cak", "cak->es", "es->cak", "cak->es"]
+
+    result = compute_metrics_by_direction(
+        hypotheses=hypotheses, references=references, directions=directions
+    )
+
+    assert set(result.keys()) == {"es->cak", "cak->es"}
+    assert result["es->cak"].num_sentences == 2
+    assert result["cak->es"].num_sentences == 2
+    assert result["es->cak"].bleu == pytest.approx(100.0, abs=1e-6)
+    assert result["cak->es"].bleu < 10.0
+
+
+def test_compute_metrics_by_direction_rejects_mismatched_lengths():
+    with pytest.raises(ValueError):
+        compute_metrics_by_direction(
+            hypotheses=["one"], references=["one", "two"], directions=["es->cak", "es->cak"]
+        )
+
+
+def test_compute_metrics_by_direction_rejects_a_single_unlabeled_direction():
+    with pytest.raises(ValueError):
+        compute_metrics_by_direction(
+            hypotheses=["one", "two"], references=["one", "two"], directions=["es->cak"]
+        )

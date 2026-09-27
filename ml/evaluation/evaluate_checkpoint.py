@@ -709,13 +709,20 @@ def run_checkpoint_evaluation(
         model, tokenizer, val_examples, max_length=args.max_length, batch_size=args.batch_size
     )
     references = [example.target_text for example in val_examples]
+    # Issue #178: recorded alongside predictions/references so BLEU/chrF can
+    # be bucketed per direction (es->cak vs. cak->es) rather than only ever
+    # reported as one combined number -- see evaluation.run.run_evaluation's
+    # `directions_path` and evaluation.metrics.compute_metrics_by_direction.
+    directions = [f"{example.source_lang}->{example.target_lang}" for example in val_examples]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = output_dir / "predictions.txt"
     references_path = output_dir / "references.txt"
+    directions_path = output_dir / "directions.txt"
     predictions_path.write_text("\n".join(hypotheses) + "\n", encoding="utf-8")
     references_path.write_text("\n".join(references) + "\n", encoding="utf-8")
+    directions_path.write_text("\n".join(directions) + "\n", encoding="utf-8")
 
     run_metadata = {
         "run_id": run_id,
@@ -766,7 +773,11 @@ def run_checkpoint_evaluation(
 
     model_card_path = output_dir / "model_card.md"
     _metrics, model_card_path = run_evaluation(
-        predictions_path, references_path, run_metadata, model_card_path
+        predictions_path,
+        references_path,
+        run_metadata,
+        model_card_path,
+        directions_path=directions_path,
     )
     return model_card_path
 
