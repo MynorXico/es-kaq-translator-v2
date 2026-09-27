@@ -119,6 +119,21 @@ def fake_translator(model, tokenizer, examples, **kwargs):
     return [f"{DIRECTION_TAGS[ex.target_lang]}::{ex.target_text}" for ex in examples]
 
 
+def capturing_translator_factory():
+    """Builds a fake translator that records the kwargs it was called with
+    (issue #180: confirms --num-beams reaches generate_translations), while
+    still returning real-shaped hypotheses like fake_translator above.
+    """
+    calls: list[dict] = []
+
+    def _translator(model, tokenizer, examples, **kwargs):
+        calls.append(kwargs)
+        return [f"{DIRECTION_TAGS[ex.target_lang]}::{ex.target_text}" for ex in examples]
+
+    _translator.calls = calls
+    return _translator
+
+
 def _base_args(tmp_path, **overrides):
     output_dir = tmp_path / "output"
     argv = [
@@ -188,6 +203,41 @@ def test_run_checkpoint_evaluation_wires_checkpoint_through_to_model_card(tmp_pa
     assert "## Metrics by direction" in card_text
     assert "es->cak" in card_text
     assert "cak->es" in card_text
+
+
+def test_run_checkpoint_evaluation_defaults_num_beams_to_five(tmp_path):
+    # Issue #180: num_beams must be an explicit, configurable parameter --
+    # not a silently-inherited default -- threaded from this script's own
+    # CLI through to generate_translations.
+    args, _ = _base_args(tmp_path)
+    translator = capturing_translator_factory()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=translator,
+    )
+
+    assert translator.calls[0]["num_beams"] == 5
+
+
+def test_run_checkpoint_evaluation_threads_a_caller_supplied_num_beams_through(tmp_path):
+    args, _ = _base_args(tmp_path, num_beams=8)
+    translator = capturing_translator_factory()
+
+    model_card_path = run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=translator,
+    )
+
+    assert translator.calls[0]["num_beams"] == 8
+    card_text = model_card_path.read_text(encoding="utf-8")
+    assert "- **num_beams**: 8" in card_text
 
 
 def test_run_checkpoint_evaluation_never_extends_vocabulary(tmp_path):

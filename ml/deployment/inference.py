@@ -79,6 +79,18 @@ SUPPORTED_LANGS = (SPANISH, KAQCHIKEL)
 # this max sequence length, so generation should match it too.
 DEFAULT_MAX_LENGTH = 128
 
+# Matches training/train.py's own DEFAULT_NUM_BEAMS. Before issue #180, this
+# real-time serving path never passed `num_beams` to `model.generate()` at
+# all, so beam width was whatever the deployed checkpoint's own
+# `generation_config.json` happened to specify -- an implicit, easy-to-miss
+# dependency rather than a real, documented, overridable parameter of this
+# module's own generation code. See `training.train.generate_translations`'s
+# docstring and issue #178's decode-parameter sweep for the full context;
+# this is a plain module-level constant (not imported from training.train)
+# so this deployment artifact's own decode config stays self-contained and
+# independently changeable without touching the training entrypoint.
+DEFAULT_NUM_BEAMS = 5
+
 
 @dataclass(frozen=True)
 class InferenceRequest:
@@ -156,23 +168,33 @@ def translate(
     request: InferenceRequest,
     *,
     max_length: int = DEFAULT_MAX_LENGTH,
+    num_beams: int = DEFAULT_NUM_BEAMS,
 ) -> str:
     """Generate a single translation for `request`, mirroring
     `training.train.generate_translations`'s direction-tag mechanism for a
     single real-time request instead of a batch of evaluation examples:
     prepend the target language's direction tag to the source text, use it
-    as `forced_bos_token_id`, and generate.
+    as `forced_bos_token_id`, and generate with beam search.
 
-    No `num_beams` is passed to `model.generate()` here, same as
-    `generate_translations` -- decode strategy comes entirely from the
-    loaded checkpoint's own `generation_config.json`. Issue #178 confirmed
-    directly against the real v7 checkpoint that this is beam search
-    (`num_beams: 5`, inherited unmodified from `facebook/m2m100_418M`'s own
-    `generation_config.json`), not greedy decoding -- this docstring
-    previously (incorrectly) said "greedily generate", which was never
-    actually true for a checkpoint whose generation config specifies beam
-    search. See `ml/README.md`'s "Decode configuration" section for the
-    full verification.
+    `num_beams` (issue #180) is now an explicit, named parameter of this
+    function, defaulting to `DEFAULT_NUM_BEAMS` (5) -- matching the base
+    model's own `generation_config.json` value, so default behavior is
+    unchanged. Before this, no `num_beams` was passed to `model.generate()`
+    here at all -- decode strategy came entirely from the loaded
+    checkpoint's own `generation_config.json`, an implicit dependency
+    rather than a real, overridable parameter of this module's own
+    generation code. Issue #178 confirmed directly against the real v7
+    checkpoint that this is beam search (`num_beams: 5`, inherited
+    unmodified from `facebook/m2m100_418M`'s own `generation_config.json`),
+    not greedy decoding -- this docstring previously (incorrectly) said
+    "greedily generate", which was never actually true for a checkpoint
+    whose generation config specifies beam search. See `ml/README.md`'s
+    "Decode configuration" section for the full verification. Adopting a
+    different beam width for the deployed endpoint (e.g. issue #178's
+    finding that `num_beams=8` may improve BLEU/chrF, validated at scale in
+    issue #180) is now a one-line change to this function's default -- a
+    pure decode-time config change, no retraining, no new Model Package
+    version needed.
 
     Moves the encoded batch to `model.device` before calling `generate`,
     same reasoning as `generate_translations` -- `tokenizer(...,
@@ -191,7 +213,10 @@ def translate(
     ).to(model.device)
 
     generated_ids = model.generate(
-        **encoded, forced_bos_token_id=forced_bos_token_id, max_length=max_length
+        **encoded,
+        forced_bos_token_id=forced_bos_token_id,
+        max_length=max_length,
+        num_beams=num_beams,
     )
     decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
     return strip_leading_direction_tag(decoded[0], request.target_lang)

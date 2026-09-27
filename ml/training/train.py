@@ -92,6 +92,16 @@ from training.tokenizer_extension import (
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 
+# Matches facebook/m2m100_418M's own generation_config.json default
+# (confirmed directly against the real v7 checkpoint artifact, issue #178).
+# Kept here as an explicit, named default rather than left unset: before
+# issue #180, `generate_translations`/`deployment.inference.translate` never
+# passed `num_beams` to `model.generate()` at all, so beam width was
+# whatever the checkpoint's own generation_config.json happened to say --
+# an implicit, easy-to-miss dependency rather than a real, documented,
+# overridable parameter of this project's own generation code.
+DEFAULT_NUM_BEAMS = 5
+
 # Issue #143: the value `run_training_job` records in a run's own model
 # card's `vocab_extension_scoping` hyperparameter, when (and only when --
 # see `_resolve_vocab_extension_scoping_for_model_card` below, PR #144
@@ -611,23 +621,32 @@ def generate_translations(
     *,
     max_length: int = 128,
     batch_size: int = 16,
+    num_beams: int = DEFAULT_NUM_BEAMS,
 ) -> list[str]:
     """Generate hypothesis translations for `examples` using `model.generate`.
 
     Groups examples by target language so each batch uses the correct
     `forced_bos_token_id` (the direction tag token for that target
-    language -- see `training.direction`).
+    language -- see `training.direction`), then generates with beam search.
 
-    No `num_beams` (or other decode-strategy kwarg) is passed to
-    `model.generate()` here -- decode strategy comes entirely from
-    whatever the loaded checkpoint's own `generation_config.json`
-    specifies. This function's docstring previously (incorrectly) said
-    "generates greedily"; issue #178 confirmed directly against the real
-    v7 checkpoint that generation is actually beam search (`num_beams: 5`,
-    inherited unmodified from `facebook/m2m100_418M`'s own
+    `num_beams` (issue #180) is now an explicit, named parameter of this
+    function, defaulting to `DEFAULT_NUM_BEAMS` (5) -- matching the base
+    model's own `generation_config.json` value, so default behavior is
+    unchanged. Before this, no `num_beams` (or other decode-strategy kwarg)
+    was ever passed to `model.generate()` here -- decode strategy came
+    entirely from whatever the loaded checkpoint's own
+    `generation_config.json` happened to specify, an implicit, easy-to-miss
+    dependency rather than a real, overridable parameter of this project's
+    own generation code. This function's docstring previously (incorrectly)
+    said "generates greedily"; issue #178 confirmed directly against the
+    real v7 checkpoint that generation is actually beam search (`num_beams:
+    5`, inherited unmodified from `facebook/m2m100_418M`'s own
     `generation_config.json` through every fine-tuning save/reload), not
     greedy decoding -- see `ml/README.md`'s "Decode configuration" section
-    for the full verification.
+    for the full verification. Issue #178's own decode-parameter sweep (a
+    small, n=80 sample) found `num_beams=8` may beat this default; issue
+    #180 is what made overriding it here actually possible, to validate
+    that finding at scale.
 
     Moves each batch's encoded tensors to `model.device` before calling
     `generate` -- `tokenizer(..., return_tensors="pt")` always returns
@@ -677,7 +696,10 @@ def generate_translations(
                 max_length=max_length,
             ).to(model.device)
             generated_ids = model.generate(
-                **encoded, forced_bos_token_id=forced_bos_token_id, max_length=max_length
+                **encoded,
+                forced_bos_token_id=forced_bos_token_id,
+                max_length=max_length,
+                num_beams=num_beams,
             )
             decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             for i, text in zip(batch_indices, decoded, strict=True):

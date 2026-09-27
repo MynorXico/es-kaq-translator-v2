@@ -129,6 +129,40 @@ def test_generate_translations_strips_a_literal_leading_cak_tag_from_decoded_out
     assert hypotheses == ["Utz awäch?"]
 
 
+# ---------------------------------------------------------------------------
+# num_beams (issue #180): must be an explicit, configurable parameter, not
+# silently inherited from the base model's own generation_config.json.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_translations_passes_the_default_num_beams_to_generate():
+    tokenizer = FakeTokenizerForGeneration()
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="hola", target_text="la", source_lang="es", target_lang="cak"
+        )
+    ]
+
+    generate_translations(model, tokenizer, examples)
+
+    assert model.generate_called_with["num_beams"] == 5
+
+
+def test_generate_translations_passes_a_caller_supplied_num_beams_to_generate():
+    tokenizer = FakeTokenizerForGeneration()
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="hola", target_text="la", source_lang="es", target_lang="cak"
+        )
+    ]
+
+    generate_translations(model, tokenizer, examples, num_beams=8)
+
+    assert model.generate_called_with["num_beams"] == 8
+
+
 def test_generate_translations_leaves_es_target_output_without_a_leading_tag_untouched():
     # __es__-target output already has the tag stripped by
     # skip_special_tokens=True (it's a pretrained special token), so this is
