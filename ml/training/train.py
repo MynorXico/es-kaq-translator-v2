@@ -616,7 +616,18 @@ def generate_translations(
 
     Groups examples by target language so each batch uses the correct
     `forced_bos_token_id` (the direction tag token for that target
-    language -- see `training.direction`), then generates greedily.
+    language -- see `training.direction`).
+
+    No `num_beams` (or other decode-strategy kwarg) is passed to
+    `model.generate()` here -- decode strategy comes entirely from
+    whatever the loaded checkpoint's own `generation_config.json`
+    specifies. This function's docstring previously (incorrectly) said
+    "generates greedily"; issue #178 confirmed directly against the real
+    v7 checkpoint that generation is actually beam search (`num_beams: 5`,
+    inherited unmodified from `facebook/m2m100_418M`'s own
+    `generation_config.json` through every fine-tuning save/reload), not
+    greedy decoding -- see `ml/README.md`'s "Decode configuration" section
+    for the full verification.
 
     Moves each batch's encoded tensors to `model.device` before calling
     `generate` -- `tokenizer(..., return_tensors="pt")` always returns
