@@ -127,7 +127,6 @@ confirm the constants below are still valid before submitting a real job.
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import re
 import shutil
@@ -651,16 +650,22 @@ def fetch_model_card_from_artifact(s3_client: Any, model_data_url: str) -> str:
     text of `model_card.md` packaged inside it (written by
     `training.train.run_training_job` alongside the saved model, per
     ADR 0001's traceability requirement).
+
+    Streams the download to a temp file on disk rather than an in-memory
+    buffer (issue #188): this artifact bundles per-epoch checkpoints
+    alongside the final model (issue #182/#187) and was measured at 30.5 GB
+    on a real run -- downloading that into memory just to read one small
+    text file inside it caused a real out-of-memory kill. Peak process
+    memory here stays roughly constant regardless of artifact size.
     """
     bucket, key = _parse_s3_uri(model_data_url)
-    buffer = io.BytesIO()
-    s3_client.download_fileobj(bucket, key, buffer)
-    buffer.seek(0)
-    with tarfile.open(fileobj=buffer, mode="r:gz") as tar:
-        member = tar.extractfile("model_card.md")
-        if member is None:
-            raise FileNotFoundError(f"model_card.md not found in {model_data_url}")
-        return member.read().decode("utf-8")
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz") as tmp_file:
+        s3_client.download_file(bucket, key, tmp_file.name)
+        with tarfile.open(tmp_file.name, mode="r:gz") as tar:
+            member = tar.extractfile("model_card.md")
+            if member is None:
+                raise FileNotFoundError(f"model_card.md not found in {model_data_url}")
+            return member.read().decode("utf-8")
 
 
 _METRIC_LINE_RE = {

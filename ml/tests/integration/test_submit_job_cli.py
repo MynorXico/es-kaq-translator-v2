@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from training import submit_job
@@ -88,7 +89,7 @@ def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
     fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3_client = MagicMock()
     tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
-    fake_s3_client.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
 
     def fake_boto3_client(service, **kwargs):
         return {
@@ -161,7 +162,7 @@ def test_full_submission_records_dropout_and_bpe_dropout_alpha_in_registry_metad
     fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3_client = MagicMock()
     tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
-    fake_s3_client.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
 
     def fake_boto3_client(service, **kwargs):
         return {

@@ -314,7 +314,9 @@ def test_main_records_dropout_and_bpe_dropout_alpha_in_registry_metadata_when_gi
     fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3_client = MagicMock()
     tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
-    fake_s3_client.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(
+        tarball_bytes
+    )
 
     def fake_boto3_client(service, **kwargs):
         return {
@@ -567,18 +569,61 @@ def test_fetch_model_card_from_artifact_extracts_text_from_tarball():
     tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
     fake_s3 = MagicMock()
 
-    def fake_download_fileobj(bucket, key, fileobj):
+    def fake_download_file(bucket, key, filename):
         assert bucket == "fake-bucket"
         assert key == "model-artifacts/run-test/output/model.tar.gz"
-        fileobj.write(tarball_bytes)
+        Path(filename).write_bytes(tarball_bytes)
 
-    fake_s3.download_fileobj.side_effect = fake_download_fileobj
+    fake_s3.download_file.side_effect = fake_download_file
 
     text = submit_job.fetch_model_card_from_artifact(
         fake_s3, "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
     )
 
     assert "BLEU" in text
+
+
+def test_fetch_model_card_from_artifact_streams_to_disk_not_memory():
+    """Regression test for issue #188: a real model.tar.gz artifact was
+    measured at 30.5 GB (per-epoch checkpoints bundled in, see #187) --
+    downloading it into an in-memory buffer just to read one small text
+    file inside it caused a real out-of-memory kill. This asserts the S3
+    client's disk-streaming API (`download_file`) is used instead of the
+    in-memory one (`download_fileobj`), so peak memory stays roughly
+    constant regardless of artifact size.
+    """
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3 = MagicMock()
+
+    def fake_download_file(bucket, key, filename):
+        Path(filename).write_bytes(tarball_bytes)
+
+    fake_s3.download_file.side_effect = fake_download_file
+
+    submit_job.fetch_model_card_from_artifact(
+        fake_s3, "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
+
+    fake_s3.download_file.assert_called_once()
+    fake_s3.download_fileobj.assert_not_called()
+
+
+def test_fetch_model_card_from_artifact_cleans_up_its_temp_file():
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3 = MagicMock()
+    captured_path: dict[str, str] = {}
+
+    def fake_download_file(bucket, key, filename):
+        captured_path["path"] = filename
+        Path(filename).write_bytes(tarball_bytes)
+
+    fake_s3.download_file.side_effect = fake_download_file
+
+    submit_job.fetch_model_card_from_artifact(
+        fake_s3, "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
+
+    assert not Path(captured_path["path"]).exists()
 
 
 def test_parse_model_card_metrics_extracts_bleu_and_chrf():
@@ -647,7 +692,7 @@ def test_register_model_creates_model_package_with_metadata(monkeypatch):
         "ModelPackageArn": "arn:aws:sagemaker:us-east-1:000000000000:model-package/foo/1"
     }
     fake_s3 = MagicMock()
-    fake_s3.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+    fake_s3.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
 
     run_metadata = {
         "corpus_version": "almg-v1",
@@ -685,7 +730,7 @@ def test_register_model_respects_approval_status_override(monkeypatch):
     fake_sm.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
     fake_sm.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3 = MagicMock()
-    fake_s3.download_fileobj.side_effect = lambda b, k, f: f.write(tarball_bytes)
+    fake_s3.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
 
     submit_job.register_model(
         fake_sm,
