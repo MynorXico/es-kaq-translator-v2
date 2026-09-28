@@ -23,6 +23,7 @@ not" (the real container's condition) without needing a real container
 or a from-scratch venv build in every test run.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -41,7 +42,8 @@ def test_train_py_resolves_sibling_package_imports_when_invoked_from_bundle_root
             capture_output=True,
             text=True,
             timeout=60,
-            env={"PATH": "/usr/bin:/bin", "PYTHONPATH": site_packages},
+            env={**os.environ, "PYTHONPATH": site_packages},
+            check=False,
         )
         assert "ModuleNotFoundError" not in result.stderr, result.stderr
         assert result.returncode == 0, result.stderr
