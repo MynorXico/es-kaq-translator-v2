@@ -72,6 +72,56 @@ export class DataStack extends Stack {
       }),
     );
 
+    // Real incident, not a preemptive/speculative grant: a real (non-dry-run)
+    // `submit_job.py` invocation against this exact role failed with
+    // `RoleValidationError` once the project migrated to SageMaker Python
+    // SDK v3 (issues #155/#172). v3's `ModelTrainer` does a client-side IAM
+    // permission check before ever calling `CreateTrainingJob`, against the
+    // SDK's own generic "any training job" baseline
+    // (`sagemaker.core.helper.iam_policies.IAM_POLICY_CONFIG["training"]`)
+    // -- regardless of whether this project's specific job configuration
+    // (no VPC) actually needs all of it. This exact role successfully ran a
+    // real training job under the v2 SDK, which had no such client-side
+    // check; the v3 migration silently introduced this new precondition,
+    // uncaught because `--dry-run` deliberately never constructs a real
+    // `ModelTrainer` (see `submit_job.py`'s own docstring on why). All
+    // three actions below require `Resource: "*"` in AWS's own IAM model --
+    // none support resource-level scoping, so this isn't a least-privilege
+    // regression, it's the only grant these specific actions can take.
+    this.sageMakerExecutionRole.addToPolicy(
+      new PolicyStatement({
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    this.sageMakerExecutionRole.addToPolicy(
+      new PolicyStatement({
+        actions: ["ecr:GetAuthorizationToken"],
+        resources: ["*"],
+      }),
+    );
+    // Same reasoning for the EC2 ENI/VPC-describe actions the SDK's
+    // baseline checks for -- relevant only if a job ever configures VPC
+    // isolation, which this project's jobs deliberately don't (ADR 0001's
+    // serverless-first posture), but granted anyway since v3 treats
+    // possessing them as a hard precondition regardless of actual usage.
+    this.sageMakerExecutionRole.addToPolicy(
+      new PolicyStatement({
+        actions: [
+          "ec2:CreateNetworkInterface",
+          "ec2:CreateNetworkInterfacePermission",
+          "ec2:DeleteNetworkInterface",
+          "ec2:DeleteNetworkInterfacePermission",
+          "ec2:DescribeNetworkInterfaces",
+          "ec2:DescribeVpcs",
+          "ec2:DescribeDhcpOptions",
+          "ec2:DescribeSubnets",
+          "ec2:DescribeSecurityGroups",
+        ],
+        resources: ["*"],
+      }),
+    );
+
     new CfnOutput(this, "TrainingDataBucketName", { value: this.bucket.bucketName });
     new CfnOutput(this, "SageMakerExecutionRoleArn", { value: this.sageMakerExecutionRole.roleArn });
   }
