@@ -65,11 +65,27 @@ import contextlib
 import math
 import os
 import re
+import sys
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# SageMaker's v3 `ModelTrainer` "Basic Script driver" invokes this file as
+# `python3 training/train.py` with the bundle root (see
+# `submit_job.build_source_bundle`) as `cwd` -- Python then puts only this
+# script's own directory (`<bundle root>/training`) on `sys.path[0]`, not
+# the bundle root itself, so the sibling-package imports below
+# (`data.*`/`evaluation.*`) fail with `ModuleNotFoundError`. This worked
+# under the old v2 script-mode toolkit, which put the code root on
+# `PYTHONPATH` before invoking the entry script; the v3 SDK's driver does
+# not (issue #185, discovered on the first real job submitted after the
+# v3 migration). Adding the bundle root here makes this correct regardless
+# of how the SDK's driver invokes this script.
+_BUNDLE_ROOT = str(Path(__file__).resolve().parent.parent)
+if _BUNDLE_ROOT not in sys.path:
+    sys.path.insert(0, _BUNDLE_ROOT)
 
 from data.corpus_io import read_tsv_pairs
 from evaluation.run import run_evaluation
