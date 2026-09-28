@@ -146,6 +146,61 @@ describe("DataStack", () => {
     }
   });
 
+  it("grants the baseline permissions the SageMaker Python SDK v3 requires to accept the execution role for a training job", () => {
+    // Real incident: a real (non-dry-run) submit_job.py invocation against
+    // this exact role failed with RoleValidationError -- SDK v3's
+    // ModelTrainer does a client-side IAM permission check before ever
+    // calling CreateTrainingJob, against its own generic "any training job"
+    // baseline (sagemaker.core.helper.iam_policies.IAM_POLICY_CONFIG's
+    // "training" entry), regardless of whether this project's specific job
+    // configuration (no VPC) actually needs all of it. This role worked
+    // for real training under the v2 SDK (no client-side check existed);
+    // the v3 migration (#155/#172) silently introduced this new
+    // requirement, uncaught because --dry-run deliberately never
+    // constructs a real ModelTrainer (see submit_job.py's own docstring).
+    const { template } = synthDataStack();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const allStatements = Object.values(policies).flatMap(
+      (policy) =>
+        policy.Properties.PolicyDocument.Statement as Array<{
+          Effect: string;
+          Action: string | string[];
+          Resource: unknown;
+        }>,
+    );
+    const allowedActions = new Set(
+      allStatements
+        .filter((s) => s.Effect === "Allow")
+        .flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])),
+    );
+
+    // cloudwatch:PutMetricData and ecr:GetAuthorizationToken don't support
+    // resource-level scoping in AWS's own IAM model for these actions --
+    // "Resource": "*" is the correct, only-possible grant, not a
+    // least-privilege regression.
+    expect(allowedActions.has("cloudwatch:PutMetricData")).toBe(true);
+    expect(allowedActions.has("ecr:GetAuthorizationToken")).toBe(true);
+
+    // Same for the EC2 ENI/VPC-describe actions the SDK's baseline checks
+    // for (relevant only if a job ever configures VPC isolation, which
+    // this project's jobs don't -- granted anyway since the v3 SDK treats
+    // it as a hard precondition regardless).
+    for (const action of [
+      "ec2:CreateNetworkInterface",
+      "ec2:CreateNetworkInterfacePermission",
+      "ec2:DeleteNetworkInterface",
+      "ec2:DeleteNetworkInterfacePermission",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribeVpcs",
+      "ec2:DescribeDhcpOptions",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+    ]) {
+      expect(allowedActions.has(action)).toBe(true);
+    }
+  });
+
   it("does not attach a broad AWS-managed SageMaker policy to the execution role", () => {
     const { template } = synthDataStack();
 
