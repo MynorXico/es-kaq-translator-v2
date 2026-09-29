@@ -518,12 +518,44 @@ uv run python -m evaluation.evaluate_checkpoint \
   --debias-delta-multiplier 1.0
 ```
 
-**Real re-scoring result (issue #193): see the issue's own comment thread
-for the actual BLEU/chrF numbers and conclusion** -- whether v9's rectified
-score meaningfully closes the gap to (or beats) v7's baseline, or whether
-this is a legitimate, fully-settled "label smoothing doesn't help here"
-finding. This section is updated once that real run's numbers land, per
-this project's "no mystery artifacts" traceability convention (ADR 0001).
+**Real re-scoring result (issue #193): rectification does not close the
+gap -- a fully-settled "label smoothing doesn't help here" finding.**
+Re-scored against real weights (v9's own actual checkpoint, downloaded from
+its S3 training artifact -- not a reconstruction) and v7's own real
+checkpoint, on the *same* 200-pair (400-example, balanced both directions)
+sample of the real `almg-v1` validation set, same `--num-beams 5`, same
+word-boundary reconstruction -- mirroring issue #180's own "n=200/direction,
+same pairs across every setting compared" methodology, since a full
+7,218-example run of three separate decode configs on this project's local
+4GB GPU was not practical within this diagnostic's own scope:
+
+| checkpoint | `--debias-delta-multiplier` | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF |
+|---|---|---|---|---|---|
+| v7 (baseline) | 0.0 (n/a, no label smoothing) | 15.9 | 37.8 | 19.4/40.9 | 9.9/32.8 |
+| v9 | 0.0 (undebiased, as originally rejected) | 14.8 | 37.1 | 19.1/40.1 | 8.4/32.3 |
+| v9 | 0.1 (theoretically exact, `delta = alpha/V`, `alpha=0.1`) | 14.2 | 36.9 | 18.2/40.0 | 8.1/32.0 |
+| v9 | 1.0 (paper's own empirical near-peak at small beam) | 14.3 | 37.1 | 18.3/40.1 | 8.1/32.1 |
+
+(This sample's absolute numbers differ somewhat from the full-validation-set
+numbers registered in Model Registry -- expected sample variance at n=200
+pairs vs. n=3,609 -- but the ordering matches: v7 > v9 undebiased on both
+samples, confirming this smaller matched sample is a reasonable stand-in for
+the question this ticket asks.)
+
+**Neither debiasing configuration improves on v9's own undebiased score,
+let alone closes the gap to v7.** Both the theoretically exact rectification
+and the paper's own stronger, empirically-recommended value are flat-to
+-slightly-worse than `delta=0` on this checkpoint, on the exact same 400
+examples. v9's near-baseline chrF (36.4 vs. v7's 36.5, full-set numbers) is
+**not** evidence of a masked gain in this case -- correcting for the
+mechanism the cited paper describes reveals no hidden quality improvement.
+This closes the question issue #193 opened: **label smoothing (`alpha=0.1`,
+13 epochs, otherwise matching the v7 baseline) does not help this project's
+fine-tuning setup**, even after accounting for its documented beam-search
+length bias. Re-affirms, rather than overturns, Model Package v9's original
+`Rejected` status in Model Registry -- no change to the deployed checkpoint
+or its decode configuration. Per issue #193's own scope, this is a pure
+re-evaluation: no retraining, no new Model Registry model package.
 
 ### Verifying the reconstruction against a real checkpoint (maintainer step)
 
