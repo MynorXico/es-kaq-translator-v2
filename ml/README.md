@@ -454,6 +454,77 @@ real checkpoint is a separate, maintainer-run action (issue #108's
 follow-up), same as `training/submit_job.py`'s real training job
 submission.
 
+### Decode-time length-bias rectification for label-smoothed checkpoints (`evaluation/length_bias.py`, issue #193)
+
+Issue #182's label-smoothing experiment (Model Package v9, `--label-smoothing
+0.1`, 13 epochs, otherwise identical to the v7 baseline) scored BLEU 13.2 /
+chrF 36.4 against v7's baseline BLEU 14.0 / chrF 36.5, and was rejected in
+Model Registry on a raw comparison. But Liang, Wang & Cao, "The Implicit
+Length Bias of Label Smoothing on Beam Search Decoding"
+([arXiv:2205.00659](https://arxiv.org/abs/2205.00659)), show label smoothing
+implicitly biases beam search toward *shorter* outputs (their Sec. 3.1: beam
+search scores a sequence by `sum(log(p_hat))`, where `p_hat = (1 - alpha) *
+q + alpha / V` is the label-smoothed model's learned prediction, which adds
+an implicit `log(1 - alpha)` penalty to every generated token relative to
+the true `log(q)`), and that a decode-time rectification recovers real BLEU
+a raw comparison masks. `evaluation/length_bias.py` implements their exact
+proposed correction (their Eq. 4, not a generic length-penalty heuristic):
+
+```
+p_db_i = ReLU(p_hat_i - delta) / sum_j(ReLU(p_hat_j - delta))
+```
+
+applied to the model's own predicted next-token distribution at every beam
+search decode step. `delta = alpha / V` (`V` = vocab size) is the paper's
+theoretically exact inverse of label smoothing's interpolation (their Eq.
+3); their own experiments (Table 1) found a *larger* `delta = 1/V` gives
+near-peak BLEU across every language pair they tested at beam size 4
+(closest to this project's own `--num-beams` default of 5), i.e. stronger-
+than-theoretically-justified debiasing was empirically beneficial in their
+setup too. See the module's own docstring for the full derivation.
+
+Two independent implementations exist, tested against each other
+(`tests/unit/test_length_bias_logits_processor.py`) so they can't silently
+drift apart: `rectify_probabilities` is a pure NumPy reference
+implementation of Eq. 4 (`tests/unit/test_length_bias.py`, including a test
+that rectifying a perfectly label-smoothed distribution exactly recovers the
+original ground-truth distribution -- Eq. 3 as a special case of Eq. 4), and
+`build_length_bias_logits_processor` is the real `transformers.
+LogitsProcessor`-based implementation actually used at decode time (`torch`-
+native, since it has to operate on live GPU-resident tensors at every decode
+step without a per-step CPU round-trip).
+
+`evaluate_checkpoint.py --debias-delta-multiplier <k>` (default `0.0`,
+disabled -- no `logits_processor` reaches `generate_translations` at all,
+so every prior re-evaluation's decode behavior is completely unchanged)
+computes `delta = k / vocab_size` from the checkpoint's own (already
+vocab-extended) tokenizer and threads a real logits processor through
+`generate_translations`/`model.generate()`. Passing the checkpoint's own
+`--label-smoothing` training value (e.g. `0.1`) is the theoretically exact
+rectification; `1.0` is the paper's own empirically near-peak value at small
+beam widths and the recommended first value to try. Recorded in the
+rendered model card's hyperparameters (`debias_delta_multiplier`, and when
+enabled, the resolved `debias_delta`/`debias_vocab_size`) for traceability.
+
+```sh
+uv run python -m evaluation.evaluate_checkpoint \
+  --checkpoint s3://<training-data-bucket>/model-artifacts/<v9-run-id>/output/model.tar.gz \
+  --validation s3://<training-data-bucket>/corpus/almg/v1/val.tsv \
+  --train s3://<training-data-bucket>/corpus/almg/v1/train.tsv \
+  --corpus-version almg-v1 \
+  --source-run-id <v9-run-id> \
+  --output-dir ./eval-output-debiased \
+  --num-beams 5 \
+  --debias-delta-multiplier 1.0
+```
+
+**Real re-scoring result (issue #193): see the issue's own comment thread
+for the actual BLEU/chrF numbers and conclusion** -- whether v9's rectified
+score meaningfully closes the gap to (or beats) v7's baseline, or whether
+this is a legitimate, fully-settled "label smoothing doesn't help here"
+finding. This section is updated once that real run's numbers land, per
+this project's "no mystery artifacts" traceability convention (ADR 0001).
+
 ### Verifying the reconstruction against a real checkpoint (maintainer step)
 
 The claim that reconstruction exactly matches a real checkpoint's own

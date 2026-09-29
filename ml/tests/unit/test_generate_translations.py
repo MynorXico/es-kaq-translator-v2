@@ -181,3 +181,44 @@ def test_generate_translations_leaves_es_target_output_without_a_leading_tag_unt
     hypotheses = generate_translations(model, tokenizer, examples)
 
     assert hypotheses == ["Buenos días"]
+
+
+# ---------------------------------------------------------------------------
+# logits_processor (issue #193): decode-time length-bias rectification for
+# label-smoothed checkpoints (evaluation.length_bias) must be able to reach
+# model.generate() through this shared function, exactly like num_beams
+# above -- see evaluation/evaluate_checkpoint.py's --debias-delta-multiplier.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_translations_omits_logits_processor_by_default():
+    # Default (no caller-supplied logits_processor) must be a true no-op --
+    # not even an empty list reaches generate(), so every existing
+    # checkpoint's decode behavior is completely unchanged unless a caller
+    # explicitly opts in.
+    tokenizer = FakeTokenizerForGeneration()
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="hola", target_text="la", source_lang="es", target_lang="cak"
+        )
+    ]
+
+    generate_translations(model, tokenizer, examples)
+
+    assert "logits_processor" not in model.generate_called_with
+
+
+def test_generate_translations_passes_a_caller_supplied_logits_processor_to_generate():
+    tokenizer = FakeTokenizerForGeneration()
+    model = FakeModelWithDevice(device=SENTINEL_DEVICE)
+    examples = [
+        TranslationExample(
+            source_text="hola", target_text="la", source_lang="es", target_lang="cak"
+        )
+    ]
+    sentinel_processor = object()
+
+    generate_translations(model, tokenizer, examples, logits_processor=sentinel_processor)
+
+    assert model.generate_called_with["logits_processor"] is sentinel_processor
