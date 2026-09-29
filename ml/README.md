@@ -1266,6 +1266,121 @@ than maintaining an independent reimplementation of the same transform --
 PR #183 review flagged the original reimplementation as a needless
 drift risk against future transformers versions.
 
+### Checkpoint averaging, evaluated against real checkpoints (issue #192)
+
+Issue #182 built `training/checkpoint_averaging.py` as prep infrastructure
+only -- it had never been run against a real, multi-epoch checkpoint set.
+Real-world precedent (Xiao et al., "Revisiting Checkpoint Averaging for
+NMT", AACL 2022, arXiv:2210.11803; the AmericasNLP 2024 shared task's
+2nd/3rd-place teams for the closest comparable low-resource-Indigenous
+translation setup) made this the next lever to actually evaluate, after
+issue #182's own dropout/label-smoothing/bpe-dropout levers all
+underperformed the v7 baseline (see v8/v9/v10 below).
+
+**Phase 1: free-tier sanity check against v8's (`--dropout 0.3`)
+already-existing per-epoch checkpoints.** `save_total_limit` (derived from
+`checkpoint_averaging.DEFAULT_AVERAGE_N + 2`, see above) meant only the
+last 5 of 13 epochs' checkpoints were actually retained in v8's training
+artifact (steps 18513/20570/22627/24684/26741) -- `find_checkpoint_dirs`/
+`select_last_n_checkpoints` correctly picked the last 3
+(22627/24684/26741) out of those 5. Averaged via `average_checkpoints`,
+then scored with `evaluation/evaluate_checkpoint.py` against the **same**
+150-pair (300-example, both directions) random sample of `almg-v1`'s real
+validation set for both the averaged and the plain final-epoch checkpoint,
+so the comparison is apples-to-apples on identical methodology (not just
+identical data):
+
+| checkpoint | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF |
+|---|---|---|---|---|
+| final epoch only (n=300) | 11.3 | 33.8 | 12.5 / 34.8 | 9.3 / 32.4 |
+| last-3 averaged (n=300) | 11.1 | 33.7 | 12.0 / 34.8 | 9.5 / 32.2 |
+
+The final-epoch-only sample number (BLEU 11.3/chrF 33.8) closely tracks
+v8's own full-validation-set (n=7,218) reported number (BLEU 11.7/chrF
+34.3), confirming the 300-example sample is representative enough for a
+sanity check. **The mechanics work end to end**: averaging ran, the
+resulting checkpoint loaded and generated coherent-shaped output, and
+issue #116/#125's word-boundary reconstruction matched exactly between the
+two runs (30,996 tokens reconstructed both times, zero over/under-
+reconstruction warnings once `model_card.md` was copied alongside the
+averaged checkpoint -- see the bugfix note below). The averaged number
+itself is flat-to-negligibly-lower than final-epoch-only, well within
+n=300 sample noise -- **exactly what this phase was scoped to show
+(mechanics, not a real signal): v8 is individually confounded by its own
+already-negative `--dropout 0.3` lever**, so this is not read as evidence
+against averaging in general.
+
+**Two real, concrete findings from running this for real, not assumed:**
+
+1. **`evaluate_checkpoint.py` needs `model_card.md` copied alongside a
+   freshly-averaged checkpoint, or its word-boundary reconstruction
+   silently uses the wrong (legacy, unscoped) construction.**
+   `average_checkpoints` never copies `model_card.md` (a real
+   `Seq2SeqTrainer` per-epoch checkpoint never has one to copy in the first
+   place -- only the run's own final `--model-dir` does, see
+   `training.train.save_model_and_tokenizer`), so
+   `evaluate_checkpoint.py`'s `_read_checkpoint_vocab_extension_scoping`
+   found nothing and fell back to the legacy "both columns" reconstruction
+   -- for a `vocab_extension_scoping=kaqchikel_only` checkpoint like v8,
+   this over-reconstructs (30,885 of 61,899 reconstructed tokens turned out
+   to be missing from the checkpoint's real vocabulary), correctly tripping
+   `_diagnose_word_boundary_reconstruction`'s over-reconstruction warning
+   exactly as designed. Not a code bug (the diagnostic caught it as
+   intended) but a real operational gap worth documenting here: **always
+   copy the source run's own `model_card.md` into an averaged checkpoint's
+   output directory, alongside the tokenizer files `average_checkpoints`
+   already reminds you to copy**, before evaluating it.
+2. **`training/checkpoint_averaging.py`'s `_EXCLUDED_FILENAMES` was
+   missing `scaler.pt`** (the fp16 AMP grad-scaler's own state,
+   confirmed present in a real v8 checkpoint -- every real GPU training run
+   in this project sets `fp16=True`), so it was being silently copied into
+   the averaged checkpoint's output directory alongside the correctly
+   excluded `optimizer.pt`/`scheduler.pt`/`rng_state.pth`/
+   `trainer_state.json`/`training_args.bin`. Harmless to a later
+   `from_pretrained` load (an unrecognized file is simply ignored) but the
+   same class of "training progress, not a fact about the averaged
+   weights" leftover the exclusion set exists to keep out. Fixed
+   test-first: `tests/integration/test_checkpoint_averaging_pipeline.py`'s
+   fixture checkpoints now include a `scaler.pt`, and
+   `test_average_checkpoints_never_copies_training_progress_files` asserts
+   it's excluded too (confirmed red against the pre-fix code, then green
+   after adding `"scaler.pt"` to `_EXCLUDED_FILENAMES`).
+
+**Phase 2: clean matched-baseline run, isolating averaging as the only
+variable.** A new training job (`run-20260929T000000Z-v11-matched-
+baseline`) was submitted with a config verified byte-for-byte identical to
+v7's (13 epochs, batch-size 8, learning-rate 5e-5, warmup-ratio 0.05,
+weight-decay 0.01, gradient-accumulation-steps 4, subword-vocab-size 8000,
+`almg-v1`, direction `both`, no dropout/label-smoothing/bpe-dropout
+overrides) via `submit_job.py --dry-run`'s printed config before the real
+submission, with `--max-run 32400` (9h, since v7 itself took ~6h11m and
+the default 3h would have killed it mid-training). **This job was
+in-flight (`TrainingJobStatus: InProgress`) when this ticket's work
+session ended** -- completing it, running both a final-epoch-only and a
+last-3-averaged `evaluate_checkpoint.py` pass against it (same decode
+config, `--num-beams 5`, per issue #180), and recording the resulting
+go/no-go conclusion with real numbers is a required follow-up before this
+ticket's acceptance criteria are fully met. See the job's own
+`describe-training-job` output (`training-job-name
+traductor-kaqchikel-run-20260929T000000Z-v11-matched-baseline-2`) for
+current status; once `Completed`, register/evaluate following the same
+"Verifying the reconstruction against a real checkpoint" pattern documented
+above.
+
+This project's local development GPU (the same 4GB GTX 1050 Ti referenced
+under "Real at-scale validation" above) could not be used for this
+ticket's evaluation runs at all: `torch.cuda.is_available()` returns
+`False` in this environment, not because of thermal throttling this time,
+but because the installed driver (CUDA 12.4) is older than what this
+project's pinned `torch==2.14.0+cu130` build requires -- a different
+failure mode than issue #180's throttling, confirmed directly (`torch.cuda
+.is_available()` returns `False`, `nvidia-smi` still shows the card).
+Both Phase 1 eval runs above ran on CPU instead; a 300-example sample took
+roughly 30 minutes each, consistent with the ~12-hour full-validation-set
+(7,218 examples) CPU runtime already documented in
+`evaluation.evaluate_checkpoint._move_model_to_cuda_if_available`'s own
+docstring (issue #170).
+
 **`--dry-run`** resolves the real `{Environment}-Data` CloudFormation stack
 outputs (a free, read-only call), resolves the training container image URI
 (a free, local-only lookup against the installed SDK's compatibility
