@@ -11,6 +11,7 @@ this module strictly limited to counts/identifiers, not sentence text.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -94,3 +95,34 @@ def render_model_card(data: ModelCardData) -> str:
         ]
 
     return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Parsing metrics back out of a rendered model card (issue #190)
+# ---------------------------------------------------------------------------
+#
+# Moved here from `training.submit_job` (where it originated) so both
+# `training.train`'s self-registration (reads the model card it just wrote,
+# from local disk -- no S3 download at all) and `training.submit_job`'s
+# existing-artifact registration path (reads a model card fetched from a
+# completed job's artifact) can share one implementation, instead of two
+# copies of the same regex silently drifting apart. `render_model_card`
+# above is the only producer of this format; keep the two in sync.
+
+_METRIC_LINE_RE = {
+    "bleu": re.compile(r"\*\*BLEU\*\*:\s*([0-9.]+)"),
+    "chrf": re.compile(r"\*\*chrF\*\*:\s*([0-9.]+)"),
+}
+
+
+def parse_model_card_metrics(model_card_text: str) -> dict[str, str]:
+    """Extract BLEU/chrF from a rendered model card (`render_model_card`'s
+    output format). Returns string values, ready to use as SageMaker
+    `CustomerMetadataProperties` (which only accepts strings).
+    """
+    metrics: dict[str, str] = {}
+    for name, pattern in _METRIC_LINE_RE.items():
+        match = pattern.search(model_card_text)
+        if match:
+            metrics[name] = match.group(1)
+    return metrics

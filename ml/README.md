@@ -711,8 +711,19 @@ everything above (`data/`, `training/tokenizer_extension.py`,
    through the project's own hosted API (ADR 0002, CLAUDE.md).
 6. Generates validation-set translations, computes BLEU/chrF, and writes
    a model card (`evaluation/run.py`) to `SM_MODEL_DIR/model_card.md`,
-   alongside the saved model artifact, for registration in SageMaker
-   Model Registry per ADR 0001's traceability requirement.
+   alongside the saved model artifact, per ADR 0001's traceability
+   requirement.
+7. Self-registers this run's model package in SageMaker Model Registry
+   (issue #190, `register_model_from_training_job`) -- reading the model
+   card it just wrote off local disk (no download of anything), and
+   computing its own future artifact S3 URI
+   (`{--output-path}/{this-job's-own-SageMaker-assigned-name}/output/model.tar.gz`,
+   the job name read from `SM_TRAINING_ENV`) before that artifact even
+   exists. A no-op unless `--register-model true` is given together with
+   `--output-path`/`--training-image` -- see "Job submission" below for
+   how `submit_job.py` wires this by default, and why every local/test
+   invocation of `train.py` that never passes these (i.e. every test in
+   this repo's suite) is completely unaffected.
 
 Run `uv run python -m training.train --help` for the full CLI (corpus
 paths, `--direction`, hyperparameters, `--corpus-version`, `--run-id`).
@@ -868,13 +879,52 @@ permanent one.
 
 `training/submit_job.py` is the code that actually submits a real
 (billable) SageMaker Training Job running `training/train.py` against the
-private ALMG corpus, and registers the resulting model in SageMaker Model
-Registry -- issue #66. **This repo's automated test suite never runs a
-real training job or calls real AWS**; every AWS/`sagemaker` SDK call in
-`submit_job.py` is exercised only against mocks
+private ALMG corpus -- issue #66. **This repo's automated test suite never
+runs a real training job or calls real AWS**; every AWS/`sagemaker` SDK
+call in `submit_job.py` is exercised only against mocks
 (`tests/unit/test_submit_job.py`, `tests/integration/test_submit_job_cli.py`).
 Actually submitting the real job is a separate, deliberate, maintainer-run
 action, gated on an AWS quota increase.
+
+**Registration in SageMaker Model Registry now happens from inside the
+training container, not client-side (issue #190).** `train.py`
+self-registers its own completed model package the moment its own
+`model_card.md` is written -- reading that file straight off local disk
+and calling `CreateModelPackageGroup`/`CreateModelPackage` itself (see
+"Training entrypoint" below, `register_model_from_training_job`) --
+instead of `submit_job.py` downloading the training artifact afterward
+just to read the model card packaged inside it. This isn't a
+micro-optimization: a real run's artifact was measured at 30.5 GB
+(per-epoch checkpoints bundled in, issue #187), and the old flow meant
+downloading that whole thing across whatever network the maintainer
+happened to be running `submit_job.py` from -- ~45 minutes for that one
+run, bandwidth-bound, for a file whose useful content (the model card) is
+a few KB. It also caused a real out-of-memory kill the one time it was
+run by hand outside `submit_job.py`'s own (already-waited-for) flow,
+partially mitigated by issue #188 (streamed the download to disk instead
+of an in-memory buffer) before this issue eliminated the download
+entirely. The training role
+(`Dev-Data-SageMakerExecutionRole`/`infra/cdk/lib/data-stack.ts`) has a
+scoped grant for exactly the two Model Registry APIs this needs, limited
+to this project's one Model Package Group.
+
+The trick that makes this possible: SageMaker only uploads
+`SM_MODEL_DIR`'s contents to
+`{output_path}/{training_job_name}/output/model.tar.gz` *after* `train.py`
+exits, but that URI is fully deterministic from `--output-path` (this
+run's S3 output prefix, which `submit_job.py` already knows and now always
+passes through as a hyperparameter) and this job's own SageMaker-assigned
+name (read from the `SM_TRAINING_ENV` environment variable the container's
+own driver sets before invoking `train.py` -- never knowable client-side
+at submission time, since `ModelTrainer`'s `base_job_name` only seeds a
+unique suffix `CreateTrainingJob` appends). `CreateModelPackage`'s
+`ModelDataUrl` isn't validated for existence until actual deploy time, so
+registering against this not-yet-uploaded URI is safe.
+
+`submit_job.py`'s own `register_model`/`fetch_model_card_from_artifact`
+functions (which *do* download the artifact) still exist, but `main()`
+no longer calls them automatically after a waited-for run completes --
+see `--register-existing` below for when they're still useful.
 
 Run it from `ml/` (so `build_source_bundle()`'s default `ml_root` resolves):
 
@@ -915,11 +965,46 @@ vocabulary" above), `--dropout`, `--bpe-dropout-alpha` (cheap-tier quality
 levers prepared -- not yet evaluated -- by issue #182; see "Cheap-tier
 quality-experiment prep" below),
 `--model-package-group-name`, `--approval-status` (default
-`PendingManualApproval` -- a human reviews BLEU/chrF before approving),
-`--no-wait` (submit without blocking/monitoring; also skips registration,
-since there's nothing to register until the job finishes), `--no-logs`
-(don't stream CloudWatch Logs while waiting), `--no-register` (skip Model
-Registry registration even after a successful, waited-for run).
+`PendingManualApproval` -- a human reviews BLEU/chrF before approving;
+both are now passed through as hyperparameters so the submitted job can
+self-register with them, issue #190), `--no-wait` (submit without
+blocking/monitoring -- issue #190: **no longer skips registration**, since
+`train.py` self-registers from inside the container whenever the job
+itself finishes, regardless of whether this process waited around for
+it), `--no-logs` (don't stream CloudWatch Logs while waiting),
+`--no-register` (tell the submitted job **not** to self-register -- the
+only flag that actually disables registration now), `--register-existing
+TRAINING_JOB_NAME` (see below).
+
+### Registering an existing job's artifact after the fact (`--register-existing`)
+
+`submit_job.py --register-existing <training-job-name>` looks up an
+already-completed training job by name (`describe_training_job`) and
+registers its artifact, instead of submitting anything new --
+`--model-package-group-name`/`--approval-status` still apply, every other
+flag is ignored. This is the explicit opt-in path issue #190 kept (rather
+than deleting client-side registration entirely) for jobs that never
+self-registered in the first place: one submitted before self-registration
+existed, or one submitted with `--no-register`/`--no-wait` that a
+maintainer now wants registered. It still downloads the full
+`model.tar.gz` (streamed to disk, issue #188) to read the job's model
+card -- unlike the eliminated per-submission download this replaces, this
+is a rare, explicit, one-off action, not every real job's default path.
+Re-running it against a job that already self-registered creates a
+redundant (but harmless) extra Model Package version pointing at the same
+artifact -- it's meant for jobs that never registered at all, not to
+re-register an already-registered one.
+
+**Self-registration failures never fail the training job.** `train.py`
+catches any exception from its own registration call (a missing
+`SM_TRAINING_ENV`, an IAM misconfig, throttling, a typo'd
+`--model-package-group-name`) and prints it to stderr rather than letting
+it propagate -- by the time registration runs, training/evaluation/the
+model card are already done, so a registration hiccup shouldn't mark an
+otherwise-successful (real, GPU-hours-expensive) run as Failed. Check the
+job's CloudWatch Logs for a `WARNING: self-registration failed` line if a
+job succeeded but no Model Package appeared, then use
+`--register-existing` above to register it after the fact.
 
 ### Continuing training from a checkpoint
 
@@ -1162,15 +1247,17 @@ change any future run's outcome unless a maintainer explicitly opts a
 specific run into one of them. `submit_job.py --dropout`/
 `--bpe-dropout-alpha` mirror `train.py`'s own flags and are omitted from a
 submitted job's hyperparameters entirely (rather than passed through as a
-literal `"None"`) when left at their defaults. `submit_job.py main()`'s own
-`run_metadata["hyperparameters"]` (used for `register_model`'s
-`CustomerMetadataProperties`, a *separate* dict reconstructed from the
-submitted job's hyperparameters rather than reusing them directly) mirrors
-that same conditional inclusion -- PR #183 review caught this
-reconstruction hardcoding a fixed key list that predated both flags, which
-would have silently left a real `--dropout`/`--bpe-dropout-alpha` run's
-Model Registry entry with no record of which experiment produced it, even
-though the job itself trained correctly.
+literal `"None"`) when left at their defaults. Since issue #190,
+registration reads BLEU/chrF/hyperparameters straight from the model card
+`train.py` itself renders (`evaluation.model_card.parse_model_card_metrics`
++ `training.model_registry.build_customer_metadata`) rather than a
+separate reconstruction in `submit_job.py`, so a submitted job's
+`--dropout`/`--bpe-dropout-alpha` (or any other hyperparameter) showing up
+correctly on its own model card is now sufficient for it to show up
+correctly in the registered Model Package's metadata too -- one rendering
+path, not two that could drift apart (as the pre-#190 `submit_job.py
+main()` reconstruction once did; PR #183 review caught it hardcoding a
+fixed key list that predated both flags).
 
 `training.train.shift_tokens_right` (the label-smoothing fix's core
 building block) delegates to the real

@@ -137,13 +137,24 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-import botocore.exceptions
 from sagemaker.core.image_uris import retrieve as _retrieve_image_uri
 from sagemaker.core.shapes import OutputDataConfig, StoppingCondition
 from sagemaker.core.training.configs import Compute, InputData, SourceCode
 from sagemaker.train import ModelTrainer
 
+# `parse_model_card_metrics`/`ensure_model_package_group` aren't referenced
+# directly in this module any more (both moved to
+# evaluation.model_card/training.model_registry, issue #190) -- imported
+# here purely to re-export as `submit_job.parse_model_card_metrics`/
+# `submit_job.ensure_model_package_group` for existing callers/tests.
+from evaluation.model_card import parse_model_card_metrics  # noqa: F401
 from training.direction import DIRECTION_CHOICES
+from training.model_registry import (
+    DEFAULT_APPROVAL_STATUS,
+    DEFAULT_MODEL_PACKAGE_GROUP_NAME,
+    ensure_model_package_group,  # noqa: F401
+    register_model_package,
+)
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
 from training.train import DEFAULT_BASE_MODEL
 
@@ -171,8 +182,10 @@ INIT_MODEL_CHANNEL_NAME = "init-model"
 # --- Cost/safety defaults ---------------------------------------------------
 DEFAULT_INSTANCE_TYPE = "ml.g4dn.xlarge"
 DEFAULT_MAX_RUN_SECONDS = 3 * 60 * 60  # 3 hours -- a runaway job can't run forever.
-DEFAULT_MODEL_PACKAGE_GROUP_NAME = "traductor-kaqchikel-es-cak"
-DEFAULT_APPROVAL_STATUS = "PendingManualApproval"
+# DEFAULT_MODEL_PACKAGE_GROUP_NAME/DEFAULT_APPROVAL_STATUS now live in
+# training.model_registry (issue #190) -- imported above, re-exported here
+# unchanged so existing callers/tests referencing submit_job.DEFAULT_* keep
+# working.
 
 # Single source of truth for the region this project lives in (matches
 # infra/cdk/bin/app.ts and deployment/deploy.py's DEFAULT_REGION) -- needed
@@ -337,7 +350,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-wait",
         action="store_true",
-        help="Submit the job without blocking until it completes (skips registration).",
+        help=(
+            "Submit the job without blocking until it completes. Issue "
+            "#190: this no longer skips registration -- train.py "
+            "self-registers from inside the container once the job "
+            "finishes, regardless of whether this process waited for it."
+        ),
     )
     parser.add_argument(
         "--no-logs",
@@ -347,7 +365,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-register",
         action="store_true",
-        help="Don't register the resulting model in SageMaker Model Registry.",
+        help=(
+            "Tell the submitted job not to self-register its model in "
+            "SageMaker Model Registry (issue #190; train.py self-registers "
+            "by default). Use --register-existing later to register such a "
+            "job's artifact after the fact."
+        ),
+    )
+    parser.add_argument(
+        "--register-existing",
+        metavar="TRAINING_JOB_NAME",
+        default=None,
+        help=(
+            "Register an already-completed training job's artifact in "
+            "Model Registry, by job name, instead of submitting a new job "
+            "(issue #190's explicit opt-in path -- for a job that "
+            "predates self-registration, or one submitted with "
+            "--no-register/--no-wait that needs registering after the "
+            "fact). Every other flag except --model-package-group-name/"
+            "--approval-status is ignored when this is given."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -485,6 +522,16 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
         "label-smoothing": args.label_smoothing,
         "gradient-accumulation-steps": args.gradient_accumulation_steps,
         "subword-vocab-size": args.subword_vocab_size,
+        # Issue #190: tells train.py whether to self-register this run's
+        # completed model package from inside the training container --
+        # the hyperparameter dict is serialized to string CLI args
+        # regardless of value type (see module docstring), so this is a
+        # literal "true"/"false" string, not a Python bool. Mirrors
+        # `--no-register`'s existing meaning: register unless explicitly
+        # opted out.
+        "register-model": "false" if args.no_register else "true",
+        "model-package-group-name": args.model_package_group_name,
+        "approval-status": args.approval_status,
     }
     if args.init_model_s3_uri:
         hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
@@ -541,12 +588,23 @@ def build_job_config(
     and pass both in; tests pass fake placeholder strings instead.
     """
     hyperparameters = build_hyperparameters(args)
+    output_path = f"s3://{bucket}/model-artifacts/"
+    # Issue #190: train.py self-registers its own completed model package
+    # from inside the training container, which requires knowing (a) where
+    # SageMaker will eventually upload its artifact -- `output_path` here,
+    # combined with this job's own SageMaker-assigned name (read from
+    # SM_TRAINING_ENV at runtime, not knowable client-side) -- and (b) the
+    # exact training container image URI to record on the registered Model
+    # Package, which a container has no way to discover about itself.
+    # Neither is otherwise available inside the container.
+    hyperparameters["output-path"] = output_path
+    hyperparameters["training-image"] = training_image
     return {
         "role": role,
         "instance_type": args.instance_type,
         "instance_count": 1,
         "max_run": args.max_run,
-        "output_path": f"s3://{bucket}/model-artifacts/",
+        "output_path": output_path,
         "transformers_version": TRANSFORMERS_VERSION,
         "pytorch_version": PYTORCH_VERSION,
         "py_version": PY_VERSION,
@@ -668,73 +726,11 @@ def fetch_model_card_from_artifact(s3_client: Any, model_data_url: str) -> str:
             return member.read().decode("utf-8")
 
 
-_METRIC_LINE_RE = {
-    "bleu": re.compile(r"\*\*BLEU\*\*:\s*([0-9.]+)"),
-    "chrf": re.compile(r"\*\*chrF\*\*:\s*([0-9.]+)"),
-}
-
-
-def parse_model_card_metrics(model_card_text: str) -> dict[str, str]:
-    """Extract BLEU/chrF from a rendered model card
-    (`evaluation.model_card.render_model_card`'s output format). Returns
-    string values, ready to use as SageMaker `CustomerMetadataProperties`
-    (which only accepts strings).
-    """
-    metrics: dict[str, str] = {}
-    for name, pattern in _METRIC_LINE_RE.items():
-        match = pattern.search(model_card_text)
-        if match:
-            metrics[name] = match.group(1)
-    return metrics
-
-
-def ensure_model_package_group(sm_client: Any, group_name: str, description: str) -> None:
-    """Create the Model Package Group if it doesn't already exist.
-
-    Idempotent: treats "already exists" as success. This was assumed to
-    surface as a `ResourceInUse` error, and unit tests mocked exactly
-    that -- but the real `CreateModelPackageGroup` API actually raises a
-    generic `ValidationException` with the message "Model Package Group
-    already exists" for this case, which the original `except
-    sm_client.exceptions.ResourceInUse` clause never caught. This wasn't
-    caught by tests because the mock matched the assumption, not the real
-    API -- it only surfaced on the second-ever real registration call for
-    this project (issue #76's continuation run), once the group already
-    existed from #66's first registration. Catching `ResourceInUse` too,
-    in case some other AWS SDK version or code path does use it.
-    """
-    try:
-        sm_client.create_model_package_group(
-            ModelPackageGroupName=group_name,
-            ModelPackageGroupDescription=description,
-        )
-    except sm_client.exceptions.ResourceInUse:
-        pass
-    except botocore.exceptions.ClientError as error:
-        error_info = error.response.get("Error", {})
-        is_already_exists = error_info.get(
-            "Code"
-        ) == "ValidationException" and "already exists" in error_info.get("Message", "")
-        if not is_already_exists:
-            raise
-
-
-def _build_customer_metadata(run_metadata: dict[str, Any], metrics: dict[str, str]) -> dict[str, str]:
-    """Flatten run metadata + metrics into the string->string map
-    `CustomerMetadataProperties` requires. Deliberately only
-    identifiers/aggregate counts (corpus version tag, hyperparameters,
-    BLEU/chrF) -- never raw corpus content (ADR 0002), matching
-    `evaluation.model_card`'s own privacy constraint.
-    """
-    metadata = {
-        "corpus_version": str(run_metadata["corpus_version"]),
-        "direction": str(run_metadata["direction"]),
-        "run_id": str(run_metadata["run_id"]),
-    }
-    for key, value in run_metadata.get("hyperparameters", {}).items():
-        metadata[f"hp_{key}"] = str(value)
-    metadata.update(metrics)
-    return metadata
+# `ensure_model_package_group`/`parse_model_card_metrics` now live in
+# training.model_registry/evaluation.model_card (issue #190) -- imported
+# above, re-exported here unchanged so existing callers/tests referencing
+# submit_job.ensure_model_package_group / submit_job.parse_model_card_metrics
+# keep working.
 
 
 def register_model(
@@ -747,41 +743,123 @@ def register_model(
     run_metadata: dict[str, Any],
     approval_status: str = DEFAULT_APPROVAL_STATUS,
 ) -> str:
-    """Register a completed training run's model artifact in SageMaker
-    Model Registry: ensure the Model Package Group exists, then create a
-    new Model Package version pointing at `model_data_url`, carrying
-    corpus version / hyperparameters / BLEU / chrF as custom metadata.
+    """Register an already-completed training run's model artifact in
+    SageMaker Model Registry -- the `--register-existing` opt-in path (issue
+    #190; see this module's docstring for why the default, per-submission
+    registration path no longer works this way).
 
-    Defaults to `PendingManualApproval` -- a human should look at the eval
-    metrics before a model can be approved for deployment.
-
-    Returns the created Model Package's ARN.
+    Unlike `training.model_registry.register_model_package` (which this
+    delegates to), this fetches the model card from the artifact itself
+    first (`fetch_model_card_from_artifact`, streamed to disk -- issue
+    #188), since a maintainer using this path has no other way to read a
+    completed job's own model card. Returns the created Model Package's
+    ARN.
     """
-    ensure_model_package_group(
-        sm_client,
-        model_package_group_name,
-        description=(
-            "Spanish<->Kaqchikel fine-tuned M2M100 checkpoints "
-            "(ADR 0001/0003/0006). Trained weights are private (ADR 0002); "
-            "only identifiers/metrics are recorded here."
-        ),
-    )
-
     model_card_text = fetch_model_card_from_artifact(s3_client, model_data_url)
-    metrics = parse_model_card_metrics(model_card_text)
-    customer_metadata = _build_customer_metadata(run_metadata, metrics)
-
-    response = sm_client.create_model_package(
-        ModelPackageGroupName=model_package_group_name,
-        ModelApprovalStatus=approval_status,
-        InferenceSpecification={
-            "Containers": [{"Image": image_uri, "ModelDataUrl": model_data_url}],
-            "SupportedContentTypes": ["application/json"],
-            "SupportedResponseMIMETypes": ["application/json"],
-        },
-        CustomerMetadataProperties=customer_metadata,
+    return register_model_package(
+        sm_client,
+        model_package_group_name=model_package_group_name,
+        model_data_url=model_data_url,
+        image_uri=image_uri,
+        model_card_text=model_card_text,
+        run_metadata=run_metadata,
+        approval_status=approval_status,
     )
-    return response["ModelPackageArn"]
+
+
+def _reconstruct_run_metadata_from_job_hyperparameters(
+    hyperparameters: dict[str, str],
+) -> dict[str, Any]:
+    """Rebuild the `run_metadata` dict `register_model_package` needs from
+    a completed training job's own submitted hyperparameters, as returned
+    by `describe_training_job` -- used by `register_existing_job` so a
+    maintainer registering an existing job doesn't have to re-type its
+    corpus version/direction/hyperparameters by hand.
+
+    Every value in `describe_training_job`'s `HyperParameters` response
+    comes back as a string (SageMaker's own convention for that field) --
+    recorded as-is rather than guessing back the original type;
+    `CustomerMetadataProperties` only accepts strings anyway.
+    """
+    # Excluded: channel paths and fields that are either not
+    # hyperparameters worth recording as metadata (corpus-version/
+    # direction/run-id are pulled out into their own top-level fields
+    # below) or plumbing specific to *submitting* a job (never meaningful
+    # metadata about the resulting model).
+    excluded = {
+        "train",
+        "validation",
+        "corpus-version",
+        "direction",
+        "run-id",
+        "output-path",
+        "training-image",
+        "register-model",
+        "model-package-group-name",
+        "approval-status",
+        "init-model",
+        # Tracked as its own top-level run_metadata["base_model"] field by
+        # the self-registration path in train.py, never as a
+        # "hyperparameters" entry -- excluded here so this reconstructed
+        # path doesn't record a hp_base_model field the primary
+        # self-registration path never produces (code review on PR #191).
+        "base-model",
+    }
+    hyperparameters_for_metadata = {
+        key.replace("-", "_"): value
+        for key, value in hyperparameters.items()
+        if key not in excluded
+    }
+    return {
+        "corpus_version": hyperparameters.get("corpus-version", "unknown"),
+        "direction": hyperparameters.get("direction", "unknown"),
+        "run_id": hyperparameters.get("run-id", "unknown"),
+        "hyperparameters": hyperparameters_for_metadata,
+    }
+
+
+def register_existing_job(
+    job_name: str,
+    *,
+    sm_client: Any,
+    s3_client: Any,
+    model_package_group_name: str,
+    approval_status: str,
+) -> str:
+    """Register an already-completed training job's artifact, by job name
+    (issue #190's explicit opt-in path -- `submit_job.py --register-existing
+    <job-name>`). For a job that predates self-registration entirely, or
+    one submitted with `--no-register`/`--no-wait` that a maintainer now
+    wants registered after the fact.
+
+    Looks up the job's own model artifact URI/training image/submitted
+    hyperparameters via `describe_training_job` -- a maintainer never needs
+    to re-type any of that by hand. Still downloads the full
+    `model.tar.gz` (streamed to disk, issue #188) to read its model card:
+    unlike the eliminated per-submission client-side download this
+    replaces, this is a rare, explicit, one-off action, not every real
+    job's default path.
+
+    Re-running this against a job that already self-registered creates a
+    redundant (but harmless) additional Model Package version pointing at
+    the same artifact -- this is intentionally for jobs that never
+    self-registered in the first place.
+    """
+    description = sm_client.describe_training_job(TrainingJobName=job_name)
+    model_data_url = description["ModelArtifacts"]["S3ModelArtifacts"]
+    image_uri = description["AlgorithmSpecification"]["TrainingImage"]
+    job_hyperparameters = description.get("HyperParameters", {})
+    run_metadata = _reconstruct_run_metadata_from_job_hyperparameters(job_hyperparameters)
+
+    return register_model(
+        sm_client,
+        s3_client,
+        model_package_group_name=model_package_group_name,
+        model_data_url=model_data_url,
+        image_uri=image_uri,
+        run_metadata=run_metadata,
+        approval_status=approval_status,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +894,21 @@ def _print_dry_run_config(outputs: dict[str, str], config: dict[str, Any]) -> No
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.register_existing:
+        # Explicit opt-in path (issue #190): register an already-completed
+        # job's artifact, by name, instead of submitting anything new.
+        sm_client = boto3.client("sagemaker")
+        s3_client = boto3.client("s3")
+        model_package_arn = register_existing_job(
+            args.register_existing,
+            sm_client=sm_client,
+            s3_client=s3_client,
+            model_package_group_name=args.model_package_group_name,
+            approval_status=args.approval_status,
+        )
+        print(f"Registered model package: {model_package_arn}")
+        return 0
 
     cfn_client = boto3.client("cloudformation")
     outputs = resolve_stack_outputs(args.environment, cloudformation_client=cfn_client)
@@ -853,64 +946,15 @@ def main(argv: list[str] | None = None) -> int:
         # during training-job creation, not read lazily afterward.
         shutil.rmtree(bundle_dir, ignore_errors=True)
 
-    if args.no_wait or args.no_register:
-        return 0
-
-    submitted_hyperparameters = {
-        "epochs": config["hyperparameters"]["epochs"],
-        "batch_size": config["hyperparameters"]["batch-size"],
-        "learning_rate": config["hyperparameters"]["learning-rate"],
-        "max_length": config["hyperparameters"]["max-length"],
-        "seed": config["hyperparameters"]["seed"],
-        "warmup_ratio": config["hyperparameters"]["warmup-ratio"],
-        "weight_decay": config["hyperparameters"]["weight-decay"],
-        "label_smoothing": config["hyperparameters"]["label-smoothing"],
-        "gradient_accumulation_steps": config["hyperparameters"]["gradient-accumulation-steps"],
-        "subword_vocab_size": config["hyperparameters"]["subword-vocab-size"],
-    }
-    # Issue #182 code review: `build_hyperparameters` only adds these two to
-    # the *training job's* own hyperparameters when explicitly set (see its
-    # own docstring) -- this reconstruction must mirror that conditional
-    # inclusion exactly, or a real run using either flag would train
-    # correctly but leave no record of it in the Model Registry entry
-    # `_build_customer_metadata` builds from this dict.
-    if "dropout" in config["hyperparameters"]:
-        submitted_hyperparameters["dropout"] = config["hyperparameters"]["dropout"]
-    if "bpe-dropout-alpha" in config["hyperparameters"]:
-        submitted_hyperparameters["bpe_dropout_alpha"] = config["hyperparameters"][
-            "bpe-dropout-alpha"
-        ]
-
-    run_metadata = {
-        "corpus_version": config["hyperparameters"]["corpus-version"],
-        "direction": config["hyperparameters"]["direction"],
-        "run_id": config["hyperparameters"]["run-id"],
-        "hyperparameters": submitted_hyperparameters,
-    }
-
-    # v3's ModelTrainer doesn't expose `.model_data`/`.image_uri` the way
-    # v2's HuggingFace estimator did -- the completed job's model artifact
-    # URI lives on the underlying TrainingJob resource (refreshed to a
-    # terminal state by the waited-for `.train()` call above), and the image
-    # URI is simply what this module resolved and passed in itself (module
-    # docstring). `_latest_training_job` is the SDK's own documented way to
-    # reach the created job (see `sagemaker.train.ModelTrainer`'s docstring).
-    training_job = estimator._latest_training_job
-    model_data_url = training_job.model_artifacts.s3_model_artifacts
-    image_uri = estimator.training_image
-
-    sm_client = boto3.client("sagemaker")
-    s3_client = boto3.client("s3")
-    model_package_arn = register_model(
-        sm_client,
-        s3_client,
-        model_package_group_name=args.model_package_group_name,
-        model_data_url=model_data_url,
-        image_uri=image_uri,
-        run_metadata=run_metadata,
-        approval_status=args.approval_status,
-    )
-    print(f"Registered model package: {model_package_arn}")
+    # Issue #190: no client-side registration here any more.
+    # `config["hyperparameters"]` already told the submitted job (via
+    # `register-model`/`output-path`/`training-image`/
+    # `model-package-group-name`/`approval-status`) everything it needs to
+    # register its own completed model package from inside the container,
+    # with no download of the training artifact -- see train.py's
+    # `register_model_from_training_job`. This happens whether or not this
+    # process waited for the job (`--no-wait`); only `--no-register`
+    # disables it.
     return 0
 
 

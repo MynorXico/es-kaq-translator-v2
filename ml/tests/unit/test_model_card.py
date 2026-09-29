@@ -8,7 +8,7 @@ one (ADR 0002).
 """
 
 from evaluation.metrics import MetricsResult
-from evaluation.model_card import ModelCardData, render_model_card
+from evaluation.model_card import ModelCardData, parse_model_card_metrics, render_model_card
 
 
 def make_card_data(**overrides) -> ModelCardData:
@@ -91,3 +91,26 @@ def test_render_model_card_omits_per_direction_section_when_absent():
     card = render_model_card(make_card_data(per_direction_metrics=None))
 
     assert "Metrics by direction" not in card
+
+
+# ---------------------------------------------------------------------------
+# parse_model_card_metrics (issue #190: moved here from training.submit_job
+# so both training.train's self-registration and training.submit_job's
+# existing-artifact registration can share one implementation instead of
+# each maintaining its own copy of the same regex).
+# ---------------------------------------------------------------------------
+
+
+def test_parse_model_card_metrics_extracts_bleu_and_chrf_from_a_rendered_card():
+    card = render_model_card(make_card_data())
+
+    metrics = parse_model_card_metrics(card)
+
+    assert metrics["bleu"] == "24.7"
+    assert metrics["chrf"] == "48.2"
+
+
+def test_parse_model_card_metrics_returns_empty_dict_when_metrics_absent():
+    metrics = parse_model_card_metrics("# Model card: run-x\n\nNo metrics here.\n")
+
+    assert metrics == {}

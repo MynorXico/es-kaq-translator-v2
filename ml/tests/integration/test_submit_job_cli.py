@@ -82,14 +82,20 @@ def test_dry_run_resolves_config_end_to_end_without_touching_fit(monkeypatch, ca
     assert "fake-training-image" in captured.out
 
 
-def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
+def test_full_submission_never_registers_client_side_and_passes_self_registration_hyperparameters(
+    monkeypatch,
+):
+    """Issue #190: registration now happens from inside the training
+    container (`train.py` self-registers, reading its own just-written
+    model card, no artifact download) -- `main()` itself must never call
+    `create_model_package` after a waited-for run completes any more.
+    Instead, it must tell the submitted job everything it needs to
+    self-register: `register-model`, `output-path`, `training-image`,
+    `model-package-group-name`, `approval-status`.
+    """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
-    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
-    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3_client = MagicMock()
-    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
-    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
 
     def fake_boto3_client(service, **kwargs):
         return {
@@ -109,7 +115,7 @@ def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
     fake_model_trainer_cls = MagicMock(return_value=fake_estimator)
     monkeypatch.setattr(submit_job, "ModelTrainer", fake_model_trainer_cls)
 
-    exit_code = submit_job.main(["--run-id", "run-test"])
+    exit_code = submit_job.main(["--run-id", "run-test", "--dropout", "0.3"])
 
     assert exit_code == 0
     # Estimator was built with the resolved role/bucket, not placeholders.
@@ -125,74 +131,51 @@ def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
     assert train_kwargs["wait"] is True
     assert train_kwargs["logs"] is True
 
-    fake_sm_client.create_model_package_group.assert_called_once()
-    _, register_kwargs = fake_sm_client.create_model_package.call_args
-    assert register_kwargs["CustomerMetadataProperties"]["bleu"] == "12.3"
-    assert register_kwargs["CustomerMetadataProperties"]["chrf"] == "34.5"
-    assert register_kwargs["InferenceSpecification"]["Containers"][0]["Image"] == (
-        "fake-training-image"
-    )
-    assert register_kwargs["InferenceSpecification"]["Containers"][0]["ModelDataUrl"] == (
-        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
-    )
-    # Issue #182 code review: dropout/bpe-dropout-alpha are never set on
-    # this default (no --dropout/--bpe-dropout-alpha) submission, so their
-    # Model Registry metadata keys must not appear either.
-    assert "hp_dropout" not in register_kwargs["CustomerMetadataProperties"]
-    assert "hp_bpe-dropout-alpha" not in register_kwargs["CustomerMetadataProperties"]
-    assert "hp_bpe_dropout_alpha" not in register_kwargs["CustomerMetadataProperties"]
+    hyperparameters = estimator_kwargs["hyperparameters"]
+    assert hyperparameters["register-model"] == "true"
+    assert hyperparameters["output-path"] == "s3://fake-bucket/model-artifacts/"
+    assert hyperparameters["training-image"] == "fake-training-image"
+    assert hyperparameters["model-package-group-name"] == submit_job.DEFAULT_MODEL_PACKAGE_GROUP_NAME
+    assert hyperparameters["approval-status"] == submit_job.DEFAULT_APPROVAL_STATUS
+    assert hyperparameters["dropout"] == 0.3
+
+    # No client-side registration -- train.py handles it from inside the
+    # container now.
+    fake_sm_client.create_model_package.assert_not_called()
+    fake_sm_client.create_model_package_group.assert_not_called()
+    fake_s3_client.download_file.assert_not_called()
 
 
-def test_full_submission_records_dropout_and_bpe_dropout_alpha_in_registry_metadata_when_given(
-    monkeypatch,
-):
-    """Code review finding on PR #183: `main()`'s own `run_metadata`
-    reconstruction (used for `register_model`'s `CustomerMetadataProperties`)
-    hardcoded a fixed hyperparameter key list that predated `--dropout`/
-    `--bpe-dropout-alpha`, so a real run using either would train correctly
-    but leave the registry entry with no record of which experiment
-    produced it -- `build_hyperparameters` (the training job's own
-    hyperparameters) already included them, but `main()`'s *separate*
-    reconstruction of `run_metadata["hyperparameters"]` from
-    `config["hyperparameters"]` did not. This must not regress.
-    """
+def test_no_register_tells_the_submitted_job_not_to_self_register(monkeypatch):
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
-    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
-    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
-    fake_s3_client = MagicMock()
-    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
-    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(tarball_bytes)
-
-    def fake_boto3_client(service, **kwargs):
-        return {
-            "cloudformation": fake_cfn_client,
-            "sagemaker": fake_sm_client,
-            "s3": fake_s3_client,
-        }[service]
-
-    monkeypatch.setattr(submit_job.boto3, "client", fake_boto3_client)
+    monkeypatch.setattr(
+        submit_job.boto3,
+        "client",
+        lambda service, **kw: {"cloudformation": fake_cfn_client, "sagemaker": fake_sm_client}[service],
+    )
     monkeypatch.setattr(submit_job, "_retrieve_image_uri", lambda **kw: "fake-training-image")
 
     fake_estimator = MagicMock()
-    fake_estimator.training_image = "fake-training-image"
-    fake_estimator._latest_training_job.model_artifacts.s3_model_artifacts = (
-        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
-    )
     fake_model_trainer_cls = MagicMock(return_value=fake_estimator)
     monkeypatch.setattr(submit_job, "ModelTrainer", fake_model_trainer_cls)
 
-    exit_code = submit_job.main(
-        ["--run-id", "run-test", "--dropout", "0.3", "--bpe-dropout-alpha", "0.1"]
-    )
+    exit_code = submit_job.main(["--run-id", "run-test", "--no-register"])
 
     assert exit_code == 0
-    _, register_kwargs = fake_sm_client.create_model_package.call_args
-    assert register_kwargs["CustomerMetadataProperties"]["hp_dropout"] == "0.3"
-    assert register_kwargs["CustomerMetadataProperties"]["hp_bpe_dropout_alpha"] == "0.1"
+    _, estimator_kwargs = fake_model_trainer_cls.call_args
+    assert estimator_kwargs["hyperparameters"]["register-model"] == "false"
+    fake_sm_client.create_model_package.assert_not_called()
 
 
-def test_no_wait_skips_registration(monkeypatch):
+def test_no_wait_does_not_prevent_the_self_registration_hyperparameter(monkeypatch):
+    """Issue #190 behavioral change: since registration now happens inside
+    the training container (asynchronously, whenever the job itself
+    finishes), it no longer depends on whether the *submitting* CLI
+    process waited around for it -- unlike before, when `--no-wait` had to
+    also skip registration because there was nothing to register from the
+    client side until the job completed.
+    """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
     monkeypatch.setattr(
@@ -210,4 +193,57 @@ def test_no_wait_skips_registration(monkeypatch):
 
     assert exit_code == 0
     fake_estimator.train.assert_called_once()
+    _, train_kwargs = fake_estimator.train.call_args
+    assert train_kwargs["wait"] is False
+    _, estimator_kwargs = fake_model_trainer_cls.call_args
+    assert estimator_kwargs["hyperparameters"]["register-model"] == "true"
     fake_sm_client.create_model_package.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# --register-existing (issue #190's explicit opt-in path)
+# ---------------------------------------------------------------------------
+
+
+def test_register_existing_looks_up_the_job_and_registers_without_submitting_anything(monkeypatch):
+    fake_sm_client = MagicMock()
+    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm_client.describe_training_job.return_value = {
+        "ModelArtifacts": {
+            "S3ModelArtifacts": "s3://fake-bucket/model-artifacts/prior-run/output/model.tar.gz"
+        },
+        "AlgorithmSpecification": {"TrainingImage": "fake-training-image"},
+        "HyperParameters": {
+            "corpus-version": "almg-v1",
+            "direction": "both",
+            "run-id": "prior-run",
+            "epochs": "3",
+        },
+    }
+    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
+    fake_s3_client = MagicMock()
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(
+        tarball_bytes
+    )
+
+    def fake_boto3_client(service, **kwargs):
+        return {"sagemaker": fake_sm_client, "s3": fake_s3_client}[service]
+
+    monkeypatch.setattr(submit_job.boto3, "client", fake_boto3_client)
+    fake_model_trainer_cls = MagicMock()
+    monkeypatch.setattr(submit_job, "ModelTrainer", fake_model_trainer_cls)
+
+    exit_code = submit_job.main(["--register-existing", "prior-run"])
+
+    assert exit_code == 0
+    fake_sm_client.describe_training_job.assert_called_once_with(TrainingJobName="prior-run")
+    fake_model_trainer_cls.assert_not_called()  # never submits a new job
+    _, register_kwargs = fake_sm_client.create_model_package.call_args
+    assert register_kwargs["InferenceSpecification"]["Containers"][0]["ModelDataUrl"] == (
+        "s3://fake-bucket/model-artifacts/prior-run/output/model.tar.gz"
+    )
+    assert register_kwargs["CustomerMetadataProperties"]["corpus_version"] == "almg-v1"
+    assert register_kwargs["CustomerMetadataProperties"]["run_id"] == "prior-run"
+    assert register_kwargs["CustomerMetadataProperties"]["hp_epochs"] == "3"
+    assert register_kwargs["CustomerMetadataProperties"]["bleu"] == "12.3"
