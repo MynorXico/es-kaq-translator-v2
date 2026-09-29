@@ -45,6 +45,14 @@ def _make_fixture_checkpoint(
     (checkpoint_dir / "rng_state.pth").write_text("fake-rng-state", encoding="utf-8")
     (checkpoint_dir / "trainer_state.json").write_text("{}", encoding="utf-8")
     (checkpoint_dir / "training_args.bin").write_text("fake-training-args", encoding="utf-8")
+    # fp16 AMP grad-scaler state -- written by a real `Seq2SeqTrainer`
+    # checkpoint whenever `fp16=True` (always true for this project's real
+    # GPU training runs, see `training.train.build_training_arguments`),
+    # confirmed against a real v8 (dropout) run's checkpoint during issue
+    # #192's real checkpoint-averaging evaluation. Like the other
+    # training-progress files above, this must never be copied into an
+    # averaged checkpoint's output directory.
+    (checkpoint_dir / "scaler.pt").write_text("fake-scaler-state", encoding="utf-8")
     return checkpoint_dir
 
 
@@ -82,7 +90,7 @@ def test_average_checkpoints_never_copies_training_progress_files(tmp_path: Path
     output_dir = average_checkpoints(checkpoint_dirs, tmp_path / "averaged")
 
     for excluded in ("optimizer.pt", "scheduler.pt", "rng_state.pth", "trainer_state.json",
-                     "training_args.bin"):
+                     "training_args.bin", "scaler.pt"):
         assert not (output_dir / excluded).exists()
 
 

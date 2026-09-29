@@ -6,9 +6,10 @@ ever existed for any past training run), so a real training run's
 `--model-dir/checkpoints/` now contains one `checkpoint-<step>` directory
 per epoch (the shape `transformers.Seq2SeqTrainer`'s own checkpointing
 writes: `model.safetensors`, `config.json`, `generation_config.json`,
-`trainer_state.json`, `optimizer.pt`, `scheduler.pt`, `rng_state.pth`,
-`training_args.bin` -- confirmed directly against a real
-`facebook/m2m100_418M` fine-tuning run, not assumed).
+`trainer_state.json`, `optimizer.pt`, `scheduler.pt`, `scaler.pt` (the
+fp16 AMP grad-scaler state), `rng_state.pth`, `training_args.bin` --
+confirmed directly against a real `facebook/m2m100_418M` fine-tuning
+run, not assumed).
 
 Averaging the weights of the final few epochs' checkpoints ("checkpoint
 averaging"/"weight averaging") is a well-known, cheap way to reduce
@@ -50,12 +51,23 @@ DEFAULT_AVERAGE_N = 3
 _CHECKPOINT_DIR_RE = re.compile(r"^checkpoint-(\d+)$")
 
 # Files a real Seq2SeqTrainer checkpoint directory contains that describe
-# *training progress* (optimizer/scheduler/RNG state, the trainer's own
-# step/epoch bookkeeping) or *this specific run's* CLI config -- none of
-# which are meaningful facts about the averaged weights themselves, so
-# they're never copied into an averaged checkpoint's output directory.
-# WEIGHTS_FILENAME is excluded too since it's written separately, from the
-# averaged tensors, not copied from any one source checkpoint.
+# *training progress* (optimizer/scheduler/RNG/AMP-scaler state, the
+# trainer's own step/epoch bookkeeping) or *this specific run's* CLI config
+# -- none of which are meaningful facts about the averaged weights
+# themselves, so they're never copied into an averaged checkpoint's output
+# directory. WEIGHTS_FILENAME is excluded too since it's written separately,
+# from the averaged tensors, not copied from any one source checkpoint.
+#
+# `scaler.pt` (the fp16 AMP grad-scaler's own state) was missing from this
+# set until issue #192's real checkpoint-averaging evaluation caught it: a
+# real v8 (`--dropout 0.3`) run's checkpoint carried one (every real GPU
+# training run in this project sets `fp16=True`, see
+# `training.train.build_training_arguments`), and it was silently copied
+# into the averaged output directory alongside the other, correctly
+# excluded, training-progress files. Harmless to a later `from_pretrained`
+# load (an unrecognized file is just ignored), but it's exactly the same
+# class of "training progress, not a fact about the averaged weights"
+# leftover this set exists to keep out, so it belongs here too.
 _EXCLUDED_FILENAMES = frozenset(
     {
         WEIGHTS_FILENAME,
@@ -64,6 +76,7 @@ _EXCLUDED_FILENAMES = frozenset(
         "rng_state.pth",
         "trainer_state.json",
         "training_args.bin",
+        "scaler.pt",
     }
 )
 
