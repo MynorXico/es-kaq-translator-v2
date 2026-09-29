@@ -1208,8 +1208,9 @@ variable" discipline as issue #82's own subword-vocabulary follow-up.
    checkpoint-invariant non-weight files (`config.json`,
    `generation_config.json`, ...) from the most recent one and explicitly
    excluding training-progress files (`optimizer.pt`, `scheduler.pt`,
-   `rng_state.pth`, `trainer_state.json`, `training_args.bin`) that
-   describe training progress, not the averaged weights themselves.
+   `scaler.pt`, `rng_state.pth`, `trainer_state.json`,
+   `training_args.bin`) that describe training progress, not the
+   averaged weights themselves.
    `average_state_dicts` processes checkpoints one at a time via a running
    sum (accepting any `Iterable`, not just a `list`) rather than loading
    every checkpoint's full weights into memory simultaneously -- PR #183

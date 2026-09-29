@@ -6,9 +6,10 @@ ever existed for any past training run), so a real training run's
 `--model-dir/checkpoints/` now contains one `checkpoint-<step>` directory
 per epoch (the shape `transformers.Seq2SeqTrainer`'s own checkpointing
 writes: `model.safetensors`, `config.json`, `generation_config.json`,
-`trainer_state.json`, `optimizer.pt`, `scheduler.pt`, `rng_state.pth`,
-`training_args.bin` -- confirmed directly against a real
-`facebook/m2m100_418M` fine-tuning run, not assumed).
+`trainer_state.json`, `optimizer.pt`, `scheduler.pt`, `scaler.pt` (the
+fp16 AMP grad-scaler state), `rng_state.pth`, `training_args.bin` --
+confirmed directly against a real `facebook/m2m100_418M` fine-tuning
+run, not assumed).
 
 Averaging the weights of the final few epochs' checkpoints ("checkpoint
 averaging"/"weight averaging") is a well-known, cheap way to reduce
