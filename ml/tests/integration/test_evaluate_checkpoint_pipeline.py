@@ -240,6 +240,88 @@ def test_run_checkpoint_evaluation_threads_a_caller_supplied_num_beams_through(t
     assert "- **num_beams**: 8" in card_text
 
 
+def test_run_checkpoint_evaluation_disables_length_bias_debiasing_by_default(tmp_path):
+    # Issue #193: no --debias-delta-multiplier means no logits_processor at
+    # all reaches generate_translations -- every existing/prior
+    # re-evaluation's decode behavior must stay completely unchanged.
+    args, _ = _base_args(tmp_path)
+    translator = capturing_translator_factory()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=fake_model_loader,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=translator,
+    )
+
+    assert "logits_processor" not in translator.calls[0]
+
+
+def test_run_checkpoint_evaluation_builds_a_length_bias_logits_processor_from_the_cli_flag(
+    tmp_path,
+):
+    # Issue #193: --debias-delta-multiplier k computes delta = k /
+    # vocab_size (the checkpoint's own, already-extended vocab, via
+    # tokenizer.get_vocab() -- the same method used for --base-model's
+    # pristine vocab above) and threads a real logits processor through to
+    # generate_translations. The actual torch/transformers-building step
+    # is injected as a fake here (duck-type and fixture convention) so this
+    # stays a fast, no-torch-tensor-needed smoke test of the *wiring*.
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            return {str(i): i for i in range(10)}  # vocab_size == 10
+
+    def model_loader_with_vocab(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    built_deltas: list[float] = []
+
+    def fake_logits_processor_builder(delta: float):
+        built_deltas.append(delta)
+        return f"sentinel-processor-delta={delta}"
+
+    args, _ = _base_args(tmp_path, debias_delta_multiplier=2.0)
+    translator = capturing_translator_factory()
+
+    run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=model_loader_with_vocab,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=translator,
+        logits_processor_builder=fake_logits_processor_builder,
+    )
+
+    assert built_deltas == [2.0 / 10]
+    assert translator.calls[0]["logits_processor"] == "sentinel-processor-delta=0.2"
+
+
+def test_run_checkpoint_evaluation_records_debiasing_in_the_model_card(tmp_path):
+    class FakeCheckpointTokenizerWithVocab(FakeCheckpointTokenizer):
+        def get_vocab(self) -> dict[str, int]:
+            return {str(i): i for i in range(20)}
+
+    def model_loader_with_vocab(source: str):
+        return FakeCheckpointTokenizerWithVocab(), FakeCheckpointModel()
+
+    args, _ = _base_args(tmp_path, debias_delta_multiplier=1.0)
+
+    model_card_path = run_checkpoint_evaluation(
+        args,
+        resolve_source=fake_resolve_source,
+        model_loader=model_loader_with_vocab,
+        base_vocab_loader=fake_base_vocab_loader,
+        translator=fake_translator,
+        logits_processor_builder=lambda delta: f"sentinel-{delta}",
+    )
+
+    card_text = model_card_path.read_text(encoding="utf-8")
+    assert "- **debias_delta_multiplier**: 1.0" in card_text
+    assert "- **debias_delta**: 0.05" in card_text
+    assert "- **debias_vocab_size**: 20" in card_text
+
+
 def test_run_checkpoint_evaluation_never_extends_vocabulary(tmp_path):
     args, _ = _base_args(tmp_path)
 

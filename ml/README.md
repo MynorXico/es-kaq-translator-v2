@@ -454,6 +454,109 @@ real checkpoint is a separate, maintainer-run action (issue #108's
 follow-up), same as `training/submit_job.py`'s real training job
 submission.
 
+### Decode-time length-bias rectification for label-smoothed checkpoints (`evaluation/length_bias.py`, issue #193)
+
+Issue #182's label-smoothing experiment (Model Package v9, `--label-smoothing
+0.1`, 13 epochs, otherwise identical to the v7 baseline) scored BLEU 13.2 /
+chrF 36.4 against v7's baseline BLEU 14.0 / chrF 36.5, and was rejected in
+Model Registry on a raw comparison. But Liang, Wang & Cao, "The Implicit
+Length Bias of Label Smoothing on Beam Search Decoding"
+([arXiv:2205.00659](https://arxiv.org/abs/2205.00659)), show label smoothing
+implicitly biases beam search toward *shorter* outputs (their Sec. 3.1: beam
+search scores a sequence by `sum(log(p_hat))`, where `p_hat = (1 - alpha) *
+q + alpha / V` is the label-smoothed model's learned prediction, which adds
+an implicit `log(1 - alpha)` penalty to every generated token relative to
+the true `log(q)`), and that a decode-time rectification recovers real BLEU
+a raw comparison masks. `evaluation/length_bias.py` implements their exact
+proposed correction (their Eq. 4, not a generic length-penalty heuristic):
+
+```
+p_db_i = ReLU(p_hat_i - delta) / sum_j(ReLU(p_hat_j - delta))
+```
+
+applied to the model's own predicted next-token distribution at every beam
+search decode step. `delta = alpha / V` (`V` = vocab size) is the paper's
+theoretically exact inverse of label smoothing's interpolation (their Eq.
+3); their own experiments (Table 1) found a *larger* `delta = 1/V` gives
+near-peak BLEU across every language pair they tested at beam size 4
+(closest to this project's own `--num-beams` default of 5), i.e. stronger-
+than-theoretically-justified debiasing was empirically beneficial in their
+setup too. See the module's own docstring for the full derivation.
+
+Two independent implementations exist, tested against each other
+(`tests/unit/test_length_bias_logits_processor.py`) so they can't silently
+drift apart: `rectify_probabilities` is a pure NumPy reference
+implementation of Eq. 4 (`tests/unit/test_length_bias.py`, including a test
+that rectifying a perfectly label-smoothed distribution exactly recovers the
+original ground-truth distribution -- Eq. 3 as a special case of Eq. 4), and
+`build_length_bias_logits_processor` is the real `transformers.
+LogitsProcessor`-based implementation actually used at decode time (`torch`-
+native, since it has to operate on live GPU-resident tensors at every decode
+step without a per-step CPU round-trip).
+
+`evaluate_checkpoint.py --debias-delta-multiplier <k>` (default `0.0`,
+disabled -- no `logits_processor` reaches `generate_translations` at all,
+so every prior re-evaluation's decode behavior is completely unchanged)
+computes `delta = k / vocab_size` from the checkpoint's own (already
+vocab-extended) tokenizer and threads a real logits processor through
+`generate_translations`/`model.generate()`. Passing the checkpoint's own
+`--label-smoothing` training value (e.g. `0.1`) is the theoretically exact
+rectification; `1.0` is the paper's own empirically near-peak value at small
+beam widths and the recommended first value to try. Recorded in the
+rendered model card's hyperparameters (`debias_delta_multiplier`, and when
+enabled, the resolved `debias_delta`/`debias_vocab_size`) for traceability.
+
+```sh
+uv run python -m evaluation.evaluate_checkpoint \
+  --checkpoint s3://<training-data-bucket>/model-artifacts/<v9-run-id>/output/model.tar.gz \
+  --validation s3://<training-data-bucket>/corpus/almg/v1/val.tsv \
+  --train s3://<training-data-bucket>/corpus/almg/v1/train.tsv \
+  --corpus-version almg-v1 \
+  --source-run-id <v9-run-id> \
+  --output-dir ./eval-output-debiased \
+  --num-beams 5 \
+  --debias-delta-multiplier 1.0
+```
+
+**Real re-scoring result (issue #193): rectification does not close the
+gap -- a fully-settled "label smoothing doesn't help here" finding.**
+Re-scored against real weights (v9's own actual checkpoint, downloaded from
+its S3 training artifact -- not a reconstruction) and v7's own real
+checkpoint, on the *same* 200-pair (400-example, balanced both directions)
+sample of the real `almg-v1` validation set, same `--num-beams 5`, same
+word-boundary reconstruction -- mirroring issue #180's own "n=200/direction,
+same pairs across every setting compared" methodology, since a full
+7,218-example run of three separate decode configs on this project's local
+4GB GPU was not practical within this diagnostic's own scope:
+
+| checkpoint | `--debias-delta-multiplier` | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF |
+|---|---|---|---|---|---|
+| v7 (baseline) | 0.0 (n/a, no label smoothing) | 15.9 | 37.8 | 19.4/40.9 | 9.9/32.8 |
+| v9 | 0.0 (undebiased, as originally rejected) | 14.8 | 37.1 | 19.1/40.1 | 8.4/32.3 |
+| v9 | 0.1 (theoretically exact, `delta = alpha/V`, `alpha=0.1`) | 14.2 | 36.9 | 18.2/40.0 | 8.1/32.0 |
+| v9 | 1.0 (paper's own empirical near-peak at small beam) | 14.3 | 37.1 | 18.3/40.1 | 8.1/32.1 |
+
+(This sample's absolute numbers differ somewhat from the full-validation-set
+numbers registered in Model Registry -- expected sample variance at n=200
+pairs vs. n=3,609 -- but the ordering matches: v7 > v9 undebiased on both
+samples, confirming this smaller matched sample is a reasonable stand-in for
+the question this ticket asks.)
+
+**Neither debiasing configuration improves on v9's own undebiased score,
+let alone closes the gap to v7.** Both the theoretically exact rectification
+and the paper's own stronger, empirically-recommended value are flat-to
+-slightly-worse than `delta=0` on this checkpoint, on the exact same 400
+examples. v9's near-baseline chrF (36.4 vs. v7's 36.5, full-set numbers) is
+**not** evidence of a masked gain in this case -- correcting for the
+mechanism the cited paper describes reveals no hidden quality improvement.
+This closes the question issue #193 opened: **label smoothing (`alpha=0.1`,
+13 epochs, otherwise matching the v7 baseline) does not help this project's
+fine-tuning setup**, even after accounting for its documented beam-search
+length bias. Re-affirms, rather than overturns, Model Package v9's original
+`Rejected` status in Model Registry -- no change to the deployed checkpoint
+or its decode configuration. Per issue #193's own scope, this is a pure
+re-evaluation: no retraining, no new Model Registry model package.
+
 ### Verifying the reconstruction against a real checkpoint (maintainer step)
 
 The claim that reconstruction exactly matches a real checkpoint's own

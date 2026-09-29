@@ -1071,6 +1071,7 @@ def generate_translations(
     max_length: int = 128,
     batch_size: int = 16,
     num_beams: int = DEFAULT_NUM_BEAMS,
+    logits_processor: Any = None,
 ) -> list[str]:
     """Generate hypothesis translations for `examples` using `model.generate`.
 
@@ -1124,6 +1125,16 @@ def generate_translations(
     `ml/README.md` for the full history. This mirrors the fix already
     applied to `deployment/inference.py`'s real-time serving path (issue
     #8); both now share the one implementation.
+
+    `logits_processor` (issue #193, default `None`) is passed straight
+    through to `model.generate(...)` only when supplied -- omitted
+    entirely otherwise, so every existing caller's decode behavior is
+    completely unchanged. `evaluation.evaluate_checkpoint`'s
+    `--debias-delta-multiplier` builds one via
+    `evaluation.length_bias.build_length_bias_logits_processor` to apply
+    the label-smoothing length-bias rectification (Liang, Wang & Cao,
+    arXiv:2205.00659) at real decode time, without this shared generation
+    function needing to know anything about that paper's math itself.
     """
     hypotheses: list[str | None] = [None] * len(examples)
     indices_by_target_lang: dict[str, list[int]] = {}
@@ -1144,12 +1155,14 @@ def generate_translations(
                 truncation=True,
                 max_length=max_length,
             ).to(model.device)
-            generated_ids = model.generate(
-                **encoded,
-                forced_bos_token_id=forced_bos_token_id,
-                max_length=max_length,
-                num_beams=num_beams,
-            )
+            generate_kwargs: dict[str, Any] = {
+                "forced_bos_token_id": forced_bos_token_id,
+                "max_length": max_length,
+                "num_beams": num_beams,
+            }
+            if logits_processor is not None:
+                generate_kwargs["logits_processor"] = logits_processor
+            generated_ids = model.generate(**encoded, **generate_kwargs)
             decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
             for i, text in zip(batch_indices, decoded, strict=True):
                 hypotheses[i] = strip_leading_direction_tag(text, target_lang)

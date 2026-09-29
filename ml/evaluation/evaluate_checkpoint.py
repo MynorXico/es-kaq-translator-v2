@@ -169,6 +169,7 @@ from pathlib import Path
 from typing import Any
 
 from data.corpus_io import read_tsv_pairs
+from evaluation.length_bias import build_length_bias_logits_processor
 from evaluation.run import run_evaluation
 from training.direction import ALL_DIRECTION_TAG_TOKENS, DIRECTION_CHOICES, build_direction_examples
 from training.subword_vocab import WORD_BOUNDARY_MARKER
@@ -304,6 +305,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "carried. Override this (e.g. --num-beams 8) to validate issue "
             "#178's decode-parameter sweep finding at scale against a real "
             "checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--debias-delta-multiplier",
+        type=float,
+        default=0.0,
+        help=(
+            "Decode-time length-bias rectification for label-smoothed "
+            "checkpoints (issue #193), implementing Liang, Wang & Cao, "
+            "'The Implicit Length Bias of Label Smoothing on Beam Search "
+            "Decoding' (arXiv:2205.00659), Eq. 4 -- see "
+            "evaluation.length_bias's module docstring for the full "
+            "derivation. 0.0 (default) disables rectification entirely: "
+            "no logits_processor reaches generate_translations, matching "
+            "this script's prior behavior exactly. The debiasing "
+            "parameter actually used is delta = "
+            "(this multiplier) / (checkpoint's own vocab size) -- passing "
+            "the checkpoint's own --label-smoothing training value here "
+            "(e.g. 0.1) is the paper's theoretically exact inverse of "
+            "label smoothing's interpolation (their Eq. 3); passing 1.0 "
+            "is the paper's own empirically near-peak value at small beam "
+            "widths (their Table 1, beam size 4, closest to this "
+            "project's own --num-beams default of 5) and is the "
+            "recommended value to try first for a checkpoint whose exact "
+            "label-smoothing alpha isn't at hand."
         ),
     )
 
@@ -675,6 +701,7 @@ def run_checkpoint_evaluation(
     model_loader: Callable[[str], tuple[Any, Any]] = load_checkpoint_tokenizer_and_model,
     base_vocab_loader: Callable[[str], dict[str, int]] = load_base_tokenizer_vocab,
     translator: Callable[..., list[str]] = generate_translations,
+    logits_processor_builder: Callable[[float], Any] = build_length_bias_logits_processor,
 ) -> Path:
     """Run the full eval-only job: load validation corpus -> load
     checkpoint -> reconstruct + patch issue #116's word-boundary decoding
@@ -684,9 +711,9 @@ def run_checkpoint_evaluation(
     Deliberately does **not** call `training.train.fine_tune` or
     `training.train.extend_vocabulary_for_examples` -- see this module's
     own docstring for why. `resolve_source`/`model_loader`/
-    `base_vocab_loader`/`translator` default to the real implementations
-    above; tests inject fakes in their place (see `tests/integration/
-    test_evaluate_checkpoint_pipeline.py`).
+    `base_vocab_loader`/`translator`/`logits_processor_builder` default to
+    the real implementations above; tests inject fakes in their place (see
+    `tests/integration/test_evaluate_checkpoint_pipeline.py`).
     """
     run_id = args.run_id or datetime.now(UTC).strftime("reeval-%Y%m%dT%H%M%SZ")
 
@@ -722,14 +749,27 @@ def run_checkpoint_evaluation(
         boundary_tokens, tokenizer, base_vocab, checkpoint_new_tokens_added
     )
 
-    hypotheses = translator(
-        model,
-        tokenizer,
-        val_examples,
-        max_length=args.max_length,
-        batch_size=args.batch_size,
-        num_beams=args.num_beams,
-    )
+    # Issue #193: decode-time length-bias rectification for label-smoothed
+    # checkpoints (Liang, Wang & Cao, arXiv:2205.00659) -- see
+    # evaluation.length_bias's module docstring for the full derivation and
+    # --debias-delta-multiplier's help text for the CLI contract. Disabled
+    # (multiplier 0.0, the default) is a true no-op: no logits_processor
+    # kwarg reaches `translator` at all, so this script's decode behavior
+    # is unchanged from before this feature existed unless a caller
+    # explicitly opts in.
+    generate_kwargs: dict[str, Any] = {
+        "max_length": args.max_length,
+        "batch_size": args.batch_size,
+        "num_beams": args.num_beams,
+    }
+    debias_delta: float | None = None
+    debias_vocab_size: int | None = None
+    if args.debias_delta_multiplier:
+        debias_vocab_size = len(tokenizer.get_vocab())
+        debias_delta = args.debias_delta_multiplier / debias_vocab_size
+        generate_kwargs["logits_processor"] = logits_processor_builder(debias_delta)
+
+    hypotheses = translator(model, tokenizer, val_examples, **generate_kwargs)
     references = [example.target_text for example in val_examples]
     # Issue #178: recorded alongside predictions/references so BLEU/chrF can
     # be bucketed per direction (es->cak vs. cak->es) rather than only ever
@@ -763,6 +803,12 @@ def run_checkpoint_evaluation(
             "max_length": args.max_length,
             "batch_size": args.batch_size,
             "num_beams": args.num_beams,
+            "debias_delta_multiplier": args.debias_delta_multiplier,
+            **(
+                {"debias_delta": debias_delta, "debias_vocab_size": debias_vocab_size}
+                if debias_delta is not None
+                else {}
+            ),
             "word_boundary_reconstruction_train": args.train,
             "word_boundary_tokens_reconstructed": len(boundary_tokens),
             "vocab_extension_scoping": (
