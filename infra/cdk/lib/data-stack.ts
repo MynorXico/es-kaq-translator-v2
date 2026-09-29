@@ -7,6 +7,11 @@ export interface DataStackProps extends StackProps {
   environmentName: string;
 }
 
+// Matches ml/training/model_registry.py's DEFAULT_MODEL_PACKAGE_GROUP_NAME
+// (also duplicated in ml-hosting-stack.ts) -- not sensitive (unlike an
+// account ID), so plain duplication across languages is fine here too.
+const MODEL_PACKAGE_GROUP_NAME = "traductor-kaqchikel-es-cak";
+
 /**
  * Private storage for the ALMG-derived training corpus and trained model
  * artifacts, plus the SageMaker execution role that reads/writes it during
@@ -119,6 +124,49 @@ export class DataStack extends Stack {
           "ec2:DescribeSecurityGroups",
         ],
         resources: ["*"],
+      }),
+    );
+
+    // Issue #190: `train.py` now registers its own completed run's model
+    // package directly from inside the training container -- reading the
+    // model card it just wrote off local disk and calling
+    // CreateModelPackageGroup (idempotent) + CreateModelPackage itself --
+    // instead of `submit_job.py` downloading the *entire* training
+    // artifact client-side afterward just to read that one small file (a
+    // real run's artifact was measured at 30.5GB, issues #187/#188, which
+    // caused a real out-of-memory kill on the maintainer's machine before
+    // #188 fixed the crash and this issue eliminated the download
+    // entirely). Previously only the maintainer's own SSO credentials ever
+    // called these two Model Registry APIs, client-side, after a job
+    // finished. Scoped to this project's one Model Package Group (and the
+    // model package versions created within it), not a wildcard resource.
+    this.sageMakerExecutionRole.addToPolicy(
+      new PolicyStatement({
+        actions: ["sagemaker:CreateModelPackageGroup"],
+        resources: [
+          this.formatArn({
+            service: "sagemaker",
+            resource: "model-package-group",
+            resourceName: MODEL_PACKAGE_GROUP_NAME,
+          }),
+        ],
+      }),
+    );
+    this.sageMakerExecutionRole.addToPolicy(
+      new PolicyStatement({
+        actions: ["sagemaker:CreateModelPackage"],
+        resources: [
+          this.formatArn({
+            service: "sagemaker",
+            resource: "model-package",
+            // Versioned model package ARNs are `model-package/<group>/<version>`
+            // (same convention ml-hosting-stack.ts's own ARN construction
+            // uses to reference one) -- the version isn't knowable ahead of
+            // time here, so this scopes to every version within this one
+            // group rather than a wildcard across all groups.
+            resourceName: `${MODEL_PACKAGE_GROUP_NAME}/*`,
+          }),
+        ],
       }),
     );
 

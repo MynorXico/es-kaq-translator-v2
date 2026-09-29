@@ -62,12 +62,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import math
 import os
 import re
 import sys
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -100,6 +101,11 @@ from training.direction import (
     collect_texts_for_language,
     strip_leading_direction_tag,
     tag_source_text,
+)
+from training.model_registry import (
+    DEFAULT_APPROVAL_STATUS,
+    DEFAULT_MODEL_PACKAGE_GROUP_NAME,
+    register_model_package,
 )
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
 from training.tokenizer_extension import (
@@ -222,6 +228,26 @@ def _resolve_vocab_extension_scoping_for_model_card(
     if ancestor_scoping == VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY:
         return VOCAB_EXTENSION_SCOPING_KAQCHIKEL_ONLY
     return None
+
+
+def _parse_bool_hyperparameter(value: str) -> bool:
+    """`type=` callback for `--register-model` (issue #190).
+
+    SageMaker's own hyperparameter-passing convention serializes every
+    value to a literal `--<key> <value>` CLI flag regardless of the
+    original Python type (see `submit_job.py`'s module docstring) -- a
+    hyperparameter can never be a bare boolean flag with no value, so
+    `--register-model` always receives a string ("true"/"false") rather
+    than using `action="store_true"`.
+    """
+    normalized = value.strip().lower()
+    if normalized in ("true", "1", "yes"):
+        return True
+    if normalized in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected a boolean-like value (true/false), got {value!r}"
+    )
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -428,6 +454,71 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "maintainer-approved experiment. Never applied to the "
             "validation dataset, which must stay deterministic (see "
             "TranslationDataset's docstring)."
+        ),
+    )
+    parser.add_argument(
+        "--output-path",
+        default=None,
+        help=(
+            "This run's S3 output prefix (e.g. `s3://bucket/model-artifacts/`) "
+            "-- `submit_job.py` always supplies this (it already knows the "
+            "bucket) when `--register-model true` is also passed (issue "
+            "#190), so `register_model_from_training_job` can compute this "
+            "job's own future model artifact S3 URI "
+            "(`{output_path}/{training_job_name}/output/model.tar.gz`, "
+            "SageMaker's own upload convention) before it exists -- no "
+            "download of the artifact required to self-register. `None` "
+            "(the default) leaves self-registration disabled regardless of "
+            "`--register-model`, since the URI can't be computed without it."
+        ),
+    )
+    parser.add_argument(
+        "--training-image",
+        default=None,
+        help=(
+            "The training container's own image URI, to record on the "
+            "self-registered Model Package (issue #190) -- a container has "
+            "no way to discover this about itself, so `submit_job.py` "
+            "(which resolved it to submit this exact job) passes it "
+            "through. `None` (the default) leaves self-registration "
+            "disabled regardless of `--register-model`."
+        ),
+    )
+    parser.add_argument(
+        "--register-model",
+        type=_parse_bool_hyperparameter,
+        default=False,
+        help=(
+            "Self-register this run's completed model package in SageMaker "
+            "Model Registry directly from inside this container, once "
+            "model_card.md is written (issue #190) -- no client-side "
+            "download of the training artifact anywhere in this path, "
+            "unlike the old `submit_job.py`-side registration this "
+            "replaces. Defaults to `false`: every local/test invocation of "
+            "this script that never opts in (i.e. every test in this "
+            "repo's suite) is completely unaffected. `submit_job.py` "
+            "passes `true` by default for a real submission (opt out via "
+            "its own `--no-register`)."
+        ),
+    )
+    parser.add_argument(
+        "--model-package-group-name",
+        default=None,
+        help=(
+            "SageMaker Model Registry group name to self-register into "
+            "(issue #190). Falls back to "
+            "training.model_registry.DEFAULT_MODEL_PACKAGE_GROUP_NAME "
+            "when not given."
+        ),
+    )
+    parser.add_argument(
+        "--approval-status",
+        choices=("PendingManualApproval", "Approved", "Rejected"),
+        default=None,
+        help=(
+            "ModelApprovalStatus to self-register with (issue #190). Falls "
+            "back to training.model_registry.DEFAULT_APPROVAL_STATUS "
+            "(PendingManualApproval) when not given."
         ),
     )
 
@@ -1078,6 +1169,111 @@ def save_model_and_tokenizer(model: Any, tokenizer: Any, model_dir: str) -> None
     tokenizer.save_pretrained(model_dir)
 
 
+# ---------------------------------------------------------------------------
+# Self-registration in SageMaker Model Registry (issue #190)
+# ---------------------------------------------------------------------------
+#
+# Registers this run's own completed model package directly from inside the
+# training container, right after `model_card.md` is written -- with no
+# client-side download of the training artifact anywhere in this path
+# (unlike the old `submit_job.py`-side registration this replaces, which
+# downloaded the *entire* `model.tar.gz` -- measured at 30.5 GB on a real
+# run, issue #187 -- just to extract that one small file).
+#
+# The key trick this whole section builds on: SageMaker only uploads
+# `SM_MODEL_DIR`'s contents to
+# `{output_path}/{training_job_name}/output/model.tar.gz` *after* this
+# script exits -- but that URI is fully deterministic from two values this
+# script already has by the time `run_training_job` reaches its own end:
+# `--output-path` (this run's S3 output prefix, supplied by `submit_job.py`,
+# which already knows the bucket) and this job's own SageMaker-assigned
+# name (read from `SM_TRAINING_ENV`, set by the container's own driver
+# before this script ever runs -- never knowable client-side at submission
+# time, since `ModelTrainer`'s `base_job_name` only seeds a unique suffix
+# `CreateTrainingJob` appends). `CreateModelPackage`'s `ModelDataUrl` isn't
+# validated for existence until actual deploy time, so registering against
+# this not-yet-uploaded URI is safe.
+
+
+def resolve_training_job_name(env: Mapping[str, str] | None = None) -> str:
+    """Read this job's own SageMaker-assigned training job name.
+
+    The container's own driver script
+    (`sagemaker.train.container_drivers.scripts.environment.set_env`)
+    writes a `SM_TRAINING_ENV` environment variable -- a JSON blob whose
+    `job_name` field is exactly this job's real, unique name -- before ever
+    invoking this script. `env` defaults to the real `os.environ`; tests
+    pass a plain dict instead.
+    """
+    env = env if env is not None else os.environ
+    return json.loads(env["SM_TRAINING_ENV"])["job_name"]
+
+
+def compute_model_artifact_s3_uri(output_path: str, training_job_name: str) -> str:
+    """Compute the S3 URI SageMaker will upload this job's `model.tar.gz`
+    artifact to, once this script exits -- deterministic from `output_path`
+    (this run's `OutputDataConfig.s3_output_path`) and `training_job_name`
+    alone, per SageMaker's own upload convention. Computable *before* the
+    artifact exists (see this section's own module-level comment above).
+    """
+    return f"{output_path.rstrip('/')}/{training_job_name}/output/model.tar.gz"
+
+
+def _boto3_client_for_registration(service: str) -> Any:
+    """Thin, separately-monkeypatchable wrapper around `boto3.client`, so
+    `register_model_from_training_job`'s tests never need a real `boto3`
+    session -- mirrors this module's existing lazy-import pattern (see
+    `load_base_model_and_tokenizer`): `boto3` is only ever imported on the
+    (rare, opt-in) path where a run actually self-registers.
+    """
+    import boto3
+
+    return boto3.client(service)
+
+
+def register_model_from_training_job(
+    model_card_path: Path,
+    run_metadata: dict[str, Any],
+    args: argparse.Namespace,
+) -> str | None:
+    """Self-register this run's model package from inside the training
+    container (issue #190), once `model_card_path` has been written.
+
+    A no-op (returns `None`) unless `args.register_model` is true --
+    `submit_job.py` is the only real caller that ever sets it; every
+    local/test invocation of `train.py` that never wires it (i.e. every
+    other test in this repo's suite) leaves this function untouched.
+
+    Raises `ValueError` if `--register-model true` is given without both
+    `--output-path`/`--training-image` -- `submit_job.py` always supplies
+    both together with `--register-model true`, so this only fires for a
+    misconfigured manual invocation, not a real submitted job.
+    """
+    if not args.register_model:
+        return None
+    if not args.output_path or not args.training_image:
+        raise ValueError(
+            "--register-model true requires --output-path and "
+            "--training-image (submit_job.py always supplies both when it "
+            "submits a real job with self-registration enabled)."
+        )
+
+    training_job_name = resolve_training_job_name()
+    model_data_url = compute_model_artifact_s3_uri(args.output_path, training_job_name)
+    model_card_text = model_card_path.read_text(encoding="utf-8")
+
+    sm_client = _boto3_client_for_registration("sagemaker")
+    return register_model_package(
+        sm_client,
+        model_package_group_name=args.model_package_group_name or DEFAULT_MODEL_PACKAGE_GROUP_NAME,
+        model_data_url=model_data_url,
+        image_uri=args.training_image,
+        model_card_text=model_card_text,
+        run_metadata=run_metadata,
+        approval_status=args.approval_status or DEFAULT_APPROVAL_STATUS,
+    )
+
+
 def run_training_job(
     args: argparse.Namespace,
     *,
@@ -1086,14 +1282,20 @@ def run_training_job(
         [Any, Any, list[TranslationExample], list[TranslationExample], argparse.Namespace], Any
     ] = fine_tune,
     translator: Callable[..., list[str]] = generate_translations,
+    registrar: Callable[
+        [Path, dict[str, Any], argparse.Namespace], str | None
+    ] = register_model_from_training_job,
 ) -> Path:
     """Run the full training job: load corpus -> extend vocab -> fine-tune
-    -> save -> evaluate -> write model card. Returns the path to the
-    written model card.
+    -> save -> evaluate -> write model card -> (optionally) self-register.
+    Returns the path to the written model card.
 
-    `model_loader`/`trainer`/`translator` default to the real
+    `model_loader`/`trainer`/`translator`/`registrar` default to the real
     implementations above; tests inject fakes in their place (see this
     module's own docstring and `tests/integration/test_train_pipeline.py`).
+    `registrar` (issue #190) is a no-op by default -- see
+    `register_model_from_training_job`'s own docstring for when it
+    actually registers anything.
     """
     run_id = args.run_id or datetime.now(UTC).strftime("run-%Y%m%dT%H%M%SZ")
 
@@ -1235,6 +1437,12 @@ def run_training_job(
         model_card_path,
         directions_path=directions_path,
     )
+
+    # Issue #190: self-registers this run's completed model package, once
+    # its own model card exists -- a no-op unless `--register-model true`
+    # was actually given (see `register_model_from_training_job`).
+    registrar(model_card_path, run_metadata, args)
+
     return model_card_path
 
 
