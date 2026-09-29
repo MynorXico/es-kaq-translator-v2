@@ -1441,7 +1441,26 @@ def run_training_job(
     # Issue #190: self-registers this run's completed model package, once
     # its own model card exists -- a no-op unless `--register-model true`
     # was actually given (see `register_model_from_training_job`).
-    registrar(model_card_path, run_metadata, args)
+    #
+    # Deliberately isolated: training, evaluation, and the model card are
+    # already done by this point, and the (real, GPU-hours-expensive)
+    # artifact may already be on its way to S3 -- a registration failure
+    # (IAM misconfig, throttling, a missing SM_TRAINING_ENV, a typo'd
+    # --model-package-group-name) must never turn an otherwise fully-
+    # successful run into a Failed SageMaker training job. Printed to
+    # stderr rather than raised: SageMaker captures container stdout/
+    # stderr to CloudWatch Logs regardless of exit code, so this is still
+    # visible to whoever's watching the job, and `submit_job.py`'s
+    # `--register-existing` is the documented fallback for a run whose
+    # self-registration didn't go through.
+    try:
+        registrar(model_card_path, run_metadata, args)
+    except Exception as error:  # noqa: BLE001 -- deliberately broad, see comment above
+        print(
+            f"WARNING: self-registration failed, but the training run itself "
+            f"succeeded (model card at {model_card_path}): {error}",
+            file=sys.stderr,
+        )
 
     return model_card_path
 

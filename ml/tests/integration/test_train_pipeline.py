@@ -870,6 +870,55 @@ def test_run_training_job_default_registrar_is_a_noop_without_register_model_fla
     )
 
 
+def test_run_training_job_does_not_fail_the_job_when_the_registrar_raises(tmp_path, capsys):
+    """A registration failure (IAM misconfig, throttling, a missing
+    SM_TRAINING_ENV, a typo'd --model-package-group-name) must never turn
+    an otherwise fully-successful training run into a Failed SageMaker
+    training job -- training, evaluation, and the model card are already
+    done by the time the registrar runs, and the (real, GPU-hours-
+    expensive) artifact may already be on its way to S3. `run_training_job`
+    must catch any registrar exception, print it loudly (SageMaker
+    captures container stdout/stderr to CloudWatch Logs, so this is how a
+    maintainer would actually see it), and still return the model card
+    path as if nothing failed -- the existing `--register-existing` CLI
+    opt-in is the documented fallback for a run whose self-registration
+    didn't go through.
+    """
+
+    def failing_registrar(model_card_path, run_metadata, args):
+        raise RuntimeError("boom: simulated registration failure")
+
+    model_dir = tmp_path / "model"
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--run-id",
+            "smoke-test-failing-registrar-run",
+        ]
+    )
+
+    model_card_path = run_training_job(
+        args,
+        model_loader=fake_model_loader,
+        trainer=fake_trainer,
+        translator=fake_translator,
+        registrar=failing_registrar,
+    )
+
+    assert model_card_path.exists()
+    captured = capsys.readouterr()
+    assert "boom: simulated registration failure" in captured.err
+
+
 def test_run_training_job_omits_scoping_when_ancestor_checkpoint_has_no_model_card(tmp_path):
     """Same defensive fallback as the pre-#125 case above, for a checkpoint
     directory that has no `model_card.md` at all (e.g. one not produced by

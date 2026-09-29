@@ -762,6 +762,28 @@ def test_reconstruct_run_metadata_pulls_out_identifiers_and_keeps_the_rest_as_hy
     assert metadata["hyperparameters"] == {"epochs": "3", "batch_size": "8"}
 
 
+def test_reconstruct_run_metadata_excludes_base_model():
+    """`base-model` is tracked as its own top-level `run_metadata["base_model"]`
+    field by the self-registration path in `train.py`, never as a
+    `hyperparameters` entry (see `run_training_job`'s own `hyperparameters`
+    dict) -- excluded here too so `--register-existing`'s reconstructed
+    metadata doesn't record a `hp_base_model` field the primary
+    self-registration path never produces (code review on PR #191).
+    """
+    metadata = submit_job._reconstruct_run_metadata_from_job_hyperparameters(
+        {
+            "corpus-version": "almg-v1",
+            "direction": "both",
+            "run-id": "prior-run",
+            "base-model": "facebook/m2m100_418M",
+            "epochs": "3",
+        }
+    )
+
+    assert "base_model" not in metadata["hyperparameters"]
+    assert metadata["hyperparameters"] == {"epochs": "3"}
+
+
 def test_reconstruct_run_metadata_defaults_missing_identifiers_to_unknown():
     metadata = submit_job._reconstruct_run_metadata_from_job_hyperparameters({})
 

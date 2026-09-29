@@ -798,6 +798,12 @@ def _reconstruct_run_metadata_from_job_hyperparameters(
         "model-package-group-name",
         "approval-status",
         "init-model",
+        # Tracked as its own top-level run_metadata["base_model"] field by
+        # the self-registration path in train.py, never as a
+        # "hyperparameters" entry -- excluded here so this reconstructed
+        # path doesn't record a hp_base_model field the primary
+        # self-registration path never produces (code review on PR #191).
+        "base-model",
     }
     hyperparameters_for_metadata = {
         key.replace("-", "_"): value

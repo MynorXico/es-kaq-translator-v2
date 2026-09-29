@@ -995,6 +995,17 @@ redundant (but harmless) extra Model Package version pointing at the same
 artifact -- it's meant for jobs that never registered at all, not to
 re-register an already-registered one.
 
+**Self-registration failures never fail the training job.** `train.py`
+catches any exception from its own registration call (a missing
+`SM_TRAINING_ENV`, an IAM misconfig, throttling, a typo'd
+`--model-package-group-name`) and prints it to stderr rather than letting
+it propagate -- by the time registration runs, training/evaluation/the
+model card are already done, so a registration hiccup shouldn't mark an
+otherwise-successful (real, GPU-hours-expensive) run as Failed. Check the
+job's CloudWatch Logs for a `WARNING: self-registration failed` line if a
+job succeeded but no Model Package appeared, then use
+`--register-existing` above to register it after the fact.
+
 ### Continuing training from a checkpoint
 
 `train.py --init-model <path>` (issue #75) loads a previously fine-tuned
