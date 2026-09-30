@@ -158,6 +158,26 @@ Machine learning pipeline for the Spanish<->Kaqchikel translation model.
     2,677/932, ~74.2%/25.8%), confirming this was purely an
     encoding-normalization fix, not a change to which sentences cluster
     together.
+  - `data/glued_word_signal.py` — full-corpus OCR/digitization glued-word
+    artifact sweep (issue #199, see "Full-corpus data curation sweep"
+    below for the real-corpus results). Two aggregate-only signals: an
+    exact, case-insensitive sweep for the concrete strings issue #116/#125
+    found glued together in generated model output ("dedios", "queestá",
+    "deguatemala", ...), and a conservative general heuristic that flags a
+    rare word as a glued-artifact candidate only if it starts with a
+    common Spanish clitic *and* the remainder is itself independently
+    frequent in the corpus.
+  - `data/alignment_signal.py` — embedding-based source/target
+    alignment-quality signal (issue #199, see "Full-corpus data curation
+    sweep" below). Pure, unit-tested logic
+    (`cosine_similarities`/`auc_separation`/
+    `build_shuffled_control_indices`/`analyze_alignment_signal`) compares
+    real-pair embedding similarity against a shuffled-control baseline,
+    turning "does this embedding model have any usable signal for this
+    language pair" into an empirical, AUC-based question. The real-model
+    embedding step is a maintainer-run diagnostic (requires `torch`/
+    `transformers` and downloads a real checkpoint) never exercised in
+    this repo's test suite.
 - `training/` — SageMaker training job entrypoint (`training/train.py`,
   see below), the code that submits/monitors a real training job and
   registers it in SageMaker Model Registry (`training/submit_job.py`, see
@@ -1056,7 +1076,12 @@ CLI flags (all optional, defaulting to `training/train.py`'s own defaults
 where applicable): `--environment` (dev/qa/prod, selects which `DataStack`
 to resolve), `--instance-type` (default `ml.g4dn.xlarge`), `--max-run`
 (hard wall-clock cap in seconds, default 10800 = 3h, so a runaway job can't
-bill forever), `--corpus-version`, `--direction`, `--run-id`, `--base-model`,
+bill forever), `--corpus-version`, `--corpus-prefix` (override the S3
+corpus prefix a job trains against, e.g. to run against a candidate
+cleaned corpus version -- defaults to the hardcoded `CORPUS_PREFIX`
+constant, `corpus/almg/v1`, independent of `--corpus-version`, which is
+just a metadata string recorded in the model card; see "Full-corpus data
+curation sweep" below), `--direction`, `--run-id`, `--base-model`,
 `--init-model-s3-uri` (continue training from a previous run's artifact --
 see "Continuing training from a checkpoint" below), `--epochs`,
 `--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
@@ -1539,6 +1564,247 @@ package rather than assumed. It also documents how the
 (`4.56.2`/`2.8.0`/`py312`) was derived from the installed SDK's own
 HuggingFace DLC compatibility table rather than guessed by hand -- re-check
 that derivation after any future `sagemaker` upgrade.
+
+## Full-corpus data curation sweep (issue #199)
+
+After #182's three cheap-tier hyperparameter levers (dropout, label-
+smoothing, bpe-dropout) and #192's checkpoint-averaging experiment all came
+back no-go, follow-up research concluded the regularization/modeling-
+tuning direction is exhausted for this dataset size and pointed at data
+curation as the likelier next lever (the AmericasNLP 2024 shared task's own
+stated conclusion for the same problem shape, and the specific edge the
+BSC team credited for their own strongest AmericasNLP 2024 result: length-
+based filtering, deduplication, and embedding-based alignment filtering).
+This ticket ran that sweep for real, at full corpus scale (32,906 train /
+3,609 val pairs, `almg-v1`), rather than against a sample.
+
+**Status when this PR was opened: Phase 1 (sweep, research, decision, and
+the cleaned corpus) is done; Phase 2 (the real training-run comparison) was
+submitted and still in flight.** Mirrors issue #192's own Phase 1/Phase 2
+PR split (#194/#197) -- see "Follow-up needed" at the end of this section.
+
+### 1. OCR/digitization glued-word artifact sweep: no evidence found
+
+Issues #116/#125 found systematic word-boundary space loss in *generated
+model output* (e.g. "dedios", "queestá", "deguatemala", "parachoch",
+"queestaban"), root-caused to a `tokenizer.add_tokens()` spacing bug and
+fixed. That finding was against decoded output, never checked against the
+raw corpus text itself. `data.glued_word_signal` (new this ticket) ran two
+independent checks against the full real corpus (`corpus/almg/v1`, both
+`train.tsv` and `val.tsv`):
+
+1. **Known-pattern sweep** (the exact strings above): **zero occurrences**
+   in either split. The previously observed glued-word artifacts are
+   confirmed to be a pure decode-time phenomenon (already fixed by #116),
+   not a property of the source corpus text.
+2. **General heuristic** (a rare word starting with a common Spanish
+   clitic, whose remainder after stripping that clitic is itself
+   independently frequent in the corpus -- a conservative proxy for "clitic
+   glued onto a word the corpus already knows well"): 22 candidates on
+   `train.tsv`, 2 on `val.tsv`, out of 26,584 distinct Spanish word forms.
+   Manually inspecting every one of these 24 candidates confirmed **all of
+   them are ordinary, correctly-spelled Spanish words** that happen to
+   start with a common clitic and coincidentally have an independently
+   frequent remainder (the same shape as e.g. an invented illustrative
+   case: "entierra" -- a real verb form -- superficially matching "en" +
+   "tierra", both independently common, without being a glued artifact at
+   all). Zero of the 24 are genuine OCR/digitization artifacts.
+
+**Conclusion: no OCR/digitization glued-word contamination exists in the
+raw corpus at full scale, by either check.** This refutes this ticket's own
+opening premise (which conflated #116's decode-time bug with a corpus-data
+quality issue) -- flagging that explicitly per this project's "say so
+explicitly rather than overstating" convention, rather than inventing a
+fix for a problem that isn't actually present in the data. No corpus text
+is mechanically "de-glued" or dropped for this reason. `data/glued_word_signal.py`
+is kept as a one-off diagnostic tool (like `data/dialect_signal.py`), not
+wired into `data/pipeline.py`'s cleaning chain -- there is nothing for it
+to fix.
+
+### 2. Embedding-based alignment-quality filtering: no viable model found
+
+Per the BSC AmericasNLP 2024 precedent, the plan was to score each pair's
+source/target semantic similarity with a multilingual sentence embedding
+model and flag/drop low-similarity (likely misaligned) pairs. The open
+question issue #199 itself posed -- does any available multilingual
+sentence embedding model have real Kaqchikel-language signal -- was
+checked directly against primary sources, not assumed:
+
+- **LaBSE** (Feng et al. 2022, 109 languages): Kaqchikel is not in its
+  language list.
+- **NLLB-200 / FLORES-200** (Meta AI, 200 languages): confirmed directly
+  against the `facebookresearch/flores` `flores200` language table --
+  Kaqchikel and every other Mayan language are absent. The closest
+  indigenous-language coverage NLLB-200 has is Quechua and Guaraní (the
+  same two languages BSC's own AmericasNLP 2024 embedding-filtering
+  success was measured on -- languages the embedding model actually has
+  training coverage for, unlike Kaqchikel).
+
+Neither major embedding model family has ever seen Kaqchikel in training.
+Rather than stop at "no confirmed coverage, skip it", `data.alignment_signal`
+turned this into an empirical, real-corpus question: embed a random
+300-pair sample of `almg-v1` train with `sentence-transformers/LaBSE`
+(real weights, real corpus text -- a maintainer-run diagnostic, not part
+of the test suite) and compare real-pair cosine similarity against a
+shuffled-control baseline (each Spanish sentence paired with a random,
+definitely-wrong Kaqchikel sentence instead of its real counterpart):
+
+| | mean | median |
+|---|---|---|
+| Real es<->cak pairs | 0.334 | 0.338 |
+| Shuffled control (definitely misaligned) | 0.249 | 0.261 |
+
+**AUC (real pair similarity > shuffled control): 0.656** -- better than
+chance (0.5), but far below what a model with genuine coverage of both
+languages would show for this kind of check (LaBSE alignment-filtering
+use on languages it was actually trained on typically separates real from
+shuffled pairs with AUC well above 0.9). The weak-but-nonzero signal is
+consistent with LaBSE picking up shared surface features (shared Spanish
+loanwords/proper nouns, punctuation, length) rather than genuine
+cross-lingual semantic understanding of Kaqchikel content.
+
+**Conclusion: no viable embedding model with adequate Kaqchikel coverage
+exists today.** The measured signal is real but too weak and unreliable to
+use as a hard corpus filter -- at this separation level, a similarity
+threshold would drop legitimately well-aligned but unusually-phrased pairs
+about as often as it would catch genuine misalignment, a bad trade for an
+already-small corpus. This project relies on corpus-internal consistency
+checks instead -- the existing length-ratio filter (`data.length_filter`,
+see below), matching the fallback issue #199 itself anticipated. If a
+Kaqchikel-aware (or broader Mayan-language-aware) embedding model is ever
+published, this diagnostic (`data.alignment_signal.analyze_alignment_signal`)
+can be re-run against it directly to re-check this conclusion.
+
+### 3. Revisiting #51's ~19x length/register gap
+
+Issue #51 previously concluded (after ruling out a genuine dialect split)
+that the corpus's ~19x sentence-length gap between two computationally-
+clustered groups most likely reflects at least two differently-registered,
+unlabeled source documents merged into the corpus (short glossary/
+dictionary-style entries vs. long connected prose), deferred as "noted but
+not shown to need action" while modeling-side gains were still available.
+With that avenue now exhausted (per #182/#192's findings) and both (1) and
+(2) above checked directly:
+
+- **The OCR-artifact explanation is now positively ruled out**, not just
+  unconsidered: (1) found zero evidence of glued-word corruption anywhere
+  in the raw corpus, so the length/register gap cannot be an artifact of
+  OCR/digitization noise. #51's original "two source-document
+  registers" explanation stands.
+- **Real length statistics** (`almg-v1` train, post-normalization): median
+  sentence length is just 12 characters on both sides (consistent with
+  #51's "short glossary-style entries" majority), but the distribution has
+  a real long tail -- p95 is 161 characters (Spanish) / 287 characters
+  (Kaqchikel), and the maximum on either side exceeds 1,600 characters.
+  Source/target length ratio has median 1.50 and p90 2.64 (most pairs are
+  reasonably length-matched), but 2.06% of pairs exceed a 4x ratio and
+  0.09% exceed 10x -- a real, if small, tail of extreme outliers
+  consistent with #51's reported ~19x figure.
+- **This is a real, structural feature of the corpus, not itself evidence
+  of misalignment.** A short, correctly-aligned dictionary-style entry
+  (e.g. a single word or short phrase gloss) is still a valid, useful
+  training pair for an already data-starved language -- dropping it just
+  for being short/differently-registered from a prose sentence would
+  discard real signal, not noise, the opposite of what issue #199's own
+  "quality/quantity tradeoff" framing calls for.
+
+**Decision: don't drop pairs for being short/long or differently
+registered per se. Do apply the existing, already-built, never-yet-run-at-
+full-scale length-ratio/length-bound filter** (`data.length_filter`'s
+default `LengthFilterConfig`: `min_length=1`, `max_length=400`,
+`max_ratio=4.0`) to catch the genuine extreme-outlier tail (very likely
+real misalignment -- e.g. a one-word gloss paired with a full paragraph --
+rather than legitimate register variation), via `data.pipeline`'s existing
+`clean` command. This was deliberately *not* run when `almg-v2` was
+produced (issue #90, normalization-only, specifically to avoid conflating
+the normalization fix with this still-open length/register question) --
+this ticket is the point where that question is resolved enough to run it.
+
+### Decision: `almg-v3` -- normalize + dedup + length-filter, no other changes
+
+Applied `data.pipeline`'s existing `clean_corpus_file` (normalize, dedup,
+length-filter, in that order -- unchanged logic, first real run at full
+corpus scale) to `almg-v1`'s raw train/val TSVs, uploaded as
+`s3://<training-data-bucket>/corpus/almg/v3/{train,val}.tsv`:
+
+| split | before | after dedup | after length-filter | total dropped |
+|---|---|---|---|---|
+| train | 32,906 | 32,906 (0 exact dupes) | 31,856 | 1,050 (3.2%) |
+| val | 3,609 | 3,609 (0 exact dupes) | 3,497 | 112 (3.1%) |
+
+Zero exact-duplicate `(source, target)` pairs existed at the pair level (a
+real, useful negative result in itself -- dedup was worth actually running,
+not assumed to be a no-op). The length-filter drop (~3.2%/~3.1%) removes
+only the genuine extreme-outlier tail identified above, keeping the corpus
+size reduction modest relative to an already-small 33k-sentence corpus.
+`data.pipeline validate-split` confirms `almg-v3` still has zero exact-pair
+leakage between train/val (958 source-side / 684 target-side one-sided
+overlaps remain, in the same ballpark as `v1`/`v2`'s 977/726 -- expected,
+since dedup/length-filtering isn't targeted at that kind of overlap).
+
+**This is a normalize + dedup + length-filter reprocessing of `almg-v1`
+(not built on top of `almg-v2`, though the two are equivalent in their
+shared normalization step, since `data.normalize.normalize_text` is
+idempotent)**, so `almg-v3`'s provenance is self-contained: raw `v1` input,
+`data.pipeline clean`'s unchanged, already-tested logic, nothing else.
+
+`training/submit_job.py` gained a new `--corpus-prefix` override (this
+ticket) so a one-off comparison run like this doesn't require editing the
+hardcoded `CORPUS_PREFIX` default -- production still defaults to `v1`
+until a deliberate switchover decision, made only after Phase 2's real
+result is in (see "Follow-up needed" below), avoiding the exact
+`CORPUS_PREFIX`/`--corpus-version` drift this README already warns about
+elsewhere.
+
+### Phase 2: real training-run comparison (submitted, in flight)
+
+Submitted a training job identical to the v7 baseline's config in every
+way except the corpus (verified via `submit_job.py --dry-run` before the
+real submission, same discipline as #192's Phase 2): 13 epochs,
+batch-size 8, learning-rate 5e-5, warmup-ratio 0.05, weight-decay 0.01,
+gradient-accumulation-steps 4, subword-vocab-size 8000, direction `both`,
+seed 42, no dropout/label-smoothing/bpe-dropout overrides -- corpus
+changed from `almg-v1` to `almg-v3` only:
+
+```sh
+cd ml
+AWS_PROFILE=translator-dev AWS_REGION=us-east-1 uv run python -m training.submit_job \
+  --epochs 13 \
+  --corpus-version almg-v3 \
+  --corpus-prefix corpus/almg/v3 \
+  --max-run 32400 \
+  --run-id run-20260930T000000Z-v12-cleaned-corpus \
+  --no-wait
+```
+
+Training job name: `traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`
+(`InProgress` at the time this PR was opened; `--no-wait` used deliberately,
+per this project's SSO-token-expiry precedent with long blocking waits).
+
+#### Follow-up needed to actually close #199
+
+1. Wait for `traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`
+   to complete (`aws sagemaker describe-training-job --training-job-name
+   traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`,
+   expect roughly 6-7 hours wall-clock based on v7/v11's own precedent).
+   Confirm self-registration succeeded (issue #198's `NoRegionError` fix);
+   if it didn't, `submit_job.py --register-existing` is the documented
+   fallback.
+2. Compare its full-validation-set BLEU/chrF (registered Model Package
+   metadata / model card) against the v7 baseline (BLEU 14.0/chrF 36.5,
+   `almg-v1`) -- same validation-set size both sides (`almg-v3`'s val set,
+   3,497 pairs after filtering, vs. `almg-v1`'s 3,609 -- note this is not
+   perfectly apples-to-apples on val-set size/content, since the cleaning
+   also touched validation; if that's judged too confounded once real
+   numbers are in, re-score the v7 baseline checkpoint against `almg-v3`'s
+   val set too via `evaluate_checkpoint.py` for a cleaner isolation).
+3. Record the real go/no-go conclusion (BLEU/chrF numbers, and per-
+   direction breakdown) as a comment on #199 and in this section, with a
+   clear recommendation on whether `almg-v3` becomes the new default
+   corpus (updating `submit_job.py`'s hardcoded `CORPUS_PREFIX`/
+   `CORPUS_VERSION` together, per this README's existing drift warning) or
+   whether the result doesn't justify the switch.
+4. Close #199 once recorded.
 
 ## Serving (`deployment/`)
 

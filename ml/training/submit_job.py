@@ -267,6 +267,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             f"(default: {CORPUS_VERSION!r}). Never derived from corpus content."
         ),
     )
+    parser.add_argument(
+        "--corpus-prefix",
+        default=None,
+        help=(
+            "S3 prefix (under the environment's training-data bucket) to read "
+            f"train.tsv/val.tsv from, overriding the hardcoded default "
+            f"({CORPUS_PREFIX!r}) for a one-off comparison run -- e.g. issue "
+            "#199's cleaned-corpus vs. baseline comparison. Always pass a "
+            "matching --corpus-version alongside this so the model card/Model "
+            "Registry label doesn't silently disagree with what was actually "
+            "trained on (see ml/README.md)."
+        ),
+    )
     parser.add_argument("--direction", choices=DIRECTION_CHOICES, default="both")
     parser.add_argument(
         "--run-id",
@@ -472,15 +485,27 @@ def build_source_bundle(ml_root: Path | None = None) -> Path:
     return bundle_dir
 
 
-def build_channel_uris(bucket: str, *, init_model_s3_uri: str | None = None) -> dict[str, str]:
+def build_channel_uris(
+    bucket: str, *, corpus_prefix: str | None = None, init_model_s3_uri: str | None = None
+) -> dict[str, str]:
     """The exact S3 object URIs for the train/validation channels -- not the
     whole corpus prefix, so the container-side paths are deterministic (see
     module docstring / ml/README.md). Includes the optional `init-model`
     channel (issue #75) when `init_model_s3_uri` is given.
+
+    `corpus_prefix` (issue #199) overrides the hardcoded `CORPUS_PREFIX`
+    default -- e.g. to run a one-off comparison job against a different
+    corpus reprocessing (a cleaned/filtered version) without editing this
+    module's default, which stays whatever `CORPUS_PREFIX` says until a
+    deliberate switchover decision (see ml/README.md's warning about
+    `CORPUS_PREFIX`/`CORPUS_VERSION` drifting apart -- passing this without
+    also passing a matching `--corpus-version` would have the exact same
+    drift risk, so keep them in sync at the call site).
     """
+    prefix = corpus_prefix or CORPUS_PREFIX
     channels = {
-        "train": f"s3://{bucket}/{TRAIN_OBJECT_KEY}",
-        "validation": f"s3://{bucket}/{VALIDATION_OBJECT_KEY}",
+        "train": f"s3://{bucket}/{prefix}/train.tsv",
+        "validation": f"s3://{bucket}/{prefix}/val.tsv",
     }
     if init_model_s3_uri:
         channels[INIT_MODEL_CHANNEL_NAME] = init_model_s3_uri
@@ -616,7 +641,9 @@ def build_job_config(
         "training_image": training_image,
         "hyperparameters": hyperparameters,
         "base_job_name": f"traductor-kaqchikel-{hyperparameters['run-id']}",
-        "channels": build_channel_uris(bucket, init_model_s3_uri=args.init_model_s3_uri),
+        "channels": build_channel_uris(
+            bucket, corpus_prefix=args.corpus_prefix, init_model_s3_uri=args.init_model_s3_uri
+        ),
         "model_package_group_name": args.model_package_group_name,
         "approval_status": args.approval_status,
         "source_dir": source_dir,
@@ -659,18 +686,21 @@ def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None
 
 
 def build_training_inputs(
-    bucket: str, *, init_model_s3_uri: str | None = None
+    bucket: str, *, corpus_prefix: str | None = None, init_model_s3_uri: str | None = None
 ) -> list[InputData]:
     """`train`/`validation` channels pointing at the exact corpus object
     keys (not the whole prefix) -- see module docstring. Includes the
     optional `init-model` channel (issue #75) when `init_model_s3_uri` is
-    given.
+    given. `corpus_prefix` overrides the hardcoded default (issue #199,
+    see `build_channel_uris`).
 
     Returns a **list** of `InputData`, not a `{channel_name: TrainingInput}`
     dict -- `ModelTrainer.train(input_data_config=...)`'s v3 shape, unlike
     v2's `HuggingFace.fit(inputs=...)`.
     """
-    channels = build_channel_uris(bucket, init_model_s3_uri=init_model_s3_uri)
+    channels = build_channel_uris(
+        bucket, corpus_prefix=corpus_prefix, init_model_s3_uri=init_model_s3_uri
+    )
     return [InputData(channel_name=name, data_source=uri) for name, uri in channels.items()]
 
 
@@ -943,7 +973,9 @@ def main(argv: list[str] | None = None) -> int:
         # ModelTrainer makes a live IAM call to validate `role` (module
         # docstring) -- never do this on the --dry-run path.
         estimator = build_estimator(config)
-        inputs = build_training_inputs(bucket, init_model_s3_uri=args.init_model_s3_uri)
+        inputs = build_training_inputs(
+            bucket, corpus_prefix=args.corpus_prefix, init_model_s3_uri=args.init_model_s3_uri
+        )
 
         submit_training_job(estimator, inputs, wait=not args.no_wait, logs=not args.no_logs)
     finally:
