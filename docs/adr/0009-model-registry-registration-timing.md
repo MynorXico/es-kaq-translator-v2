@@ -137,10 +137,13 @@ message behind. Concretely, hand off to `dev`:
 
 - `train.py`: remove `register_model_from_training_job`,
   `resolve_training_job_name`, `compute_model_artifact_s3_uri`,
-  `_boto3_client_for_registration`, the `registrar` parameter on
-  `run_training_job`, and the `--register-model`/`--output-path`/
-  `--training-image`/`--region`/`--model-package-group-name`/
-  `--approval-status` CLI flags that existed solely to support it.
+  `_boto3_client_for_registration`, `_parse_bool_hyperparameter` (its own
+  docstring says it exists solely as the `type=` callback for
+  `--register-model` -- dead code with zero callers once that flag is
+  gone), the `registrar` parameter on `run_training_job`, and the
+  `--register-model`/`--output-path`/`--training-image`/`--region`/
+  `--model-package-group-name`/`--approval-status` CLI flags that existed
+  solely to support it.
 - `submit_job.py`: restore an automatic post-training registration call
   in `main()` for a waited-for job (`not args.no_wait`), using the
   already-existing, already-fixed `register_model`/
@@ -151,9 +154,14 @@ message behind. Concretely, hand off to `dev`:
   registration, and `--register-existing <job-name>` remains the
   supported way to register it after the fact — unchanged from today.
 - `build_job_config`/`build_hyperparameters` stop passing the
-  `register-model`/`output-path`/`training-image`/`region` hyperparameters
-  to the training job — they existed only for the container's own
-  self-registration attempt.
+  `register-model`/`output-path`/`training-image`/`region`/
+  `model-package-group-name`/`approval-status` hyperparameters to the
+  training job — all six existed only for the container's own
+  self-registration attempt and its defaults. (`submit_job.py`'s own
+  `--model-package-group-name`/`--approval-status` CLI flags stay: they're
+  still needed for the restored `register_model` call and for
+  `--register-existing`. Only the hyperparameter-dict injection into the
+  submitted job goes away.)
 - `infra/cdk/lib/data-stack.ts`: remove the training execution role's
   `sagemaker:CreateModelPackageGroup`/`sagemaker:CreateModelPackage` grant
   added for #190/#191. Registration goes back to running under the
@@ -166,13 +174,31 @@ message behind. Concretely, hand off to `dev`:
   self-registration need updating to reflect that automatic, client-side,
   post-wait registration is the default again, with `--register-existing`
   kept for the no-wait/no-register case — not a change in that flag's own
-  behavior.
+  behavior. Self-registration is mentioned in more places than just that
+  one named section (e.g. the training-entrypoint step list, the
+  self-registration design writeup, and the v11/v12 real-run history
+  further down the file) — the implementer should grep the whole file for
+  "register"/"#190" rather than hand-editing only the section named above.
 
 This is test-first per `docs/testing.md`, same as the rest of this
-codebase — removing `tests/unit/test_train_registration.py` and the
-self-registration cases in `tests/integration/test_train_pipeline.py`,
-and restoring/adjusting `main()`'s registration-call test coverage in
-`tests/unit/test_submit_job.py`/`tests/integration/test_submit_job_cli.py`.
+codebase. Confirmed directly against git history (`ed8b227^`, the commit
+immediately before #191 merged): the pre-#190 `main()` logic is fully and
+cleanly recoverable, and most of the Python test suite is a clean
+mechanical revert -- removing `tests/unit/test_train_registration.py` and
+the self-registration cases in `tests/integration/test_train_pipeline.py`,
+and restoring `main()`'s registration-call test coverage in
+`tests/unit/test_submit_job.py`. The one exception:
+`tests/integration/test_submit_job_cli.py`'s three main-coverage tests
+need **substantive rewriting, not deletion** -- they currently assert the
+exact opposite of the restored behavior (that `main()` does *not*
+auto-register), so those assertions need inverting, not just restoring
+old ones. `infra/cdk/test/data-stack.test.ts` also needs its own change,
+not just the `ml/` suite: it has a dedicated test ("grants the execution
+role scoped Model Registry permissions for self-registration (issue
+#190)", asserting the exact `CreateModelPackageGroup`/`CreateModelPackage`
+grant this ADR's Decision removes) that must be removed or rewritten as a
+negative assertion (no such grant exists), or CI goes red the moment the
+grant itself is removed from `data-stack.ts`.
 
 ## Consequences
 
@@ -187,6 +213,12 @@ and restoring/adjusting `main()`'s registration-call test coverage in
   training job itself — `--no-wait` lets a maintainer submit a job,
   disconnect, and run `--register-existing` later at a convenient time
   if the ~45-minute wait isn't worth blocking on.
+- **No migration is needed for already-registered model packages.**
+  Self-registration failed structurally at the `CreateModelPackage` API
+  call itself on both real attempts that exercised it (v11, v12) — nothing
+  was ever actually created in Model Registry via that path to clean up
+  or reconcile; both runs already have their one real Model Package
+  version each, created via `--register-existing`.
 - No new AWS infrastructure, no new IAM surface beyond a removal, and no
   new code paths without existing test/production coverage. This is the
   simplest option available and matches "prefer the simplest design that
@@ -218,6 +250,12 @@ and restoring/adjusting `main()`'s registration-call test coverage in
   radius (what it can do with its execution role) shrinks back to
   reading training data and writing its own output, which is a better
   default posture regardless of this specific bug.
+- Minor implementation-cleanup opportunity, not required for this ADR to
+  land: `_reconstruct_run_metadata_from_job_hyperparameters`'s `excluded`
+  set in `submit_job.py` will end up with a few permanently-dead entries
+  (keys that only ever appeared as hyperparameters because of
+  self-registration, e.g. `register-model`) once those keys never appear
+  again — harmless to leave, a one-line tidy-up for whoever implements.
 
 ## Alternatives considered
 
