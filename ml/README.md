@@ -1076,7 +1076,12 @@ CLI flags (all optional, defaulting to `training/train.py`'s own defaults
 where applicable): `--environment` (dev/qa/prod, selects which `DataStack`
 to resolve), `--instance-type` (default `ml.g4dn.xlarge`), `--max-run`
 (hard wall-clock cap in seconds, default 10800 = 3h, so a runaway job can't
-bill forever), `--corpus-version`, `--direction`, `--run-id`, `--base-model`,
+bill forever), `--corpus-version`, `--corpus-prefix` (override the S3
+corpus prefix a job trains against, e.g. to run against a candidate
+cleaned corpus version -- defaults to the hardcoded `CORPUS_PREFIX`
+constant, `corpus/almg/v1`, independent of `--corpus-version`, which is
+just a metadata string recorded in the model card; see "Full-corpus data
+curation sweep" below), `--direction`, `--run-id`, `--base-model`,
 `--init-model-s3-uri` (continue training from a previous run's artifact --
 see "Continuing training from a checkpoint" below), `--epochs`,
 `--batch-size`, `--learning-rate`, `--max-length`, `--seed`,
