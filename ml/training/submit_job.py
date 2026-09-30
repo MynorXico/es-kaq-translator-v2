@@ -596,9 +596,14 @@ def build_job_config(
     # SM_TRAINING_ENV at runtime, not knowable client-side) -- and (b) the
     # exact training container image URI to record on the registered Model
     # Package, which a container has no way to discover about itself.
-    # Neither is otherwise available inside the container.
+    # Neither is otherwise available inside the container. Issue #196: a
+    # real self-registration attempt failed with `NoRegionError` -- the
+    # container has no ambient default region a bare `boto3.client()` call
+    # can resolve the way a maintainer's own configured shell does, so
+    # `--region` must be passed through too.
     hyperparameters["output-path"] = output_path
     hyperparameters["training-image"] = training_image
+    hyperparameters["region"] = args.region
     return {
         "role": role,
         "instance_type": args.instance_type,
@@ -794,6 +799,7 @@ def _reconstruct_run_metadata_from_job_hyperparameters(
         "run-id",
         "output-path",
         "training-image",
+        "region",
         "register-model",
         "model-package-group-name",
         "approval-status",

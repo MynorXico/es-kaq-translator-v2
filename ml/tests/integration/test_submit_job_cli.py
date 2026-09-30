@@ -91,7 +91,7 @@ def test_full_submission_never_registers_client_side_and_passes_self_registratio
     `create_model_package` after a waited-for run completes any more.
     Instead, it must tell the submitted job everything it needs to
     self-register: `register-model`, `output-path`, `training-image`,
-    `model-package-group-name`, `approval-status`.
+    `region`, `model-package-group-name`, `approval-status`.
     """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
@@ -135,6 +135,7 @@ def test_full_submission_never_registers_client_side_and_passes_self_registratio
     assert hyperparameters["register-model"] == "true"
     assert hyperparameters["output-path"] == "s3://fake-bucket/model-artifacts/"
     assert hyperparameters["training-image"] == "fake-training-image"
+    assert hyperparameters["region"] == submit_job.DEFAULT_REGION
     assert hyperparameters["model-package-group-name"] == submit_job.DEFAULT_MODEL_PACKAGE_GROUP_NAME
     assert hyperparameters["approval-status"] == submit_job.DEFAULT_APPROVAL_STATUS
     assert hyperparameters["dropout"] == 0.3
