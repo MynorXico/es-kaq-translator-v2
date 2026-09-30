@@ -397,6 +397,26 @@ def test_build_job_config_passes_output_path_and_training_image_through_as_hyper
     assert config["hyperparameters"]["training-image"] == "fake-training-image"
 
 
+def test_build_job_config_passes_region_through_as_a_hyperparameter():
+    """Regression test for issue #196: train.py's self-registration needs
+    an explicit region to construct its boto3 client (the training
+    container has no ambient default the way a maintainer's own shell
+    does) -- submit_job.py must pass its own --region through the same way
+    it already does for --output-path/--training-image.
+    """
+    args = submit_job.parse_args(["--run-id", "run-test", "--region", "us-west-2"])
+
+    config = submit_job.build_job_config(
+        bucket="fake-bucket",
+        role="fake-role",
+        args=args,
+        source_dir="fake-bundle",
+        training_image="fake-training-image",
+    )
+
+    assert config["hyperparameters"]["region"] == "us-west-2"
+
+
 def test_build_job_config_respects_custom_instance_type_and_max_run():
     args = submit_job.parse_args(["--instance-type", "ml.p3.2xlarge", "--max-run", "3600"])
 
@@ -750,6 +770,7 @@ def test_reconstruct_run_metadata_pulls_out_identifiers_and_keeps_the_rest_as_hy
             "validation": "/opt/ml/input/data/validation/val.tsv",
             "output-path": "s3://bucket/model-artifacts/",
             "training-image": "fake-image",
+            "region": "us-east-1",
             "register-model": "true",
             "model-package-group-name": "traductor-kaqchikel",
             "approval-status": "PendingManualApproval",

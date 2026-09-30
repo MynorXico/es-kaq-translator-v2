@@ -485,6 +485,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "AWS region to construct the self-registration Model Registry "
+            "client in (issue #196) -- a real self-registration attempt "
+            "failed with `NoRegionError: You must specify a region`, since "
+            "unlike a maintainer's own shell, the training container has no "
+            "ambient default region a bare `boto3.client()` call can "
+            "resolve. `submit_job.py` passes its own `--region` through. "
+            "`None` (the default) leaves self-registration disabled "
+            "regardless of `--register-model`."
+        ),
+    )
+    parser.add_argument(
         "--register-model",
         type=_parse_bool_hyperparameter,
         default=False,
@@ -1232,16 +1246,22 @@ def compute_model_artifact_s3_uri(output_path: str, training_job_name: str) -> s
     return f"{output_path.rstrip('/')}/{training_job_name}/output/model.tar.gz"
 
 
-def _boto3_client_for_registration(service: str) -> Any:
+def _boto3_client_for_registration(service: str, region: str) -> Any:
     """Thin, separately-monkeypatchable wrapper around `boto3.client`, so
     `register_model_from_training_job`'s tests never need a real `boto3`
     session -- mirrors this module's existing lazy-import pattern (see
     `load_base_model_and_tokenizer`): `boto3` is only ever imported on the
     (rare, opt-in) path where a run actually self-registers.
+
+    `region` must be passed explicitly (issue #196): a real training job's
+    self-registration attempt failed with `NoRegionError: You must specify
+    a region` -- unlike a maintainer's own shell (which usually has
+    `AWS_REGION`/a configured default region), the training container has
+    no ambient default a bare `boto3.client(service)` call can resolve.
     """
     import boto3
 
-    return boto3.client(service)
+    return boto3.client(service, region_name=region)
 
 
 def register_model_from_training_job(
@@ -1257,25 +1277,27 @@ def register_model_from_training_job(
     local/test invocation of `train.py` that never wires it (i.e. every
     other test in this repo's suite) leaves this function untouched.
 
-    Raises `ValueError` if `--register-model true` is given without both
-    `--output-path`/`--training-image` -- `submit_job.py` always supplies
-    both together with `--register-model true`, so this only fires for a
-    misconfigured manual invocation, not a real submitted job.
+    Raises `ValueError` if `--register-model true` is given without
+    `--output-path`/`--training-image`/`--region` -- `submit_job.py`
+    always supplies all three together with `--register-model true`, so
+    this only fires for a misconfigured manual invocation, not a real
+    submitted job.
     """
     if not args.register_model:
         return None
-    if not args.output_path or not args.training_image:
+    if not args.output_path or not args.training_image or not args.region:
         raise ValueError(
-            "--register-model true requires --output-path and "
-            "--training-image (submit_job.py always supplies both when it "
-            "submits a real job with self-registration enabled)."
+            "--register-model true requires --output-path, "
+            "--training-image, and --region (submit_job.py always supplies "
+            "all three when it submits a real job with self-registration "
+            "enabled)."
         )
 
     training_job_name = resolve_training_job_name()
     model_data_url = compute_model_artifact_s3_uri(args.output_path, training_job_name)
     model_card_text = model_card_path.read_text(encoding="utf-8")
 
-    sm_client = _boto3_client_for_registration("sagemaker")
+    sm_client = _boto3_client_for_registration("sagemaker", args.region)
     return register_model_package(
         sm_client,
         model_package_group_name=args.model_package_group_name or DEFAULT_MODEL_PACKAGE_GROUP_NAME,
