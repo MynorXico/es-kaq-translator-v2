@@ -1,6 +1,6 @@
 # ADR 0009: Model Registry registration timing (revert in-container self-registration)
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-09-30
 
 ## Context
