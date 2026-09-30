@@ -291,36 +291,6 @@ def test_build_hyperparameters_omits_dropout_and_bpe_dropout_alpha_by_default():
     assert "bpe-dropout-alpha" not in hyperparameters
 
 
-def test_build_hyperparameters_tells_train_py_to_self_register_by_default():
-    # Issue #190: train.py self-registers from inside the training
-    # container by default -- submit_job.py's own client-side registration
-    # no longer happens after a waited-for run completes.
-    args = submit_job.parse_args([])
-
-    hyperparameters = submit_job.build_hyperparameters(args)
-
-    assert hyperparameters["register-model"] == "true"
-
-
-def test_build_hyperparameters_tells_train_py_not_to_self_register_with_no_register():
-    args = submit_job.parse_args(["--no-register"])
-
-    hyperparameters = submit_job.build_hyperparameters(args)
-
-    assert hyperparameters["register-model"] == "false"
-
-
-def test_build_hyperparameters_includes_model_package_group_name_and_approval_status():
-    args = submit_job.parse_args(
-        ["--model-package-group-name", "custom-group", "--approval-status", "Approved"]
-    )
-
-    hyperparameters = submit_job.build_hyperparameters(args)
-
-    assert hyperparameters["model-package-group-name"] == "custom-group"
-    assert hyperparameters["approval-status"] == "Approved"
-
-
 def test_build_hyperparameters_includes_dropout_and_bpe_dropout_alpha_when_given():
     args = submit_job.parse_args(
         ["--dropout", "0.3", "--bpe-dropout-alpha", "0.1"]
@@ -396,44 +366,6 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
         "train": "s3://fake-bucket/corpus/almg/v1/train.tsv",
         "validation": "s3://fake-bucket/corpus/almg/v1/val.tsv",
     }
-
-
-def test_build_job_config_passes_output_path_and_training_image_through_as_hyperparameters():
-    # Issue #190: train.py needs both to compute its own future model
-    # artifact S3 URI and self-register -- neither is discoverable from
-    # inside the container otherwise.
-    args = submit_job.parse_args(["--run-id", "run-test"])
-
-    config = submit_job.build_job_config(
-        bucket="fake-bucket",
-        role="fake-role",
-        args=args,
-        source_dir="fake-bundle",
-        training_image="fake-training-image",
-    )
-
-    assert config["hyperparameters"]["output-path"] == "s3://fake-bucket/model-artifacts/"
-    assert config["hyperparameters"]["training-image"] == "fake-training-image"
-
-
-def test_build_job_config_passes_region_through_as_a_hyperparameter():
-    """Regression test for issue #196: train.py's self-registration needs
-    an explicit region to construct its boto3 client (the training
-    container has no ambient default the way a maintainer's own shell
-    does) -- submit_job.py must pass its own --region through the same way
-    it already does for --output-path/--training-image.
-    """
-    args = submit_job.parse_args(["--run-id", "run-test", "--region", "us-west-2"])
-
-    config = submit_job.build_job_config(
-        bucket="fake-bucket",
-        role="fake-role",
-        args=args,
-        source_dir="fake-bundle",
-        training_image="fake-training-image",
-    )
-
-    assert config["hyperparameters"]["region"] == "us-west-2"
 
 
 def test_build_job_config_respects_custom_instance_type_and_max_run():
@@ -770,9 +702,73 @@ def test_register_model_respects_approval_status_override(monkeypatch):
     assert kwargs["ModelApprovalStatus"] == "Approved"
 
 
+def test_main_records_dropout_and_bpe_dropout_alpha_in_registry_metadata_when_given(
+    monkeypatch,
+):
+    """Regression test restored by ADR 0009 (originally added for issue
+    #182's code review, PR #183): `build_hyperparameters` (tested directly
+    above) already conditionally includes `dropout`/`bpe-dropout-alpha` in
+    the *training job's own* hyperparameters, but `main()`'s separate
+    `run_metadata["hyperparameters"]` reconstruction (used for
+    `register_model`'s `CustomerMetadataProperties`) once hardcoded a fixed
+    key list that predated both flags. A real run using either would train
+    correctly but leave the registry entry with no record of which
+    experiment produced it. This exercises `main()` itself (every other
+    test in this module exercises `build_hyperparameters`/`register_model`
+    individually) so the reconstruction step in between can't silently drop
+    a hyperparameter again without a test noticing.
+    """
+    fake_cfn_client = MagicMock()
+    fake_cfn_client.describe_stacks.return_value = {
+        "Stacks": [
+            {
+                "Outputs": [
+                    {"OutputKey": "TrainingDataBucketName", "OutputValue": "fake-bucket"},
+                    {"OutputKey": "SageMakerExecutionRoleArn", "OutputValue": "fake-role-arn"},
+                ]
+            }
+        ]
+    }
+    fake_sm_client = MagicMock()
+    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
+    fake_s3_client = MagicMock()
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(
+        tarball_bytes
+    )
+
+    def fake_boto3_client(service, **kwargs):
+        return {
+            "cloudformation": fake_cfn_client,
+            "sagemaker": fake_sm_client,
+            "s3": fake_s3_client,
+        }[service]
+
+    monkeypatch.setattr(submit_job.boto3, "client", fake_boto3_client)
+    monkeypatch.setattr(submit_job, "_retrieve_image_uri", lambda **kw: "fake-training-image")
+
+    fake_estimator = MagicMock()
+    fake_estimator.training_image = "fake-training-image"
+    fake_estimator._latest_training_job.model_artifacts.s3_model_artifacts = (
+        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
+    monkeypatch.setattr(submit_job, "ModelTrainer", MagicMock(return_value=fake_estimator))
+
+    exit_code = submit_job.main(
+        ["--run-id", "run-test", "--dropout", "0.3", "--bpe-dropout-alpha", "0.1"]
+    )
+
+    assert exit_code == 0
+    _, register_kwargs = fake_sm_client.create_model_package.call_args
+    metadata = register_kwargs["CustomerMetadataProperties"]
+    assert metadata["hp_dropout"] == "0.3"
+    assert metadata["hp_bpe_dropout_alpha"] == "0.1"
+
+
 # ---------------------------------------------------------------------------
 # register_existing_job / _reconstruct_run_metadata_from_job_hyperparameters
-# (issue #190's --register-existing opt-in path)
+# (--register-existing opt-in path)
 # ---------------------------------------------------------------------------
 
 
