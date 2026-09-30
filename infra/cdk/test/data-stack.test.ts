@@ -201,14 +201,16 @@ describe("DataStack", () => {
     }
   });
 
-  it("grants the execution role scoped Model Registry permissions for self-registration (issue #190)", () => {
-    // Real workflow change, not speculative: train.py now registers its own
-    // completed run's model package from inside the training container
-    // (no more client-side download of the full training artifact just to
-    // read its model card -- a real run's artifact was measured at 30.5GB,
-    // issues #187/#188). That self-registration calls
-    // CreateModelPackageGroup (idempotent) + CreateModelPackage directly
-    // against this role's own credentials.
+  it("grants the execution role no Model Registry write permissions (ADR 0009)", () => {
+    // Issue #190 briefly gave this role a scoped CreateModelPackageGroup/
+    // CreateModelPackage grant so train.py could self-register a completed
+    // run's model package from inside the training container. ADR 0009
+    // reverted that self-registration entirely (issue #201: it was
+    // structurally unable to succeed -- CreateModelPackage validates S3
+    // object existence at call time, before the training container's own
+    // toolkit has uploaded the artifact). Registration goes back to running
+    // under the maintainer's own SSO credentials, so this role needs no
+    // Model Registry write permission at all.
     const { template } = synthDataStack();
 
     const policies = template.findResources("AWS::IAM::Policy");
@@ -227,29 +229,8 @@ describe("DataStack", () => {
         return statement.Effect === "Allow" && actions.includes(action);
       });
 
-    const groupStatements = findStatementsForAction("sagemaker:CreateModelPackageGroup");
-    expect(groupStatements.length).toBeGreaterThan(0);
-    for (const statement of groupStatements) {
-      const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
-      for (const resource of resources) {
-        expect(resource).not.toBe("*");
-        const resolved = typeof resource === "string" ? resource : JSON.stringify(resource);
-        expect(resolved).toContain("model-package-group");
-        expect(resolved).toContain("traductor-kaqchikel-es-cak");
-      }
-    }
-
-    const packageStatements = findStatementsForAction("sagemaker:CreateModelPackage");
-    expect(packageStatements.length).toBeGreaterThan(0);
-    for (const statement of packageStatements) {
-      const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
-      for (const resource of resources) {
-        expect(resource).not.toBe("*");
-        const resolved = typeof resource === "string" ? resource : JSON.stringify(resource);
-        expect(resolved).toContain("model-package");
-        expect(resolved).toContain("traductor-kaqchikel-es-cak");
-      }
-    }
+    expect(findStatementsForAction("sagemaker:CreateModelPackageGroup")).toHaveLength(0);
+    expect(findStatementsForAction("sagemaker:CreateModelPackage")).toHaveLength(0);
   });
 
   it("does not attach a broad AWS-managed SageMaker policy to the execution role", () => {

@@ -1,26 +1,28 @@
-"""Shared SageMaker Model Registry registration logic (issue #190).
+"""Shared SageMaker Model Registry registration logic.
 
-Used by both:
+Originally factored out in issue #190 to be shared between `training.train`
+(self-registering from inside the training container) and
+`training.submit_job` (the `--register-existing` opt-in path). Issue #190's
+in-container self-registration was reverted in ADR 0009 (issue #201:
+`CreateModelPackage` validates S3 object existence at call time, before the
+training container's own toolkit has uploaded the artifact -- structurally
+unable to succeed), so `training.train` no longer imports this module at
+all. `training.submit_job` remains the sole caller, for both its default
+post-training registration (`register_model`, restored by ADR 0009) and its
+`--register-existing` opt-in path (`register_existing_job`), each of which
+needs to fetch the model card from the completed run's artifact itself.
 
-- `training.train` -- self-registers a completed run's model package
-  directly from inside the training container, right after its own
-  `model_card.md` is written, with no download of the training artifact
-  at all (see `training.train.register_model_from_training_job`).
-- `training.submit_job` -- the `--register-existing` opt-in path for
-  registering an already-completed job's artifact after the fact (e.g. one
-  submitted with `--no-wait` before self-registration existed), which still
-  needs to fetch the model card from the artifact itself.
-
-Factored out here, rather than defined in either module, specifically to
-avoid a circular import: `submit_job.py` already imports from
-`training.train` (e.g. `DEFAULT_BASE_MODEL`), so `training.train` can't
-import back from `training.submit_job`. This module depends on neither.
+Left as its own module rather than folded back into `submit_job.py`: it has
+its own focused test coverage (`tests/unit/test_model_registry.py`) and a
+clean, narrow responsibility (building the Model Registry API calls from
+already-resolved values), independent of `submit_job.py`'s own concerns
+(CLI parsing, job submission, artifact download).
 
 ## Why registration always reads BLEU/chrF from a model card's *text*,
    never an in-memory metrics object
 
-Both callers feed a model card's own rendered text through
-`evaluation.model_card.parse_model_card_metrics` rather than passing
+`register_model_package` feeds a model card's own rendered text through
+`evaluation.model_card.parse_model_card_metrics` rather than accepting
 already-computed metrics directly. This guarantees the metadata sent to
 the registry can never drift from what the model card itself (the
 traceability artifact the metadata is describing) actually says -- one

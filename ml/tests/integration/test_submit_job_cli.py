@@ -82,20 +82,24 @@ def test_dry_run_resolves_config_end_to_end_without_touching_fit(monkeypatch, ca
     assert "fake-training-image" in captured.out
 
 
-def test_full_submission_never_registers_client_side_and_passes_self_registration_hyperparameters(
-    monkeypatch,
-):
-    """Issue #190: registration now happens from inside the training
-    container (`train.py` self-registers, reading its own just-written
-    model card, no artifact download) -- `main()` itself must never call
-    `create_model_package` after a waited-for run completes any more.
-    Instead, it must tell the submitted job everything it needs to
-    self-register: `register-model`, `output-path`, `training-image`,
-    `region`, `model-package-group-name`, `approval-status`.
+def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):
+    """ADR 0009: reverts issue #190's in-container self-registration, which
+    was structurally broken (issue #201 -- `CreateModelPackage` validates
+    S3 object existence at call time, before the training artifact is
+    ever uploaded). `main()` itself registers a waited-for run's model
+    client-side again, after `.train()` completes, using the disk-streamed
+    (not in-memory, issues #188/#189) artifact download -- no
+    self-registration hyperparameters are passed to the submitted job.
     """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
+    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
     fake_s3_client = MagicMock()
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(
+        tarball_bytes
+    )
 
     def fake_boto3_client(service, **kwargs):
         return {
@@ -131,23 +135,39 @@ def test_full_submission_never_registers_client_side_and_passes_self_registratio
     assert train_kwargs["wait"] is True
     assert train_kwargs["logs"] is True
 
+    # No self-registration hyperparameters are passed to the submitted job
+    # any more -- ADR 0009 reverted issue #190's in-container path.
     hyperparameters = estimator_kwargs["hyperparameters"]
-    assert hyperparameters["register-model"] == "true"
-    assert hyperparameters["output-path"] == "s3://fake-bucket/model-artifacts/"
-    assert hyperparameters["training-image"] == "fake-training-image"
-    assert hyperparameters["region"] == submit_job.DEFAULT_REGION
-    assert hyperparameters["model-package-group-name"] == submit_job.DEFAULT_MODEL_PACKAGE_GROUP_NAME
-    assert hyperparameters["approval-status"] == submit_job.DEFAULT_APPROVAL_STATUS
+    assert "register-model" not in hyperparameters
+    assert "output-path" not in hyperparameters
+    assert "training-image" not in hyperparameters
+    assert "region" not in hyperparameters
+    assert "model-package-group-name" not in hyperparameters
+    assert "approval-status" not in hyperparameters
     assert hyperparameters["dropout"] == 0.3
 
-    # No client-side registration -- train.py handles it from inside the
-    # container now.
-    fake_sm_client.create_model_package.assert_not_called()
-    fake_sm_client.create_model_package_group.assert_not_called()
-    fake_s3_client.download_file.assert_not_called()
+    # Client-side registration, restored: fetches the artifact (streamed to
+    # disk) and registers it, same as the --register-existing path already
+    # did.
+    fake_sm_client.create_model_package_group.assert_called_once()
+    fake_s3_client.download_file.assert_called_once()
+    _, register_kwargs = fake_sm_client.create_model_package.call_args
+    assert register_kwargs["CustomerMetadataProperties"]["bleu"] == "12.3"
+    assert register_kwargs["CustomerMetadataProperties"]["chrf"] == "34.5"
+    assert register_kwargs["CustomerMetadataProperties"]["hp_dropout"] == "0.3"
+    assert register_kwargs["InferenceSpecification"]["Containers"][0]["Image"] == (
+        "fake-training-image"
+    )
+    assert register_kwargs["InferenceSpecification"]["Containers"][0]["ModelDataUrl"] == (
+        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
 
 
-def test_no_register_tells_the_submitted_job_not_to_self_register(monkeypatch):
+def test_no_register_tells_main_not_to_register_client_side(monkeypatch):
+    """ADR 0009: `--no-register` disables `main()`'s own client-side
+    registration call after a waited-for run completes -- there is no
+    submitted-job hyperparameter for this any more (issue #190 reverted).
+    """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
     monkeypatch.setattr(
@@ -164,18 +184,17 @@ def test_no_register_tells_the_submitted_job_not_to_self_register(monkeypatch):
     exit_code = submit_job.main(["--run-id", "run-test", "--no-register"])
 
     assert exit_code == 0
+    fake_estimator.train.assert_called_once()
     _, estimator_kwargs = fake_model_trainer_cls.call_args
-    assert estimator_kwargs["hyperparameters"]["register-model"] == "false"
+    assert "register-model" not in estimator_kwargs["hyperparameters"]
     fake_sm_client.create_model_package.assert_not_called()
 
 
-def test_no_wait_does_not_prevent_the_self_registration_hyperparameter(monkeypatch):
-    """Issue #190 behavioral change: since registration now happens inside
-    the training container (asynchronously, whenever the job itself
-    finishes), it no longer depends on whether the *submitting* CLI
-    process waited around for it -- unlike before, when `--no-wait` had to
-    also skip registration because there was nothing to register from the
-    client side until the job completed.
+def test_no_wait_also_skips_client_side_registration(monkeypatch):
+    """ADR 0009: `--no-wait` skips `main()`'s own client-side registration
+    too -- unlike issue #190's (reverted) in-container self-registration,
+    there is nothing to register client-side until the job's model
+    artifact actually exists, which only happens once the job finishes.
     """
     fake_cfn_client = _fake_cfn_client()
     fake_sm_client = MagicMock()
@@ -196,8 +215,6 @@ def test_no_wait_does_not_prevent_the_self_registration_hyperparameter(monkeypat
     fake_estimator.train.assert_called_once()
     _, train_kwargs = fake_estimator.train.call_args
     assert train_kwargs["wait"] is False
-    _, estimator_kwargs = fake_model_trainer_cls.call_args
-    assert estimator_kwargs["hyperparameters"]["register-model"] == "true"
     fake_sm_client.create_model_package.assert_not_called()
 
 
