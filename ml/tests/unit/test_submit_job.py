@@ -164,6 +164,25 @@ def test_build_channel_uris_points_at_exact_corpus_objects():
     }
 
 
+def test_build_channel_uris_accepts_a_corpus_prefix_override():
+    # Issue #199: a one-off comparison run against a different corpus
+    # version (e.g. a cleaned/filtered reprocessing) shouldn't require
+    # editing this module's hardcoded default -- see ml/README.md's
+    # existing warning about CORPUS_PREFIX/CORPUS_VERSION drifting apart.
+    channels = submit_job.build_channel_uris("fake-bucket", corpus_prefix="corpus/almg/v3")
+
+    assert channels == {
+        "train": "s3://fake-bucket/corpus/almg/v3/train.tsv",
+        "validation": "s3://fake-bucket/corpus/almg/v3/val.tsv",
+    }
+
+
+def test_parse_args_corpus_prefix_defaults_to_none():
+    args = submit_job.parse_args(["--run-id", "run-test"])
+
+    assert args.corpus_prefix is None
+
+
 def test_build_hyperparameters_includes_container_side_paths():
     args = submit_job.parse_args(["--run-id", "run-test"])
 
