@@ -1458,18 +1458,39 @@ weight-decay 0.01, gradient-accumulation-steps 4, subword-vocab-size 8000,
 `almg-v1`, direction `both`, no dropout/label-smoothing/bpe-dropout
 overrides) via `submit_job.py --dry-run`'s printed config before the real
 submission, with `--max-run 32400` (9h, since v7 itself took ~6h11m and
-the default 3h would have killed it mid-training). **This job was
-in-flight (`TrainingJobStatus: InProgress`) when this ticket's work
-session ended** -- completing it, running both a final-epoch-only and a
-last-3-averaged `evaluate_checkpoint.py` pass against it (same decode
-config, `--num-beams 5`, per issue #180), and recording the resulting
-go/no-go conclusion with real numbers is a required follow-up before this
-ticket's acceptance criteria are fully met. See the job's own
-`describe-training-job` output (`training-job-name
-traductor-kaqchikel-run-20260929T000000Z-v11-matched-baseline-2`) for
-current status; once `Completed`, register/evaluate following the same
-"Verifying the reconstruction against a real checkpoint" pattern documented
-above.
+the default 3h would have killed it mid-training). Completed in ~6h35m.
+Scored final-epoch-only vs. last-3-averaged on the same fixed 150-pair
+(300-example) sample of the real validation set used in Phase 1, same
+decode config (`--num-beams 5`):
+
+| checkpoint | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF |
+|---|---|---|---|---|
+| final epoch only (n=300) | 14.7 | 36.3 | 16.6 / 39.2 | 11.2 / 31.9 |
+| last-3 averaged (n=300) | 13.7 | 35.7 | 15.7 / 39.1 | 10.1 / 30.5 |
+
+**Conclusion: checkpoint averaging does not help here -- no-go.**
+Final-epoch-only beats last-3-averaged on both metrics, both directions --
+consistent in direction with Phase 1's sanity check, now with a clearer,
+non-confounded gap on a genuinely clean baseline. This is a real, valuable
+negative result (the same shape as issue #180's num_beams=8 finding), not
+an inconclusive one: this project should **not** adopt checkpoint
+averaging as a default post-training step.
+
+As a side benefit, this run's full-validation-set score (BLEU 13.5/chrF
+36.6, registered as Model Package v11, then rejected -- it was a reference
+run for this comparison, not a deployment candidate) gives the project's
+first real estimate of run-to-run variance for this exact training config:
+roughly 0.5 BLEU / 0.1 chrF of spread from v7's own numbers (14.0/36.5)
+with identical hyperparameters including `--seed 42`.
+
+This run also surfaced a real, separate bug: it was submitted with
+`--register-model true` (issue #190/#191's self-registration path), but
+self-registration failed inside the container with `NoRegionError: You
+must specify a region` (`_boto3_client_for_registration` never passes an
+explicit region) -- filed as issue #196. It failed *safely*: the training
+job itself completed successfully rather than being marked `Failed`,
+confirming PR #191's error-isolation fix works as designed. Registered
+manually via `submit_job.py --register-existing` instead.
 
 This project's local development GPU (the same 4GB GTX 1050 Ti referenced
 under "Real at-scale validation" above) could not be used for this
