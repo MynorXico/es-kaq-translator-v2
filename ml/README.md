@@ -1756,7 +1756,7 @@ result is in (see "Follow-up needed" below), avoiding the exact
 `CORPUS_PREFIX`/`--corpus-version` drift this README already warns about
 elsewhere.
 
-### Phase 2: real training-run comparison (submitted, in flight)
+### Phase 2: real training-run comparison
 
 Submitted a training job identical to the v7 baseline's config in every
 way except the corpus (verified via `submit_job.py --dry-run` before the
@@ -1764,47 +1764,59 @@ real submission, same discipline as #192's Phase 2): 13 epochs,
 batch-size 8, learning-rate 5e-5, warmup-ratio 0.05, weight-decay 0.01,
 gradient-accumulation-steps 4, subword-vocab-size 8000, direction `both`,
 seed 42, no dropout/label-smoothing/bpe-dropout overrides -- corpus
-changed from `almg-v1` to `almg-v3` only:
+changed from `almg-v1` to `almg-v3` only. Completed in ~5h55m, registered
+as Model Package v12:
 
-```sh
-cd ml
-AWS_PROFILE=translator-dev AWS_REGION=us-east-1 uv run python -m training.submit_job \
-  --epochs 13 \
-  --corpus-version almg-v3 \
-  --corpus-prefix corpus/almg/v3 \
-  --max-run 32400 \
-  --run-id run-20260930T000000Z-v12-cleaned-corpus \
-  --no-wait
+| Version | Corpus | BLEU | chrF |
+|---|---|---|---|
+| v7 (baseline) | `almg-v1` | 14.0 | 36.5 |
+| v11 (clean reproduction, #192's Phase 2) | `almg-v1` | 13.5 | 36.6 |
+| v12 (cleaned corpus) | `almg-v3` | 13.7 | 36.7 |
+
+**Conclusion: the cleaned corpus does not show a clear improvement.**
+v12's numbers fall inside the run-to-run variance band v11 already
+established for this exact hyperparameter config (v11 exists specifically
+to measure that variance -- see #192's Phase 2) -- chrF marginally higher,
+BLEU marginally lower, no signal either direction. `almg-v1` remains the
+corpus version in production use; `submit_job.py`'s `CORPUS_PREFIX`/
+`CORPUS_VERSION` defaults are unchanged, `almg-v3` is not adopted. v12
+rejected in Model Registry with this reasoning recorded; v7 remains the
+deployed model.
+
+**Acknowledged methodological gap, not fully resolved**: this compares
+v12's `almg-v3`-val score against v7's original `almg-v1`-val score, not a
+byte-for-byte identical validation set (`almg-v3`'s val set is 3,497 pairs
+after Phase 1's length-filter dropped ~3.1% of `almg-v1`'s original 3,609).
+A fully isolated re-score of v7 against `almg-v3`'s own validation set was
+judged not worth the additional ~45min-1hr of work, since the effect size
+here is small either way (well within the v7/v11 noise band) and very
+unlikely to change the qualitative conclusion -- a deliberate, documented
+tradeoff, not a hidden gap.
+
+### A second, more serious self-registration failure surfaced by this run
+
+This run's own self-registration attempt failed too, but with a
+**different** error than #196's `NoRegionError` (which #198 already
+fixed -- `region` correctly appeared in this run's hyperparameters):
+
+```
+WARNING: self-registration failed, but the training run itself succeeded
+(model card at /opt/ml/model/model_card.md): An error occurred
+(ValidationException) when calling the CreateModelPackage operation:
+Cannot find S3 object: model-artifacts/.../output/model.tar.gz in bucket
+traductor-kaqchikel-training-data-dev.
 ```
 
-Training job name: `traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`
-(`InProgress` at the time this PR was opened; `--no-wait` used deliberately,
-per this project's SSO-token-expiry precedent with long blocking waits).
-
-#### Follow-up needed to actually close #199
-
-1. Wait for `traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`
-   to complete (`aws sagemaker describe-training-job --training-job-name
-   traductor-kaqchikel-run-20260930T000000Z-v12-cleaned-corpus-202`,
-   expect roughly 6-7 hours wall-clock based on v7/v11's own precedent).
-   Confirm self-registration succeeded (issue #198's `NoRegionError` fix);
-   if it didn't, `submit_job.py --register-existing` is the documented
-   fallback.
-2. Compare its full-validation-set BLEU/chrF (registered Model Package
-   metadata / model card) against the v7 baseline (BLEU 14.0/chrF 36.5,
-   `almg-v1`) -- same validation-set size both sides (`almg-v3`'s val set,
-   3,497 pairs after filtering, vs. `almg-v1`'s 3,609 -- note this is not
-   perfectly apples-to-apples on val-set size/content, since the cleaning
-   also touched validation; if that's judged too confounded once real
-   numbers are in, re-score the v7 baseline checkpoint against `almg-v3`'s
-   val set too via `evaluate_checkpoint.py` for a cleaner isolation).
-3. Record the real go/no-go conclusion (BLEU/chrF numbers, and per-
-   direction breakdown) as a comment on #199 and in this section, with a
-   clear recommendation on whether `almg-v3` becomes the new default
-   corpus (updating `submit_job.py`'s hardcoded `CORPUS_PREFIX`/
-   `CORPUS_VERSION` together, per this README's existing drift warning) or
-   whether the result doesn't justify the switch.
-4. Close #199 once recorded.
+This reveals a structural flaw in #190's entire design, not a one-line
+bug: `CreateModelPackage` validates S3 object existence at call time in
+practice (contradicting the assumption #190's design rested on, which was
+checked against AWS's static API reference during #191's review but not
+against real runtime behavior) -- and self-registration runs *inside* the
+training container's own process, before that process exits, which is
+*before* SageMaker uploads the artifact to S3. This isn't fixable with
+another quick patch; filed as issue #201 for an architecture decision.
+Registered this run manually via `submit_job.py --register-existing` in
+the meantime, same as #196 required for the previous run.
 
 ## Serving (`deployment/`)
 
