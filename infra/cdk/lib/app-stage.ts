@@ -50,7 +50,23 @@ export interface TranslatorStageProps extends StageProps {
 //   vocab-scoping fix helps modestly. The two measurements' gap (14.0 vs.
 //   12.3) is not yet reconciled -- see the model package's own
 //   `metric_note` and issue #125.
-const DEV_MODEL_PACKAGE_VERSION = 7;
+// - Versions 8-12 -- all rejected. #182's cheap-tier regularization
+//   levers (dropout=0.3, label-smoothing=0.1, bpe-dropout-alpha=0.1; v8,
+//   v9, v10) each underperformed v7 at 13 epochs, as did checkpoint
+//   averaging (#192) and a cleaned-corpus retrain (#199, v12) -- none
+//   beat v7 outside normal run-to-run noise (v11, a plain 13-epoch
+//   reproduction of v7's exact config with no other changes, established
+//   that noise band at roughly +-0.5 BLEU / +-0.2 chrF).
+// - Version 13 (issue #205: does more training help under the current,
+//   post-#82 vocab-extended setup, re-testing a "diminishing returns"
+//   finding from before that extension existed) -- a fresh 20-epoch run,
+//   otherwise identical to v11's config. BLEU 16.1/chrF 39.3, a real,
+//   substantial improvement over the v11/v7 13-epoch reference (13.5-14.0
+//   BLEU / 36.5-36.6 chrF) -- far outside the established noise band.
+//   Approved and deployed here, the first genuine quality improvement
+//   found since v7. See issue #205 and a follow-up higher-epoch-count
+//   test for whether this ceiling goes even higher.
+const DEV_MODEL_PACKAGE_VERSION = 13;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
