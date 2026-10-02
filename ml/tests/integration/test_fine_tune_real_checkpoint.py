@@ -90,6 +90,14 @@ def test_fine_tune_runs_one_real_step_with_default_hyperparameters(tmp_path):
             "fixture-v0",
             "--model-dir",
             str(tmp_path / "model"),
+            # Issue #187: --checkpoint-dir defaults to the real
+            # SageMaker-container-only path /opt/ml/checkpoints, which
+            # doesn't exist (and isn't writable) outside a real training
+            # container -- override it to a tmp_path here, same as
+            # --model-dir above, so this test's real Seq2SeqTrainer.train()
+            # call can actually create its checkpoint output_dir locally.
+            "--checkpoint-dir",
+            str(tmp_path / "checkpoints"),
             "--epochs",
             "1",
             "--batch-size",
@@ -132,6 +140,12 @@ def test_fine_tune_runs_one_real_step_with_label_smoothing_enabled(tmp_path):
             "fixture-v0",
             "--model-dir",
             str(tmp_path / "model"),
+            # Issue #187: see the sibling test above for why this override
+            # is required (--checkpoint-dir's real default,
+            # /opt/ml/checkpoints, only exists inside a real training
+            # container).
+            "--checkpoint-dir",
+            str(tmp_path / "checkpoints"),
             "--epochs",
             "1",
             "--batch-size",

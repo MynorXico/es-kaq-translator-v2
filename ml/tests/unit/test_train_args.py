@@ -140,6 +140,49 @@ def test_parse_args_defaults_model_dir_and_output_dir_from_sagemaker_env(monkeyp
     assert args.output_data_dir == "/opt/ml/output/data"
 
 
+def test_parse_args_defaults_checkpoint_dir_to_sagemakers_own_checkpoint_path():
+    """Issue #187: per-epoch checkpoints must land in SageMaker's own,
+    separate checkpoint-sync directory (`/opt/ml/checkpoints` -- confirmed
+    against AWS's own "SageMaker AI environment variables and the default
+    paths for training storage locations" reference: this is the *one* row
+    in that table with no dedicated `SM_*` environment variable, so it must
+    be a hardcoded literal, not read from the environment like
+    `--model-dir`/`--output-data-dir` are), never inside `SM_MODEL_DIR`
+    (`--model-dir`) -- that directory is what SageMaker tars into the
+    registered `model.tar.gz` artifact, which must stay small (model +
+    tokenizer + model_card.md only).
+    """
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+        ]
+    )
+
+    assert args.checkpoint_dir == "/opt/ml/checkpoints"
+
+
+def test_parse_args_reads_checkpoint_dir_override():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--checkpoint-dir",
+            "/tmp/custom-checkpoints",
+        ]
+    )
+
+    assert args.checkpoint_dir == "/tmp/custom-checkpoints"
+
+
 def test_parse_args_rejects_unknown_direction():
     with pytest.raises(SystemExit):
         parse_args(

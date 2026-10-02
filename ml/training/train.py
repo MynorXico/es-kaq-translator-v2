@@ -120,6 +120,36 @@ DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 # apart and leave fewer checkpoints on disk than averaging actually needs.
 DEFAULT_SAVE_TOTAL_LIMIT = DEFAULT_AVERAGE_N + 2
 
+# Issue #187: per-epoch checkpoints must land in SageMaker's own, separate
+# checkpoint-sync directory, never inside SM_MODEL_DIR (`--model-dir`) --
+# the directory SageMaker tars whole into the registered `model.tar.gz`
+# artifact. Before this fix, `build_training_arguments` wrote checkpoints to
+# `<model_dir>/checkpoints`, so every real training run's registered
+# artifact bundled the final model *and* several full epoch checkpoints
+# (each including optimizer/scheduler/rng-state, typically 2-3x the bare
+# model's size for AdamW) -- measured at 28.4-30.5 GB on a real run. Every
+# downstream consumer of that artifact (`submit_job.py`'s registration-time
+# download, `deployment/package_model.py`'s repackaging step) paid that cost
+# repeatedly; see issue #187 for the full history.
+#
+# `/opt/ml/checkpoints` is the literal, hardcoded path SageMaker Training
+# Jobs continuously sync to the S3 URI configured via `ModelTrainer`'s
+# `checkpoint_config` (`sagemaker.core.training.configs.CheckpointConfig`,
+# see `training/submit_job.py`'s `build_estimator`) -- entirely independent
+# of the final model artifact upload. Confirmed against AWS's own
+# "SageMaker AI environment variables and the default paths for training
+# storage locations" reference page: unlike every other storage location in
+# that table (`SM_CHANNEL_*`, `SM_OUTPUT_DIR`, `SM_MODEL_DIR`), the
+# checkpoints row has **no** dedicated `SM_*` environment variable -- so,
+# unlike `--model-dir`/`--output-data-dir` above, this can't be defaulted
+# from an `os.environ.get(...)` call; it must be this literal. Also matches
+# `sagemaker.core.training.configs.CheckpointConfig`'s own `local_path`
+# default exactly (confirmed against the installed `sagemaker==3.23.0`
+# package) -- `submit_job.py` imports this same constant rather than
+# independently hardcoding a second copy that could silently drift apart
+# from this one.
+DEFAULT_CHECKPOINT_DIR = "/opt/ml/checkpoints"
+
 # Matches facebook/m2m100_418M's own generation_config.json default
 # (confirmed directly against the real v7 checkpoint artifact, issue #178).
 # Kept here as an explicit, named default rather than left unset: before
@@ -275,6 +305,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("SM_OUTPUT_DATA_DIR", "./output-data"),
         help="Output directory for non-model run artifacts, e.g. predictions/"
         "references used to compute metrics (SM_OUTPUT_DATA_DIR).",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=DEFAULT_CHECKPOINT_DIR,
+        help=(
+            "Local directory to write per-epoch checkpoints to (issue #187) "
+            "-- separate from --model-dir, which SageMaker tars whole into "
+            "the registered model.tar.gz artifact. Defaults to "
+            f"{DEFAULT_CHECKPOINT_DIR!r}, the literal path SageMaker "
+            "Training Jobs continuously sync to the S3 URI configured via "
+            "ModelTrainer's checkpoint_config (see submit_job.py) -- not "
+            "read from an SM_* environment variable, since (unlike "
+            "--model-dir/--output-data-dir above) none exists for this "
+            "path; see DEFAULT_CHECKPOINT_DIR's own module-level comment."
+        ),
     )
     parser.add_argument(
         "--base-model",
@@ -882,7 +927,13 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
     warmup_steps = round(args.warmup_ratio * total_steps)
 
     return Seq2SeqTrainingArguments(
-        output_dir=str(Path(args.model_dir) / "checkpoints"),
+        # Issue #187: SageMaker's own separate checkpoint-sync directory,
+        # never nested under args.model_dir -- see DEFAULT_CHECKPOINT_DIR's
+        # module-level comment for the full rationale (SageMaker tars
+        # args.model_dir whole into the registered model.tar.gz artifact;
+        # bundling per-epoch checkpoints into *that* is exactly what grew a
+        # real run's artifact to 28.4-30.5 GB before this fix).
+        output_dir=args.checkpoint_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
@@ -907,7 +958,9 @@ def build_training_arguments(args: argparse.Namespace, num_train_examples: int) 
         # in its own dedicated future run) structurally impossible: there
         # was nothing to average. `training/checkpoint_averaging.py`
         # consumes the resulting `checkpoint-<step>` directories under
-        # `args.model_dir/checkpoints/`. Uses the epoch-based strategy
+        # `args.checkpoint_dir` (issue #187 moved this out from under
+        # `args.model_dir/checkpoints/` -- see DEFAULT_CHECKPOINT_DIR's own
+        # comment). Uses the epoch-based strategy
         # (rather than a steps-based one) since "average the final N
         # epochs" is this ticket's explicit framing and epoch boundaries
         # are already meaningful checkpoints for this project's small

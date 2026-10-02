@@ -139,7 +139,7 @@ from typing import Any
 import boto3
 from sagemaker.core.image_uris import retrieve as _retrieve_image_uri
 from sagemaker.core.shapes import OutputDataConfig, StoppingCondition
-from sagemaker.core.training.configs import Compute, InputData, SourceCode
+from sagemaker.core.training.configs import CheckpointConfig, Compute, InputData, SourceCode
 from sagemaker.train import ModelTrainer
 
 # `parse_model_card_metrics`/`ensure_model_package_group` aren't referenced
@@ -156,7 +156,7 @@ from training.model_registry import (
     register_model_package,
 )
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
-from training.train import DEFAULT_BASE_MODEL
+from training.train import DEFAULT_BASE_MODEL, DEFAULT_CHECKPOINT_DIR
 
 # --- Corpus location (ADR 0002: private ALMG corpus, versioned prefix) -----
 # Never derived from corpus content -- bump this (and re-run against a new
@@ -210,6 +210,16 @@ BUNDLED_PACKAGES = ("data", "evaluation", "training")
 REQUIREMENTS_FILENAME = "requirements.txt"
 
 REQUIRED_STACK_OUTPUTS = ("TrainingDataBucketName", "SageMakerExecutionRoleArn")
+
+# --- Checkpoint storage (issue #187) ----------------------------------------
+# Separate S3 prefix from `output_path`'s "model-artifacts/" (build_job_config
+# below) -- SageMaker continuously syncs each training job's
+# `DEFAULT_CHECKPOINT_DIR` (training.train, imported above) local directory
+# to this S3 location *during* training, entirely independently of the final
+# model.tar.gz artifact upload. Scoped per run-id (build_checkpoint_s3_uri)
+# so concurrent/successive runs' checkpoints never collide under one shared
+# prefix.
+CHECKPOINT_PREFIX = "model-checkpoints"
 
 
 def _generate_run_id() -> str:
@@ -512,6 +522,16 @@ def build_channel_uris(
     return channels
 
 
+def build_checkpoint_s3_uri(bucket: str, run_id: str) -> str:
+    """The S3 URI this run's per-epoch checkpoints sync to (issue #187) --
+    distinct from `build_job_config`'s `output_path` (where the final,
+    registered `model.tar.gz` artifact lands), so checkpoints never end up
+    bundled into that artifact again. Scoped per `run_id`, mirroring
+    `build_channel_uris`' exact-object-key (not whole-prefix) convention.
+    """
+    return f"s3://{bucket}/{CHECKPOINT_PREFIX}/{run_id}/"
+
+
 def _init_model_container_path(init_model_s3_uri: str) -> str:
     """The container-side path an `init-model` channel resolves to, per
     SageMaker's `/opt/ml/input/data/<channel>/<s3-object-basename>`
@@ -610,6 +630,9 @@ def build_job_config(
         "instance_count": 1,
         "max_run": args.max_run,
         "output_path": output_path,
+        # Issue #187: per-epoch checkpoints sync to their own, separate S3
+        # location -- never bundled into output_path's model.tar.gz again.
+        "checkpoint_s3_uri": build_checkpoint_s3_uri(bucket, hyperparameters["run-id"]),
         "transformers_version": TRANSFORMERS_VERSION,
         "pytorch_version": PYTORCH_VERSION,
         "py_version": PY_VERSION,
@@ -647,6 +670,18 @@ def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None
     )
     stopping_condition = StoppingCondition(max_runtime_in_seconds=job_config["max_run"])
     output_data_config = OutputDataConfig(s3_output_path=job_config["output_path"])
+    # Issue #187: SageMaker's own native checkpoint-sync mechanism --
+    # continuously syncs `local_path` (training.train.DEFAULT_CHECKPOINT_DIR,
+    # imported above so both sides of this coupling share one literal) to
+    # `s3_uri` *during* training, entirely independent of output_data_config's
+    # final model.tar.gz artifact upload. Verified against the real installed
+    # SDK (sagemaker==3.23.0): `sagemaker.core.training.configs.CheckpointConfig`
+    # is what `ModelTrainer(checkpoint_config=...)` actually accepts -- see
+    # training/submit_job.py's module docstring for this project's general
+    # v2->v3 API-shape verification discipline.
+    checkpoint_config = CheckpointConfig(
+        s3_uri=job_config["checkpoint_s3_uri"], local_path=DEFAULT_CHECKPOINT_DIR
+    )
     return ModelTrainer(
         training_image=job_config["training_image"],
         source_code=source_code,
@@ -655,6 +690,7 @@ def build_estimator(job_config: dict[str, Any], *, sagemaker_session: Any = None
         compute=compute,
         stopping_condition=stopping_condition,
         output_data_config=output_data_config,
+        checkpoint_config=checkpoint_config,
         hyperparameters=job_config["hyperparameters"],
         sagemaker_session=sagemaker_session,
     )
@@ -720,10 +756,19 @@ def fetch_model_card_from_artifact(s3_client: Any, model_data_url: str) -> str:
     ADR 0001's traceability requirement).
 
     Streams the download to a temp file on disk rather than an in-memory
-    buffer (issue #188): this artifact bundles per-epoch checkpoints
-    alongside the final model (issue #182/#187) and was measured at 30.5 GB
-    on a real run -- downloading that into memory just to read one small
-    text file inside it caused a real out-of-memory kill. Peak process
+    buffer (issue #188): every real run submitted before issue #187's fix
+    bundled per-epoch checkpoints alongside the final model (issue #182) and
+    was measured at 28.4-30.5 GB -- downloading that into memory just to
+    read one small text file inside it caused a real out-of-memory kill.
+    Issue #187 stopped that bundling at the source (per-epoch checkpoints
+    now sync to their own separate S3 location, `build_checkpoint_s3_uri`,
+    via `ModelTrainer`'s native `checkpoint_config` -- see `build_estimator`),
+    so a run submitted after that fix should register a small (model +
+    tokenizer + model_card.md only, roughly ~2GB) artifact instead. This
+    streamed-to-disk approach is kept regardless -- it costs nothing extra
+    for a small artifact, stays correct for any pre-#187 run a maintainer
+    still needs to register via `--register-existing`, and removes any
+    dependency on artifact size staying small in the future. Peak process
     memory here stays roughly constant regardless of artifact size.
     """
     bucket, key = _parse_s3_uri(model_data_url)
@@ -886,6 +931,7 @@ def _print_dry_run_config(outputs: dict[str, str], config: dict[str, Any]) -> No
             "instance_count": config["instance_count"],
             "max_run": config["max_run"],
             "output_path": config["output_path"],
+            "checkpoint_s3_uri": config["checkpoint_s3_uri"],
             "transformers_version": config["transformers_version"],
             "pytorch_version": config["pytorch_version"],
             "py_version": config["py_version"],

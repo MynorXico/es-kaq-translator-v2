@@ -368,6 +368,27 @@ def test_build_job_config_has_a_cost_safety_cap_and_valid_image_versions():
     }
 
 
+def test_build_job_config_includes_a_checkpoint_s3_uri_separate_from_the_model_artifact():
+    """Issue #187: per-epoch checkpoints must sync to their own S3
+    location, distinct from `output_path` (where the final model.tar.gz
+    artifact lands) -- so the registration-time artifact never bundles
+    them again. Scoped per run-id so concurrent/successive runs' checkpoints
+    never collide.
+    """
+    args = submit_job.parse_args(["--run-id", "run-test"])
+
+    config = submit_job.build_job_config(
+        bucket="fake-bucket",
+        role="fake-role",
+        args=args,
+        source_dir="fake-bundle",
+        training_image="fake-training-image",
+    )
+
+    assert config["checkpoint_s3_uri"] == "s3://fake-bucket/model-checkpoints/run-test/"
+    assert config["checkpoint_s3_uri"] != config["output_path"]
+
+
 def test_build_job_config_respects_custom_instance_type_and_max_run():
     args = submit_job.parse_args(["--instance-type", "ml.p3.2xlarge", "--max-run", "3600"])
 
@@ -452,6 +473,13 @@ def test_build_estimator_constructs_model_trainer_with_expected_kwargs(monkeypat
 
     assert kwargs["stopping_condition"].max_runtime_in_seconds == 10800
     assert kwargs["output_data_config"].s3_output_path == "s3://fake-bucket/model-artifacts/"
+
+    # Issue #187: checkpoints sync to their own, separate S3 location via
+    # ModelTrainer's native checkpoint_config -- never bundled into
+    # output_data_config's model.tar.gz artifact again.
+    checkpoint_config = kwargs["checkpoint_config"]
+    assert checkpoint_config.s3_uri == "s3://fake-bucket/model-checkpoints/run-test/"
+    assert checkpoint_config.local_path == submit_job.DEFAULT_CHECKPOINT_DIR
 
 
 def test_build_training_inputs_uses_train_and_validation_channel_names():

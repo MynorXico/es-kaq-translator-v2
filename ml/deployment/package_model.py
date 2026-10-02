@@ -1,10 +1,18 @@
 """Turn a training run's raw `model.tar.gz` artifact (the output of
-`training.train.save_model_and_tokenizer`: model + tokenizer files --
-plus, since issue #182, a `checkpoints/` subtree of per-epoch checkpoints
-that `repackage_model_artifact` below deliberately excludes, since it's
-needed only for post-hoc checkpoint averaging, never for serving) into a
-self-contained artifact the SageMaker Hugging Face Inference Toolkit can
-serve with our custom direction-tag-aware handler (issue #8).
+`training.train.save_model_and_tokenizer`: model + tokenizer files, plus
+`model_card.md`) into a self-contained artifact the SageMaker Hugging Face
+Inference Toolkit can serve with our custom direction-tag-aware handler
+(issue #8).
+
+Between issue #182 and issue #187, this artifact also bundled a
+`checkpoints/` subtree of per-epoch checkpoints (needed only for post-hoc
+checkpoint averaging, never for serving) -- `repackage_model_artifact`
+below still excludes any top-level `checkpoints/` entries defensively, but
+issue #187 moved per-epoch checkpoints to their own separate S3 location
+entirely (see `training/checkpoint_averaging.py`'s module docstring), so a
+run submitted after that fix never has a `checkpoints/` subtree for this
+exclusion to actually act on -- a harmless no-op for current runs, kept
+only in case an older, pre-#187 artifact is ever repackaged.
 
 ## Why repackage rather than pointing `source_dir`/`entry_point` at code
 elsewhere
