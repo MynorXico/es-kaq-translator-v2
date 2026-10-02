@@ -1,7 +1,10 @@
 """Turn a training run's raw `model.tar.gz` artifact (the output of
-`training.train.save_model_and_tokenizer`: model + tokenizer files only)
-into a self-contained artifact the SageMaker Hugging Face Inference
-Toolkit can serve with our custom direction-tag-aware handler (issue #8).
+`training.train.save_model_and_tokenizer`: model + tokenizer files --
+plus, since issue #182, a `checkpoints/` subtree of per-epoch checkpoints
+that `repackage_model_artifact` below deliberately excludes, since it's
+needed only for post-hoc checkpoint averaging, never for serving) into a
+self-contained artifact the SageMaker Hugging Face Inference Toolkit can
+serve with our custom direction-tag-aware handler (issue #8).
 
 ## Why repackage rather than pointing `source_dir`/`entry_point` at code
 elsewhere
@@ -64,9 +67,22 @@ def repackage_model_artifact(source_tar_path: Path, code_dir: Path, output_tar_p
     `code_dir` as a top-level `code/` directory, and re-tar everything to
     `output_tar_path` (parent directories created as needed).
 
+    Excludes any top-level `checkpoints/` directory (issue #182's per-epoch
+    checkpointing, added after this module's own "model + tokenizer files
+    only" assumption was written) -- checkpoints are needed only by
+    `training.checkpoint_averaging`'s post-hoc tooling, never for serving.
+    A real deployment of a post-#182 artifact failed with "Failed to
+    decompress and extract model contents as their size is greater than
+    available disk space" because this function was re-bundling the whole
+    multi-checkpoint training artifact (each checkpoint includes
+    `optimizer.pt`, typically 2-3x the bare model's size) into the
+    "inference" package (issue #209). Filtered out at extraction time, not
+    deleted afterward, so the large checkpoint files are never even
+    decompressed to disk in the first place.
+
     `source_tar_path` is always this project's own training-job output
-    (never arbitrary/untrusted input), so a plain `extractall()` is safe
-    here.
+    (never arbitrary/untrusted input), so a plain filtered `extractall()`
+    is safe here.
     """
     extract_dir = Path(tempfile.mkdtemp(prefix="kaqchikel-inference-extract-"))
     try:
@@ -78,7 +94,12 @@ def repackage_model_artifact(source_tar_path: Path, code_dir: Path, output_tar_p
             # `source_tar_path` is always our own training-job output, so
             # this is a defense-in-depth hardening, not a real threat model.
             extractall_kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
-            tar.extractall(extract_dir, **extractall_kwargs)
+            members = [
+                member
+                for member in tar.getmembers()
+                if member.name != "checkpoints" and not member.name.startswith("checkpoints/")
+            ]
+            tar.extractall(extract_dir, members=members, **extractall_kwargs)
 
         shutil.copytree(code_dir, extract_dir / CODE_SUBDIR_NAME)
 
