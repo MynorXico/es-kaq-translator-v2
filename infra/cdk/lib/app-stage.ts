@@ -73,12 +73,23 @@ export interface TranslatorStageProps extends StageProps {
 //   exists specifically to avoid this trap and was bypassed here by
 //   mistake.
 // - Version 14 -- the actually-deployable registration of v13's same
-//   weights, produced correctly via `ml/deployment/deploy.py
-//   --source-model-data-url <v13's model.tar.gz>`: a real inference DLC
-//   image (`huggingface-pytorch-inference`, not `-training`) plus the
-//   repackaged artifact with the custom inference handler bundled in.
-//   Same BLEU/chrF as v13 (same underlying weights) -- deployed here.
-const DEV_MODEL_PACKAGE_VERSION = 14;
+//   weights, produced via `ml/deployment/deploy.py --source-model-data-url
+//   <v13's model.tar.gz>`: a real inference DLC image
+//   (`huggingface-pytorch-inference`, not `-training`), but its repackaged
+//   artifact was still ~30GB -- `deployment.package_model.
+//   repackage_model_artifact` re-bundled the *entire* source artifact,
+//   including the `checkpoints/` subtree (#182's per-epoch checkpointing,
+//   added after this module was written). CloudFormation's `Endpoint`
+//   update rolled back: "Failed to decompress and extract model contents
+//   as their size is greater than available disk space." Live endpoint
+//   unaffected throughout (stayed on v7). See issue #209/#211 (#211
+//   fixed `package_model.py` to exclude `checkpoints/` from the
+//   repackaged inference copy, verified directly against this exact
+//   artifact's real tar member names).
+// - Version 15 -- v13's weights, correctly repackaged this time (fix
+//   #211, inference artifact now ~1.9GB, verified before this deploy).
+//   Same BLEU/chrF as v13/v14 (same underlying weights) -- deployed here.
+const DEV_MODEL_PACKAGE_VERSION = 15;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
