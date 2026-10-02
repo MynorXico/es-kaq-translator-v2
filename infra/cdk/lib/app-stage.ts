@@ -63,10 +63,22 @@ export interface TranslatorStageProps extends StageProps {
 //   otherwise identical to v11's config. BLEU 16.1/chrF 39.3, a real,
 //   substantial improvement over the v11/v7 13-epoch reference (13.5-14.0
 //   BLEU / 36.5-36.6 chrF) -- far outside the established noise band.
-//   Approved and deployed here, the first genuine quality improvement
-//   found since v7. See issue #205 and a follow-up higher-epoch-count
-//   test for whether this ceiling goes even higher.
-const DEV_MODEL_PACKAGE_VERSION = 13;
+//   Approved, but registered via `training.submit_job` (traceability
+//   only) -- its `InferenceSpecification` points at the *training* DLC
+//   image, not an inference one. Deploying it directly failed:
+//   CloudFormation's `Endpoint` update rolled back with a real ECR
+//   permission error (the training image's repository doesn't grant
+//   `sagemaker.amazonaws.com` pull access) -- the live endpoint was
+//   unaffected throughout (stayed on v7). See issue #209: `deploy.py`
+//   exists specifically to avoid this trap and was bypassed here by
+//   mistake.
+// - Version 14 -- the actually-deployable registration of v13's same
+//   weights, produced correctly via `ml/deployment/deploy.py
+//   --source-model-data-url <v13's model.tar.gz>`: a real inference DLC
+//   image (`huggingface-pytorch-inference`, not `-training`) plus the
+//   repackaged artifact with the custom inference handler bundled in.
+//   Same BLEU/chrF as v13 (same underlying weights) -- deployed here.
+const DEV_MODEL_PACKAGE_VERSION = 14;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
