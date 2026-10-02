@@ -2,14 +2,43 @@
 
 `training.train.build_training_arguments` now defaults to
 `save_strategy="epoch"` (previously `"no"` -- no intermediate checkpoint
-ever existed for any past training run), so a real training run's
-`--model-dir/checkpoints/` now contains one `checkpoint-<step>` directory
-per epoch (the shape `transformers.Seq2SeqTrainer`'s own checkpointing
-writes: `model.safetensors`, `config.json`, `generation_config.json`,
+ever existed for any past training run), so a real training run writes one
+`checkpoint-<step>` directory per epoch (the shape
+`transformers.Seq2SeqTrainer`'s own checkpointing writes:
+`model.safetensors`, `config.json`, `generation_config.json`,
 `trainer_state.json`, `optimizer.pt`, `scheduler.pt`, `scaler.pt` (the
 fp16 AMP grad-scaler state), `rng_state.pth`, `training_args.bin` --
 confirmed directly against a real `facebook/m2m100_418M` fine-tuning
 run, not assumed).
+
+**Checkpoint location (issue #187): not inside the downloaded Model
+Registry artifact any more.** Before issue #187, these `checkpoint-<step>`
+directories lived under `--model-dir/checkpoints/` -- `SM_MODEL_DIR`, the
+directory SageMaker tars whole into the registered `model.tar.gz` -- so
+every registration/deployment paid the cost of a 28.4-30.5 GB download for
+a run that was only ever going to average 3 of its many checkpoints, if
+that. Checkpoints now sync to their own, separate S3 location via
+`ModelTrainer`'s native checkpoint-sync mechanism
+(`sagemaker.core.training.configs.CheckpointConfig`, configured in
+`training/submit_job.py`'s `build_estimator`): a real training job's
+`training/train.py` writes checkpoints to `--checkpoint-dir`
+(`training.train.DEFAULT_CHECKPOINT_DIR`, `/opt/ml/checkpoints` -- the
+literal, hardcoded local path SageMaker Training Jobs use for this, with
+no dedicated `SM_*` environment variable, confirmed against AWS's own
+storage-locations reference), and SageMaker continuously syncs that local
+directory to `s3://<bucket>/model-checkpoints/<run-id>/`
+(`submit_job.build_checkpoint_s3_uri`) *during* training -- entirely
+independent of the final model artifact upload. To average a real run's
+checkpoints, download them from that S3 location first, e.g.:
+
+```sh
+aws s3 sync s3://<training-data-bucket>/model-checkpoints/<run-id>/ ./checkpoints
+uv run python -m training.checkpoint_averaging ./checkpoints ./averaged-checkpoint --n 3
+```
+
+(This module's own code needs no change for this -- `checkpoints_dir` was
+always a plain CLI argument, never hardcoded to the old
+`--model-dir/checkpoints/` layout.)
 
 Averaging the weights of the final few epochs' checkpoints ("checkpoint
 averaging"/"weight averaging") is a well-known, cheap way to reduce
@@ -225,10 +254,11 @@ def average_checkpoints(checkpoint_dirs: list[Path], output_dir: Path) -> Path:
 
     **Does not copy tokenizer files.** `Seq2SeqTrainer`'s own per-checkpoint
     saves never include them -- only `training.train.save_model_and_tokenizer`'s
-    one final save, to the run's own `--model-dir` (not
-    `--model-dir/checkpoints/<checkpoint>`), does. Copy the tokenizer files
-    from that directory into `output_dir` separately before loading the
-    averaged checkpoint with `from_pretrained`.
+    one final save, to the run's own `--model-dir` (a separate location from
+    `checkpoint_dirs` entirely since issue #187 -- see this module's own
+    docstring), does. Copy the tokenizer files from that `--model-dir` (or
+    the downloaded, registered `model.tar.gz`) into `output_dir` separately
+    before loading the averaged checkpoint with `from_pretrained`.
 
     Raises `ValueError` if `checkpoint_dirs` is empty, or if the
     checkpoints' weights don't actually match (see `average_state_dicts`).
@@ -266,12 +296,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         prog="ml.training.checkpoint_averaging",
         description=(
             "Average the final N epochs' checkpoint weights from a training "
-            "run's --model-dir/checkpoints/ directory (issue #182)."
+            "run's checkpoint directory (issue #182)."
         ),
     )
     parser.add_argument(
         "checkpoints_dir",
-        help="Path to a training run's checkpoints directory (e.g. <model-dir>/checkpoints).",
+        help=(
+            "Path to a local directory of downloaded checkpoint-<step> "
+            "subdirectories -- e.g. the result of `aws s3 sync "
+            "s3://<bucket>/model-checkpoints/<run-id>/ ./checkpoints` "
+            "(issue #187; see this module's own docstring)."
+        ),
     )
     parser.add_argument("output_dir", help="Directory to write the averaged checkpoint to.")
     parser.add_argument(

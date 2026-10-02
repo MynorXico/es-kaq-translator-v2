@@ -65,6 +65,16 @@ def test_build_training_arguments_applies_regularization_and_schedule_defaults(t
     # evicts first.
     assert training_args.save_total_limit == DEFAULT_SAVE_TOTAL_LIMIT
     assert DEFAULT_SAVE_TOTAL_LIMIT > DEFAULT_AVERAGE_N
+    # Issue #187: per-epoch checkpoints write to SageMaker's own, separate
+    # checkpoint-sync directory (--checkpoint-dir, default
+    # /opt/ml/checkpoints) -- never nested under --model-dir, which is what
+    # SageMaker tars into the registered model.tar.gz artifact. Before this
+    # fix, output_dir was `<model_dir>/checkpoints`, so every per-epoch
+    # checkpoint (each a full model + optimizer + scheduler + rng-state
+    # save) ended up bundled into that artifact -- a real run measured at
+    # 28.4-30.5 GB because of exactly this.
+    assert training_args.output_dir == args.checkpoint_dir
+    assert not training_args.output_dir.startswith(args.model_dir)
 
 
 def test_build_training_arguments_respects_cli_overrides(tmp_path):

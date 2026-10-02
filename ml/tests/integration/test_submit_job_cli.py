@@ -80,6 +80,9 @@ def test_dry_run_resolves_config_end_to_end_without_touching_fit(monkeypatch, ca
     assert "corpus/almg/v1/train.tsv" in captured.out
     assert "es->cak" in captured.out
     assert "fake-training-image" in captured.out
+    # Issue #187: the checkpoint sync destination is visible in the dry-run
+    # preview too, distinct from the model-artifact output path.
+    assert "model-checkpoints/run-test" in captured.out
 
 
 def test_full_submission_wires_fit_and_model_registry_registration(monkeypatch):

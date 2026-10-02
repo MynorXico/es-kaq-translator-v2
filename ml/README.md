@@ -1021,10 +1021,17 @@ object existence at call time, and self-registration ran *before* the
 training container's own toolkit had uploaded the artifact to S3 -- a
 separate, post-exit lifecycle step the running script has no hook into.
 See `docs/adr/0009-model-registry-registration-timing.md` for the full
-decision record. A real run's artifact was measured at 28.4-30.5 GB
-(per-epoch checkpoints bundled in, issue #187), so this download is real
-(bandwidth-bound, tens of minutes) but bounded, safe, and already the
-same code path `--register-existing` (below) exercises every day.
+decision record. Every real run submitted before issue #187's fix had its
+per-epoch checkpoints bundled into this same artifact, measured at
+28.4-30.5 GB -- every registration (and every `--register-existing` call,
+below) paid a 45min-1hr+ download purely to read a few-KB `model_card.md`.
+Issue #187 fixed this at the source (see "Checkpoint storage" under
+"Checkpoint averaging" below): a run submitted after that fix registers a
+small (model + tokenizer + model_card.md only, roughly ~2GB) artifact
+instead, syncing checkpoints to their own separate S3 location during
+training. The streamed-to-disk download (issues #188/#189) is kept
+regardless of artifact size -- it costs nothing extra for a small artifact
+and stays correct for any older, pre-#187 run still being registered.
 `train.py` itself needs zero AWS credentials or SDK calls.
 
 Run it from `ml/` (so `build_source_bundle()`'s default `ml_root` resolves):
@@ -1280,7 +1287,11 @@ variable" discipline as issue #82's own subword-vocabulary follow-up.
 4. **`save_strategy="epoch"` is the new default** (previously `"no"` --
    no intermediate checkpoint ever existed for any past training run,
    making checkpoint averaging structurally impossible: there was nothing
-   to average). Paired with `save_total_limit=DEFAULT_SAVE_TOTAL_LIMIT`
+   to average). Checkpoints write to `--checkpoint-dir`
+   (`/opt/ml/checkpoints` by default), **not** under `--model-dir` -- see
+   "Checkpoint storage: separated from the registered artifact (issue
+   #187)" below for why that separation matters and how it's wired up.
+   Paired with `save_total_limit=DEFAULT_SAVE_TOTAL_LIMIT`
    (`training.checkpoint_averaging.DEFAULT_AVERAGE_N + 2`, derived from --
    not independently hardcoded next to -- the averaging utility's own
    default `N`) so per-epoch checkpoints (each a full model + optimizer +
@@ -1460,6 +1471,97 @@ non-confounded gap on a genuinely clean baseline. This is a real, valuable
 negative result (the same shape as issue #180's num_beams=8 finding), not
 an inconclusive one: this project should **not** adopt checkpoint
 averaging as a default post-training step.
+
+### Checkpoint storage: separated from the registered artifact (issue #187)
+
+Issue #192's conclusion above means checkpoint averaging is very unlikely
+to actually be used going forward -- but until issue #187, the *cost* of
+having per-epoch checkpoints available for it at all was being paid on
+every single real training run, whether or not anyone ever averaged
+anything: `training.train.build_training_arguments`'s `output_dir` (issue
+#182's `save_strategy="epoch"`) was `<model_dir>/checkpoints`, i.e. *inside*
+`SM_MODEL_DIR` -- the exact directory SageMaker tars whole into the
+registered `model.tar.gz` artifact. Every per-epoch checkpoint (each a full
+model + optimizer + scheduler + rng-state save, 2-3x the bare model's size
+for AdamW) rode along into that artifact. Concretely, this caused:
+
+- Every `submit_job.py` registration (`main()`'s default path, and every
+  `--register-existing` call) downloading the full ~30GB artifact --
+  measured at 28.4-30.5 GB across v8 through v16 -- just to read a few-KB
+  `model_card.md`, costing 45min-1hr+ each time.
+- A real deployment of issue #205's 20-epoch model (the first genuine
+  quality improvement found since v7) failing outright: `deployment/
+  package_model.py`'s `repackage_model_artifact` re-bundled the *entire*
+  source artifact, checkpoints included, into the inference package, which
+  the SageMaker inference container's disk couldn't decompress. Issue #211
+  patched the symptom (excludes `checkpoints/` from the repackaged
+  *inference* copy only) but explicitly left this issue open, since the
+  *registration-time* artifact -- what `submit_job.py` downloads -- was
+  still untouched and still ~30GB.
+- Issue #192's own averaging evaluation above concluding averaging doesn't
+  help this project's corpus/model size -- so the original justification
+  for keeping multiple epoch checkpoints around at all was no longer even
+  theoretically paying for itself.
+
+**Fix: SageMaker's own native checkpoint-sync mechanism, not a hand-rolled
+location inside the model artifact.** Verified against the real installed
+SageMaker Python SDK v3 (`sagemaker==3.23.0`, the same `ModelTrainer` this
+project already migrated to in #155/#172) rather than assumed from v2-era
+documentation -- `ModelTrainer` accepts a `checkpoint_config`
+(`sagemaker.core.training.configs.CheckpointConfig(s3_uri=..., local_path=
+...)`). SageMaker Training Jobs continuously sync whatever local directory
+`local_path` names to `s3_uri` *during* training, entirely independent of
+the final `output_data_config`/`model.tar.gz` artifact upload -- confirmed
+against AWS's own "SageMaker AI environment variables and the default
+paths for training storage locations" reference page, which explicitly
+documents `/opt/ml/checkpoints` as "Writes to S3 during training: Yes" /
+"Writes to S3 when job is terminated: No" (i.e. never folded into the
+final artifact at all) and, notably, as the *one* storage location in that
+table with **no** dedicated `SM_*` environment variable -- every other row
+(`SM_CHANNEL_*`, `SM_OUTPUT_DIR`, `SM_MODEL_DIR`) has one.
+
+- `training/train.py` gained a `--checkpoint-dir` flag
+  (`training.train.DEFAULT_CHECKPOINT_DIR`, hardcoded to
+  `/opt/ml/checkpoints` -- not read from an `SM_*` environment variable,
+  since none exists for this path, unlike `--model-dir`/`--output-data-dir`).
+  `build_training_arguments`'s `output_dir` now points there instead of
+  `<model_dir>/checkpoints`.
+- `training/submit_job.py`'s `build_estimator` configures
+  `ModelTrainer(checkpoint_config=CheckpointConfig(s3_uri=..., local_path=
+  DEFAULT_CHECKPOINT_DIR))`, importing `DEFAULT_CHECKPOINT_DIR` from
+  `training.train` rather than hardcoding a second, independent copy of the
+  same literal that could silently drift apart from `train.py`'s own CLI
+  default. The S3 destination (`build_checkpoint_s3_uri`) is
+  `s3://<training-data-bucket>/model-checkpoints/<run-id>/` -- a prefix
+  entirely separate from `model-artifacts/` (where the registered
+  `model.tar.gz` lands), scoped per run-id so concurrent/successive runs'
+  checkpoints never collide. Visible in `--dry-run`'s printed config too.
+- `training/checkpoint_averaging.py`'s own docstring and CLI `--help` now
+  point at this new S3 location (`aws s3 sync
+  s3://<bucket>/model-checkpoints/<run-id>/ ./checkpoints` before running
+  the averaging tool against the downloaded directory) instead of "inside
+  the downloaded Model Registry artifact" -- the tool itself needed **no**
+  code change, since `checkpoints_dir` was always a plain CLI argument, not
+  hardcoded to the old `<model-dir>/checkpoints` layout. The tool stays
+  fully available for a future revisit despite #192's negative result --
+  this ticket doesn't remove it, only fixes where its input comes from.
+- `deployment/package_model.py`'s `repackage_model_artifact` keeps its
+  issue #211 `checkpoints/` exclusion (defensive, for any older artifact
+  still being repackaged) -- confirmed via the existing
+  `test_repackage_model_artifact_preserves_original_model_files` test (a
+  fixture tarball with **no** `checkpoints/` subtree at all) that this is
+  now a genuine no-op for any run submitted after this fix, not a
+  load-bearing filter.
+
+**Net effect**: a training job's registered `model.tar.gz` is back to
+model + tokenizer + `model_card.md` only (roughly ~2GB, not ~30GB) for
+every run submitted after this fix. Checkpoints are still real and
+retrievable for a future averaging revisit -- just from
+`s3://<bucket>/model-checkpoints/<run-id>/` instead. Verified test-first
+and via `submit_job.py --dry-run`'s printed config (no real training job
+submitted as part of this ticket -- see its own acceptance criteria: this
+is artifact plumbing, not a model-quality change, so a real run wasn't
+required to confirm it).
 
 As a side benefit, this run's full-validation-set score (BLEU 13.5/chrF
 36.6, registered as Model Package v11, then rejected -- it was a reference
