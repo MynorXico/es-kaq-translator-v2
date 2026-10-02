@@ -89,7 +89,21 @@ export interface TranslatorStageProps extends StageProps {
 // - Version 15 -- v13's weights, correctly repackaged this time (fix
 //   #211, inference artifact now ~1.9GB, verified before this deploy).
 //   Same BLEU/chrF as v13/v14 (same underlying weights) -- deployed here.
-const DEV_MODEL_PACKAGE_VERSION = 15;
+// - Version 16 (issue #208: pushing epochs further after #205's 13->20
+//   result) -- a fresh 26-epoch run, otherwise identical config. BLEU
+//   17.8/chrF 40.5, another real, substantial improvement over the
+//   20-epoch result (16.1/39.3) -- the trend keeps climbing, no plateau
+//   yet. Registered via `training.submit_job` (traceability only, same
+//   as v13); its own raw artifact still predates issue #187's
+//   checkpoint-storage fix, so it's still ~30GB.
+// - Version 17 -- v16's weights, correctly repackaged via `deploy.py`
+//   (inference artifact ~1.9GB, verified before this deploy). Same
+//   BLEU/chrF as v16 -- deployed here. See issue #214 for the next
+//   epoch-count probe (35 epochs) -- submitted with issue #187's fix
+//   already active, so that run's own artifact should be small from
+//   training onward, without needing a `deploy.py` repackaging step to
+//   fix an already-bloated artifact after the fact.
+const DEV_MODEL_PACKAGE_VERSION = 17;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
