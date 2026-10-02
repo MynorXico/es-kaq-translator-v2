@@ -47,6 +47,30 @@ def _make_fake_model_tarball(tmp_path: Path) -> Path:
     return tar_path
 
 
+def _make_fake_model_tarball_with_checkpoints(tmp_path: Path) -> Path:
+    """Same shape as a real post-#182 training artifact: the final model
+    files at the root, plus a `checkpoints/checkpoint-<step>/` subtree
+    (issue #182's per-epoch checkpointing) -- real checkpoints include
+    `optimizer.pt`, which is typically 2-3x the bare model's size and is
+    never needed for serving.
+    """
+    source_dir = tmp_path / "source_model_with_checkpoints"
+    source_dir.mkdir()
+    (source_dir / "config.json").write_text("{}")
+    (source_dir / "model_card.md").write_text("# Model card: run-test\n")
+
+    checkpoint_dir = source_dir / "checkpoints" / "checkpoint-100"
+    checkpoint_dir.mkdir(parents=True)
+    (checkpoint_dir / "model.safetensors").write_text("fake checkpoint weights\n")
+    (checkpoint_dir / "optimizer.pt").write_text("fake optimizer state\n")
+
+    tar_path = tmp_path / "model.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        for member in source_dir.iterdir():
+            tar.add(member, arcname=member.name)
+    return tar_path
+
+
 # ---------------------------------------------------------------------------
 # build_inference_code_dir
 # ---------------------------------------------------------------------------
@@ -130,6 +154,33 @@ def test_repackage_model_artifact_adds_a_top_level_code_directory(tmp_path):
     assert "code/inference.py" in names
     assert "code/requirements.txt" in names
     assert "code/training/direction.py" in names
+
+
+def test_repackage_model_artifact_excludes_the_checkpoints_directory(tmp_path):
+    """Regression test for issue #209's real follow-up failure: a real
+    inference deployment of a post-#182 training artifact failed with
+    "Failed to decompress and extract model contents as their size is
+    greater than available disk space" -- repackage_model_artifact was
+    extracting and re-bundling the *entire* source artifact, including
+    the checkpoints/ subtree (#182's per-epoch checkpointing, added after
+    this module's own docstring assumption of "model + tokenizer files
+    only" was written). Checkpoints are needed for post-hoc averaging
+    tooling (training.checkpoint_averaging), never for serving -- the
+    inference package must exclude them entirely.
+    """
+    source_tar = _make_fake_model_tarball_with_checkpoints(tmp_path)
+    ml_root = _make_fake_ml_root(tmp_path)
+    code_dir = build_inference_code_dir(ml_root)
+    output_tar = tmp_path / "output" / "model.tar.gz"
+
+    repackage_model_artifact(source_tar, code_dir, output_tar)
+
+    with tarfile.open(output_tar, "r:gz") as tar:
+        names = set(tar.getnames())
+    assert not any(name.startswith("checkpoints") for name in names)
+    # The final model files themselves must still be preserved.
+    assert "config.json" in names
+    assert "model_card.md" in names
 
 
 def test_repackage_model_artifact_creates_output_parent_directories(tmp_path):
