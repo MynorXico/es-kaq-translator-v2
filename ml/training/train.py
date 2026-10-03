@@ -662,11 +662,14 @@ def extend_vocabulary_for_examples(
     Returns `(added_tokens, compositional_coverage)`: `added_tokens` is the
     list of tokens actually added by either step (may be empty);
     `compositional_coverage` is `training.vocab_extension.
-    count_decomposable_tokens`'s count of those tokens that got a genuine
-    composed row (rather than falling back to the global mean) when
-    `embedding_init_strategy` is `EMBEDDING_INIT_COMPOSITIONAL`, or `None`
-    when it's `EMBEDDING_INIT_MEAN` (the stat is meaningless for that
-    strategy, so it's omitted rather than computed and then ignored).
+    count_decomposable_tokens`'s count of those tokens that could be fully
+    decomposed (possibly with a same-batch sibling's help -- see that
+    function's own docstring for why this is an upper bound on "genuinely
+    composed from real pretrained pieces", not a strict guarantee every
+    counted token avoided the global mean) when `embedding_init_strategy`
+    is `EMBEDDING_INIT_COMPOSITIONAL`, or `None` when it's
+    `EMBEDDING_INIT_MEAN` (the stat is meaningless for that strategy, so
+    it's omitted rather than computed and then ignored).
     """
     base_vocab = tokenizer.get_vocab()
 
@@ -1348,6 +1351,13 @@ def run_training_job(
     # examples) when the compositional strategy is actually in use -- see
     # that function's own docstring for why this is omitted, not recorded
     # as some "n/a" sentinel, for the default (mean) strategy.
+    #
+    # Caveat (code review on PR #219, see count_decomposable_tokens's own
+    # docstring for the full explanation): this counts sibling-assisted
+    # composition, which can itself include a token that fell back to the
+    # global mean -- it's an upper bound on "genuinely composed from real
+    # pretrained pieces", not proof every counted token avoided the global
+    # mean entirely.
     if embedding_init_compositional_coverage is not None:
         hyperparameters["embedding_init_compositional_coverage"] = (
             f"{embedding_init_compositional_coverage}/{len(added_tokens)}"

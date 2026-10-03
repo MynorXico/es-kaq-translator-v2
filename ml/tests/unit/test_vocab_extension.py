@@ -140,6 +140,20 @@ def test_decompose_token_into_known_pieces_handles_a_token_already_in_vocab():
     assert decompose_token_into_known_pieces("ab", vocab) == ["ab"]
 
 
+def test_decompose_token_into_known_pieces_returns_none_for_an_empty_token():
+    """Code review on PR #219: the main `while position < length` loop never
+    executes at all when `length == 0`, so without an explicit guard this
+    would return `[]` (a "successful", empty decomposition) rather than
+    `None` -- `compositional_row_for_token` would then compute
+    `embeddings[[]].mean(axis=0)`, a NaN row, instead of falling back to the
+    global mean like every other undecomposable token. Not currently
+    reachable from the real pipeline (`vocab_gap.find_missing_characters`/
+    `find_missing_words` never emit `""`), but there's no guard against a
+    caller passing one directly, so this is tested as its own contract.
+    """
+    assert decompose_token_into_known_pieces("", {"a": 0}) is None
+
+
 def test_compositional_row_for_token_averages_piece_embeddings():
     vocab = {"a": 0, "b": 1}
     embeddings = np.array([[0.0, 0.0], [2.0, 2.0]])
@@ -193,6 +207,23 @@ def test_resize_embedding_matrix_compositional_falls_back_to_global_mean_when_un
     resized = resize_embedding_matrix_compositional(embeddings, ["zz"], vocab, seed=0)
 
     new_row = resized[2]
+    assert abs(new_row[0] - 5.0) < abs(new_row[0] - 0.0)
+
+
+def test_resize_embedding_matrix_compositional_falls_back_to_global_mean_for_an_empty_token():
+    """Code review on PR #219: an empty-string token must fall back to the
+    global mean like any other undecomposable token (never a NaN row from
+    averaging zero pieces) -- not currently reachable from the real
+    pipeline, but guarded explicitly regardless (see
+    `test_decompose_token_into_known_pieces_returns_none_for_an_empty_token`).
+    """
+    vocab = {"a": 0, "b": 1}
+    embeddings = np.array([[0.0, 0.0], [10.0, 10.0]], dtype=np.float32)
+
+    resized = resize_embedding_matrix_compositional(embeddings, [""], vocab, seed=0)
+
+    new_row = resized[2]
+    assert not np.isnan(new_row).any()
     assert abs(new_row[0] - 5.0) < abs(new_row[0] - 0.0)
 
 

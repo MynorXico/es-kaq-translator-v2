@@ -147,7 +147,20 @@ def decompose_token_into_known_pieces(token: str, vocab: dict[str, int]) -> list
     match trivially returns `[token]` on its very first iteration (the
     longest possible candidate, `token` itself, is checked first), which is
     harmless but not the intended use.
+
+    Returns `None` (not `[]`) for an empty `token`: the main loop below
+    never executes at all when `length == 0`, so without this explicit
+    guard an empty string would otherwise look like a *successful*, empty
+    decomposition -- `compositional_row_for_token` would then average zero
+    rows (`embeddings[[]].mean(axis=0)`), producing a NaN row instead of
+    correctly falling back to a different strategy (code review on PR
+    #219). Not currently reachable from the real pipeline
+    (`training.vocab_gap.find_missing_characters`/`find_missing_words`
+    never emit `""`), but guarded regardless, since nothing else in this
+    function's contract rules it out for a caller passing one directly.
     """
+    if not token:
+        return None
     pieces: list[str] = []
     position = 0
     length = len(token)
@@ -217,6 +230,21 @@ def count_decomposable_tokens(tokens: Iterable[str], vocab: dict[str, int]) -> i
     composition-aware start versus falling back to the global mean,
     without having to re-derive it from the raw token list (ADR 0001's
     traceability requirement).
+
+    **Caveat (code review on PR #219): "decomposable" here means "fully
+    segmentable into known piece *keys*", not "built entirely from genuine
+    pretrained signal".** A token that itself falls back to the global
+    mean (e.g. a brand-new single character with no match anywhere in
+    `vocab`) is still registered as an available *key* once resolved (see
+    the loop below), so a longer sibling token built on top of it counts
+    as "decomposable" here even though part of its own composed value is,
+    transitively, the unrelated global mean. This matches
+    `resize_embedding_matrix_compositional`'s own real behavior exactly
+    (so the stat is never misleading about what that function actually
+    did), but it does mean this count is an upper bound on "genuinely
+    composed from real pretrained pieces", not a strict lower bound on it
+    -- don't read a high `embedding_init_compositional_coverage` as proof
+    every counted token avoided the global mean entirely.
     """
     tokens = list(tokens)
     available_pieces: dict[str, int] = dict(vocab)

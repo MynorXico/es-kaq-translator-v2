@@ -1949,7 +1949,13 @@ real, meaningful value) and, only for the compositional strategy,
 `embedding_init_compositional_coverage` (`<decomposable>/<total new
 tokens>`, via `training.vocab_extension.count_decomposable_tokens` --
 itself sibling-aware, mirroring the real algorithm's own processing order
-so it doesn't understate coverage).
+so it doesn't understate coverage). **Caveat (code review on PR #219):**
+"decomposable" here means "fully segmentable into known piece keys",
+*including* a same-batch sibling that itself fell back to the global mean
+-- so this stat is an upper bound on "genuinely composed from real
+pretrained pieces", not proof every counted token avoided the global mean
+entirely (see `count_decomposable_tokens`'s own docstring for the full
+explanation).
 
 ### Test coverage (test-first, per `docs/testing.md`)
 
@@ -1977,14 +1983,19 @@ not just a label with no behavioral effect).
 synthetic fixtures** (`tests/integration/test_tokenizer_extension_real_model.py`):
 extending the tokenizer with a small real Kaqchikel sample found **24 new
 whole-word/character tokens, 24 of which (100%) were fully decomposable**
-(with sibling assistance in several cases, e.g. words containing "ä" or
-glottal-apostrophe-adjacent characters composing once those characters'
-own new rows were resolved) -- confirming this strategy finds real
-signal against M2M100's actual vocabulary, not only a toy fixture's
-deliberately tiny one. This is a small sample, not a claim that 100%
-coverage holds across the full 33k-sentence corpus's much more varied
-vocabulary -- the real training-run comparison below is what actually
-measures quality impact.
+into known piece keys (with sibling assistance in several cases, e.g.
+words containing "ä" or glottal-apostrophe-adjacent characters composing
+once those characters' own new rows were resolved) -- confirming this
+strategy finds real, structurally composable signal against M2M100's
+actual vocabulary, not only a toy fixture's deliberately tiny one. As
+`count_decomposable_tokens`'s own docstring caveats, "fully decomposable"
+here is not the same claim as "entirely built from genuine pretrained
+embeddings" -- a sibling-assisted decomposition can itself include a
+token that fell back to the global mean, so 100% is an upper bound on
+genuine composition, not a measurement of it. This is also a small
+sample, not a claim that 100% coverage holds across the full
+33k-sentence corpus's much more varied vocabulary -- the real
+training-run comparison below is what actually measures quality impact.
 
 ### Controlled comparison: real training runs, same config except this one lever
 
