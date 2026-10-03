@@ -1889,6 +1889,153 @@ real runs. See
 for the full decision record and "Job submission" above for the current
 (again client-side) registration flow.
 
+## Compositional embedding initialization for new Kaqchikel tokens (issue #218)
+
+Every tuning lever tried across five rounds (epochs, regularization,
+checkpoint averaging, corpus cleaning) plateaued or came back negative (see
+"Checkpoint averaging" and "Full-corpus data curation sweep" above). A
+research pass identified a cheaper, less-tried lever: *how* a new token's
+embedding row is initialized before fine-tuning, not just the training
+config around it. A case study on adding an unseen low-resource language
+(Limbum) to a multilingual NMT model's vocabulary found that embedding-
+initialization strategy "significantly impacts translation quality", with
+linguistically-informed initialization beating naive initialization on
+BLEU/chrF -- the exact magnitude wasn't extractable from that source, so
+this is a worthwhile cheap experiment, not a confident bet.
+
+### What the current (and still default) strategy actually does
+
+Checked directly, not assumed: `training.tokenizer_extension.
+resize_embeddings_for_new_tokens` delegates to `training.vocab_extension.
+resize_embedding_matrix`, which initializes **every** new token's row as
+the mean of **all** existing rows, plus a small amount of noise -- one
+global average applied uniformly to every new token regardless of its own
+linguistic composition (which characters/subwords it's built from).
+
+### The alternative: `resize_embedding_matrix_compositional`
+
+`training.vocab_extension.resize_embedding_matrix_compositional` instead
+decomposes each new token into smaller pieces already present in the base
+vocab (`decompose_token_into_known_pieces`, a greedy longest-match
+segmentation against the vocab's own keys -- deliberately simple and
+deterministic, not a true Viterbi/unigram-optimal segmentation, but
+sufficient to recover a composition-aware signal), and initializes its row
+as the mean of those pieces' *own* existing embeddings.
+
+**Same-batch siblings can compose from each other.** `training.vocab_gap.
+find_missing_characters`/`find_missing_words` (wired together by
+`extend_tokenizer_vocab`) always add a genuinely new character (e.g.
+Kaqchikel "ä", entirely absent from M2M100's base vocab) in the *same*
+batch as the longer whole-word tokens built out of it -- without
+accounting for this, those words could never compose at all (the base
+vocab alone has no row for "ä" yet), and nearly every realistic Kaqchikel
+word would fall straight back to the global mean, defeating the point.
+`resize_embedding_matrix_compositional` processes a batch's new tokens in
+increasing-length order internally (not the order given), so a resolved
+single character becomes a legitimate piece for any longer sibling token
+in the same batch that contains it. A token that still can't be fully
+decomposed -- even with sibling help -- falls back to the same
+global-mean-plus-noise strategy, per token, so every new token still gets
+a real, in-distribution starting row (never left at zero/uninitialized).
+
+Both strategies are available side by side, never a silent replacement:
+`--embedding-init-strategy` (`training/train.py`, `training/submit_job.py`)
+defaults to `"mean"` (byte-for-byte the original behavior -- confirmed by
+the full existing test suite passing unchanged), with `"compositional"` as
+an explicit opt-in. Every run's model card records which strategy it used
+(`embedding_init_strategy`, always present, unlike `dropout`/
+`bpe_dropout_alpha`'s "omit unless set" convention -- this always has a
+real, meaningful value) and, only for the compositional strategy,
+`embedding_init_compositional_coverage` (`<decomposable>/<total new
+tokens>`, via `training.vocab_extension.count_decomposable_tokens` --
+itself sibling-aware, mirroring the real algorithm's own processing order
+so it doesn't understate coverage). **Caveat (code review on PR #219):**
+"decomposable" here means "fully segmentable into known piece keys",
+*including* a same-batch sibling that itself fell back to the global mean
+-- so this stat is an upper bound on "genuinely composed from real
+pretrained pieces", not proof every counted token avoided the global mean
+entirely (see `count_decomposable_tokens`'s own docstring for the full
+explanation).
+
+### Test coverage (test-first, per `docs/testing.md`)
+
+Pure, framework-free unit tests (`tests/unit/test_vocab_extension.py`):
+decomposition (longest-match preference, single-character fallback,
+undecomposable-token handling, a token already equal to a vocab key),
+`compositional_row_for_token`, `count_decomposable_tokens` (including the
+sibling-assisted case), and `resize_embedding_matrix_compositional` itself
+(shape/dtype/row-preservation parity with `resize_embedding_matrix`,
+composed-vs-global-mean center selection, the sibling-composition case and
+its order-independence, and the undecomposable-token fallback). Strategy
+selection/validation in `training.tokenizer_extension.
+resize_embeddings_for_new_tokens` (mean remains the default with zero
+behavior change, compositional requires `added_tokens`/`base_vocab` and
+rejects a token-count mismatch, an unknown strategy raises) is unit-tested
+against a fake model using real `torch` tensors
+(`tests/unit/test_tokenizer_extension.py`). `training.train`'s CLI/wiring
+is covered in `tests/unit/test_train_args.py` and
+`tests/integration/test_train_pipeline.py` (model card recording for both
+strategies, and -- the real point of this ticket -- a test proving the two
+strategies actually produce *different* embedding rows for the same run,
+not just a label with no behavioral effect).
+
+**Confirmed against the real `facebook/m2m100_418M` checkpoint, not just
+synthetic fixtures** (`tests/integration/test_tokenizer_extension_real_model.py`):
+extending the tokenizer with a small real Kaqchikel sample found **24 new
+whole-word/character tokens, 24 of which (100%) were fully decomposable**
+into known piece keys (with sibling assistance in several cases, e.g.
+words containing "ä" or glottal-apostrophe-adjacent characters composing
+once those characters' own new rows were resolved) -- confirming this
+strategy finds real, structurally composable signal against M2M100's
+actual vocabulary, not only a toy fixture's deliberately tiny one. As
+`count_decomposable_tokens`'s own docstring caveats, "fully decomposable"
+here is not the same claim as "entirely built from genuine pretrained
+embeddings" -- a sibling-assisted decomposition can itself include a
+token that fell back to the global mean, so 100% is an upper bound on
+genuine composition, not a measurement of it. This is also a small
+sample, not a claim that 100% coverage holds across the full
+33k-sentence corpus's much more varied vocabulary -- the real
+training-run comparison below is what actually measures quality impact.
+
+### Controlled comparison: real training runs, same config except this one lever
+
+Per this ticket's acceptance criteria, isolating the strategy as the only
+variable against the established 13-epoch reference point (same discipline
+as "Checkpoint averaging" and "Full-corpus data curation sweep" above):
+13 epochs, batch-size 8, learning-rate 5e-5, warmup-ratio 0.05,
+weight-decay 0.01, gradient-accumulation-steps 4, subword-vocab-size 8000
+(issue #217's vocab-size sweep was still in progress at the time this
+ticket ran, per its own explicit scope note -- using the current default
+rather than waiting on or combining with that result), direction `both`,
+seed 42, no dropout/label-smoothing/bpe-dropout overrides, corpus
+`almg-v1` -- identical to the v7/v11 baseline config, changing only
+`--embedding-init-strategy`. Both job configs were validated via
+`submit_job.py --dry-run` (confirmed identical except that one
+hyperparameter) and are ready to submit as:
+
+```sh
+cd ml
+export AWS_PROFILE=translator-dev AWS_REGION=us-east-1
+uv run python -m training.submit_job --no-wait \
+  --run-id run-embinit-mean-13ep \
+  --epochs 13 --subword-vocab-size 8000 --embedding-init-strategy mean \
+  --max-run 32400
+uv run python -m training.submit_job --no-wait \
+  --run-id run-embinit-compositional-13ep \
+  --epochs 13 --subword-vocab-size 8000 --embedding-init-strategy compositional \
+  --max-run 32400
+```
+
+**Status: blocked on training quota, not yet run.** This project's AWS
+account allows only one concurrent `ml.g4dn.xlarge` training instance;
+`aws sagemaker list-training-jobs --status-equals InProgress` showed issue
+#217's own vocab-size sweep actively occupying that slot at the time this
+ticket's implementation was completed. Per this project's "don't collide
+with a concurrent real training job" discipline, neither comparison job
+was submitted. **Real BLEU/chrF numbers and a conclusion are a tracked
+follow-up**, to be run (and this section updated) once the shared training
+slot is free -- the code/tests above are complete and ready either way.
+
 ## Serving (`deployment/`)
 
 Issue #8 stands up the actual SageMaker Serverless Inference endpoint
