@@ -98,12 +98,20 @@ export interface TranslatorStageProps extends StageProps {
 //   checkpoint-storage fix, so it's still ~30GB.
 // - Version 17 -- v16's weights, correctly repackaged via `deploy.py`
 //   (inference artifact ~1.9GB, verified before this deploy). Same
-//   BLEU/chrF as v16 -- deployed here. See issue #214 for the next
-//   epoch-count probe (35 epochs) -- submitted with issue #187's fix
-//   already active, so that run's own artifact should be small from
-//   training onward, without needing a `deploy.py` repackaging step to
-//   fix an already-bloated artifact after the fact.
-const DEV_MODEL_PACKAGE_VERSION = 17;
+//   BLEU/chrF as v16 -- deployed here.
+// - Version 18 (issue #214: pushing epochs further after #208's 20->26
+//   result) -- a fresh 35-epoch run, submitted with issue #187's fix
+//   already active -- its own raw artifact was already small (~1.9GB)
+//   straight out of training, no `deploy.py` repackaging-after-the-fact
+//   needed to fix bloat. BLEU 18.3/chrF 40.7 -- only a marginal
+//   improvement over the 26-epoch result (17.8/40.5), right at the edge
+//   of the established run-to-run noise band (+-0.5 BLEU/+-0.2 chrF).
+//   The epoch-count curve (13->20->26->35) is clearly flattening;
+//   stopping further epoch-count probing here per diminishing returns.
+// - Version 19 -- v18's weights, repackaged via `deploy.py` (fast this
+//   time -- source artifact already small, no large-artifact workaround
+//   needed). Same BLEU/chrF as v18 -- deployed here.
+const DEV_MODEL_PACKAGE_VERSION = 19;
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
