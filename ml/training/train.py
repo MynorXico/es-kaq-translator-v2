@@ -107,6 +107,12 @@ from training.tokenizer_extension import (
     extend_tokenizer_vocab_with_subwords,
     resize_embeddings_for_new_tokens,
 )
+from training.vocab_extension import (
+    EMBEDDING_INIT_COMPOSITIONAL,
+    EMBEDDING_INIT_MEAN,
+    EMBEDDING_INIT_STRATEGIES,
+    count_decomposable_tokens,
+)
 
 DEFAULT_BASE_MODEL = "facebook/m2m100_418M"
 
@@ -475,6 +481,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "TranslationDataset's docstring)."
         ),
     )
+    parser.add_argument(
+        "--embedding-init-strategy",
+        choices=EMBEDDING_INIT_STRATEGIES,
+        default=EMBEDDING_INIT_MEAN,
+        help=(
+            "How to initialize new Kaqchikel tokens' embedding rows before "
+            "fine-tuning (issue #218). Defaults to "
+            f"{EMBEDDING_INIT_MEAN!r} (unchanged from every past run): every "
+            "new token's row starts at the mean of all existing rows, plus "
+            "a small amount of noise, regardless of that token's own "
+            f"composition. {EMBEDDING_INIT_COMPOSITIONAL!r} instead "
+            "decomposes each new token into smaller pieces already present "
+            "in the base vocab where possible, and initializes its row from "
+            "the mean of those pieces' own existing, pretrained embeddings "
+            "-- see training.vocab_extension.resize_embedding_matrix_"
+            "compositional for the full rationale and a real research "
+            "citation (a Limbum case study found linguistically-informed "
+            "initialization beats naive initialization on BLEU/chrF for an "
+            "unseen low-resource language added to a multilingual NMT "
+            "model's vocabulary, though the exact magnitude wasn't "
+            "extractable from that source -- this flag exists to measure "
+            "the effect directly on this project's own corpus/model, not "
+            "to assume it transfers)."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -578,7 +609,8 @@ def extend_vocabulary_for_examples(
     *,
     seed: int | None = None,
     subword_vocab_size: int = DEFAULT_SUBWORD_VOCAB_SIZE,
-) -> list[str]:
+    embedding_init_strategy: str = EMBEDDING_INIT_MEAN,
+) -> tuple[list[str], int | None]:
     """Extend `tokenizer`/`model` to cover the Kaqchikel text in `examples`,
     plus this script's own direction tag tokens (`training.direction`), so
     they get real, warm-started embedding rows too rather than falling back
@@ -619,11 +651,25 @@ def extend_vocabulary_for_examples(
 
     A single `resize_embeddings_for_new_tokens` call at the end covers the
     combined total from both steps, so the model's embedding matrix is
-    resized exactly once per run.
+    resized exactly once per run. `embedding_init_strategy` (issue #218,
+    default `EMBEDDING_INIT_MEAN`, unchanged from every past run) selects
+    which warm-start strategy that call uses -- see `--embedding-init-
+    strategy`'s own help / `training.vocab_extension`'s module docstring
+    for the two options. The compositional strategy needs the tokenizer's
+    vocabulary as it existed *before* this function's own extension steps
+    run, captured here (`tokenizer.get_vocab()`) before anything is added.
 
-    Returns the list of tokens actually added by either step (may be
-    empty).
+    Returns `(added_tokens, compositional_coverage)`: `added_tokens` is the
+    list of tokens actually added by either step (may be empty);
+    `compositional_coverage` is `training.vocab_extension.
+    count_decomposable_tokens`'s count of those tokens that got a genuine
+    composed row (rather than falling back to the global mean) when
+    `embedding_init_strategy` is `EMBEDDING_INIT_COMPOSITIONAL`, or `None`
+    when it's `EMBEDDING_INIT_MEAN` (the stat is meaningless for that
+    strategy, so it's omitted rather than computed and then ignored).
     """
+    base_vocab = tokenizer.get_vocab()
+
     kaqchikel_texts = collect_texts_for_language(examples, KAQCHIKEL)
 
     sample_texts = list(kaqchikel_texts)
@@ -636,8 +682,20 @@ def extend_vocabulary_for_examples(
             tokenizer, kaqchikel_texts, vocab_size=subword_vocab_size
         )
 
-    resize_embeddings_for_new_tokens(model, len(added_tokens), seed=seed)
-    return added_tokens
+    is_compositional = embedding_init_strategy == EMBEDDING_INIT_COMPOSITIONAL
+    resize_embeddings_for_new_tokens(
+        model,
+        len(added_tokens),
+        seed=seed,
+        strategy=embedding_init_strategy,
+        added_tokens=added_tokens if is_compositional else None,
+        base_vocab=base_vocab if is_compositional else None,
+    )
+
+    compositional_coverage = (
+        count_decomposable_tokens(added_tokens, base_vocab) if is_compositional else None
+    )
+    return added_tokens, compositional_coverage
 
 
 DEFAULT_SUBWORD_SAMPLING_NBEST_SIZE = -1
@@ -1189,12 +1247,13 @@ def run_training_job(
     tokenizer, model = model_loader(model_source)
     apply_dropout_config(model, args.dropout)
 
-    added_tokens = extend_vocabulary_for_examples(
+    added_tokens, embedding_init_compositional_coverage = extend_vocabulary_for_examples(
         tokenizer,
         model,
         train_examples,
         seed=args.seed,
         subword_vocab_size=args.subword_vocab_size,
+        embedding_init_strategy=args.embedding_init_strategy,
     )
 
     model = trainer(model, tokenizer, train_examples, val_examples, args)
@@ -1270,6 +1329,11 @@ def run_training_job(
         "subword_vocab_size": args.subword_vocab_size,
         "new_tokens_added": len(added_tokens),
         "resumed_from_checkpoint": bool(args.init_model),
+        # Issue #218: always recorded, unlike dropout/bpe_dropout_alpha
+        # below -- this always has a real, meaningful value (there's no
+        # "untouched" state to omit), the same way subword_vocab_size above
+        # always is.
+        "embedding_init_strategy": args.embedding_init_strategy,
     }
     # Issue #182: both recorded only when explicitly set (mirroring
     # vocab_extension_scoping's own "field absent = not applicable"
@@ -1280,6 +1344,14 @@ def run_training_job(
         hyperparameters["dropout"] = args.dropout
     if args.bpe_dropout_alpha is not None:
         hyperparameters["bpe_dropout_alpha"] = args.bpe_dropout_alpha
+    # Only meaningful (and only ever computed by extend_vocabulary_for_
+    # examples) when the compositional strategy is actually in use -- see
+    # that function's own docstring for why this is omitted, not recorded
+    # as some "n/a" sentinel, for the default (mean) strategy.
+    if embedding_init_compositional_coverage is not None:
+        hyperparameters["embedding_init_compositional_coverage"] = (
+            f"{embedding_init_compositional_coverage}/{len(added_tokens)}"
+        )
     # Omitted entirely (rather than recorded as some "unscoped" sentinel)
     # when the lineage isn't fully Kaqchikel-only scoped -- matching
     # evaluation.evaluate_checkpoint's existing "field absent = legacy"

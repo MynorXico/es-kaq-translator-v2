@@ -263,6 +263,25 @@ def test_build_hyperparameters_includes_subword_vocab_size_default():
     assert hyperparameters["subword-vocab-size"] == 8000
 
 
+def test_build_hyperparameters_includes_embedding_init_strategy_default():
+    # Issue #218: always recorded, unlike dropout/bpe-dropout-alpha below --
+    # "mean" is a real, meaningful default value, not an "untouched" state
+    # to omit, the same way subword-vocab-size above always is.
+    args = submit_job.parse_args([])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["embedding-init-strategy"] == "mean"
+
+
+def test_build_hyperparameters_includes_embedding_init_strategy_override():
+    args = submit_job.parse_args(["--embedding-init-strategy", "compositional"])
+
+    hyperparameters = submit_job.build_hyperparameters(args)
+
+    assert hyperparameters["embedding-init-strategy"] == "compositional"
+
+
 def test_build_hyperparameters_generates_run_id_when_not_given():
     args = submit_job.parse_args([])
 
@@ -792,6 +811,59 @@ def test_main_records_dropout_and_bpe_dropout_alpha_in_registry_metadata_when_gi
     metadata = register_kwargs["CustomerMetadataProperties"]
     assert metadata["hp_dropout"] == "0.3"
     assert metadata["hp_bpe_dropout_alpha"] == "0.1"
+
+
+def test_main_records_embedding_init_strategy_in_registry_metadata(monkeypatch):
+    """Issue #218: unlike dropout/bpe-dropout-alpha above, this is always
+    recorded (mirroring subword-vocab-size) -- a real, meaningful default
+    value exists ("mean"), so `main()`'s `run_metadata["hyperparameters"]`
+    reconstruction must always include it, not just when overridden.
+    """
+    fake_cfn_client = MagicMock()
+    fake_cfn_client.describe_stacks.return_value = {
+        "Stacks": [
+            {
+                "Outputs": [
+                    {"OutputKey": "TrainingDataBucketName", "OutputValue": "fake-bucket"},
+                    {"OutputKey": "SageMakerExecutionRoleArn", "OutputValue": "fake-role-arn"},
+                ]
+            }
+        ]
+    }
+    fake_sm_client = MagicMock()
+    fake_sm_client.exceptions.ResourceInUse = type("ResourceInUse", (Exception,), {})
+    fake_sm_client.create_model_package.return_value = {"ModelPackageArn": "arn:fake"}
+    fake_s3_client = MagicMock()
+    tarball_bytes = _make_model_tarball(SAMPLE_MODEL_CARD)
+    fake_s3_client.download_file.side_effect = lambda b, k, filename: Path(filename).write_bytes(
+        tarball_bytes
+    )
+
+    def fake_boto3_client(service, **kwargs):
+        return {
+            "cloudformation": fake_cfn_client,
+            "sagemaker": fake_sm_client,
+            "s3": fake_s3_client,
+        }[service]
+
+    monkeypatch.setattr(submit_job.boto3, "client", fake_boto3_client)
+    monkeypatch.setattr(submit_job, "_retrieve_image_uri", lambda **kw: "fake-training-image")
+
+    fake_estimator = MagicMock()
+    fake_estimator.training_image = "fake-training-image"
+    fake_estimator._latest_training_job.model_artifacts.s3_model_artifacts = (
+        "s3://fake-bucket/model-artifacts/run-test/output/model.tar.gz"
+    )
+    monkeypatch.setattr(submit_job, "ModelTrainer", MagicMock(return_value=fake_estimator))
+
+    exit_code = submit_job.main(
+        ["--run-id", "run-test", "--embedding-init-strategy", "compositional"]
+    )
+
+    assert exit_code == 0
+    _, register_kwargs = fake_sm_client.create_model_package.call_args
+    metadata = register_kwargs["CustomerMetadataProperties"]
+    assert metadata["hp_embedding_init_strategy"] == "compositional"
 
 
 # ---------------------------------------------------------------------------

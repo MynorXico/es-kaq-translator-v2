@@ -51,6 +51,9 @@ def test_parse_args_reads_required_and_default_values(monkeypatch):
     # experiment.
     assert args.dropout is None
     assert args.bpe_dropout_alpha is None
+    # Issue #218: defaults to the original global-mean-plus-noise strategy
+    # unchanged -- the compositional alternative is opt-in only.
+    assert args.embedding_init_strategy == "mean"
 
 
 def test_parse_args_reads_dropout_override():
@@ -102,6 +105,39 @@ def test_parse_args_reads_subword_vocab_size_override():
     )
 
     assert args.subword_vocab_size == 12000
+
+
+def test_parse_args_reads_embedding_init_strategy_override():
+    args = parse_args(
+        [
+            "--train",
+            "train.tsv",
+            "--validation",
+            "val.tsv",
+            "--corpus-version",
+            "almg-v1",
+            "--embedding-init-strategy",
+            "compositional",
+        ]
+    )
+
+    assert args.embedding_init_strategy == "compositional"
+
+
+def test_parse_args_rejects_unknown_embedding_init_strategy():
+    with pytest.raises(SystemExit):
+        parse_args(
+            [
+                "--train",
+                "train.tsv",
+                "--validation",
+                "val.tsv",
+                "--corpus-version",
+                "almg-v1",
+                "--embedding-init-strategy",
+                "bogus",
+            ]
+        )
 
 
 def test_parse_args_reads_init_model_path():
