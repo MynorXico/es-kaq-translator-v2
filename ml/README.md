@@ -2011,7 +2011,12 @@ seed 42, no dropout/label-smoothing/bpe-dropout overrides, corpus
 `almg-v1` -- identical to the v7/v11 baseline config, changing only
 `--embedding-init-strategy`. Both job configs were validated via
 `submit_job.py --dry-run` (confirmed identical except that one
-hyperparameter) and are ready to submit as:
+hyperparameter), then actually submitted one at a time, re-checking `aws
+sagemaker list-training-jobs --status-equals InProgress` immediately before
+each (issue #217's own vocab-size sweep -- concluded no change to the
+8,000 default, see PR #230 -- had been occupying the project's single
+`ml.g4dn.xlarge` slot when this ticket's implementation first finished;
+submission resumed once that slot freed up):
 
 ```sh
 cd ml
@@ -2026,15 +2031,81 @@ uv run python -m training.submit_job --no-wait \
   --max-run 32400
 ```
 
-**Status: blocked on training quota, not yet run.** This project's AWS
-account allows only one concurrent `ml.g4dn.xlarge` training instance;
-`aws sagemaker list-training-jobs --status-equals InProgress` showed issue
-#217's own vocab-size sweep actively occupying that slot at the time this
-ticket's implementation was completed. Per this project's "don't collide
-with a concurrent real training job" discipline, neither comparison job
-was submitted. **Real BLEU/chrF numbers and a conclusion are a tracked
-follow-up**, to be run (and this section updated) once the shared training
-slot is free -- the code/tests above are complete and ready either way.
+### Real results
+
+Both jobs completed successfully (~6h17m and ~6h20m respectively) and were
+registered in Model Registry (`--register-existing`):
+
+| Version | `--embedding-init-strategy` | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF |
+|---|---|---|---|---|---|
+| v11 (prior reference, #192's Phase 2) | *(pre-#218, equivalent to `mean`)* | 13.5 | 36.6 | -- | -- |
+| v22 (this ticket) | `mean` | 13.5 | 36.6 | 16.4/39.0 | 9.2/33.0 |
+| v23 (this ticket) | `compositional` | **13.8** | **37.0** | **17.1/39.5** | 9.1/33.1 |
+
+The `mean` run (v22) reproduces v11's combined BLEU/chrF exactly (13.5/36.6)
+-- expected, since `--embedding-init-strategy mean` is bit-for-bit the same
+code path as every pre-#218 run, and both used the identical seed (42) and
+hyperparameters. This also means v22 is a near-zero-noise baseline for this
+specific comparison (unlike v7-vs-v11's own 0.5 BLEU / 0.1 chrF spread,
+which reflects whatever actually differed between those two runs).
+
+The `compositional` run (v23) scores **+0.3 BLEU / +0.4 chrF** over v22,
+isolating this ticket's one changed variable. The gain is concentrated in
+es->cak (+0.7 BLEU / +0.5 chrF); cak->es is essentially flat (-0.1 BLEU /
++0.1 chrF) -- an asymmetry this single comparison doesn't explain.
+
+**Real compositional coverage on the full corpus, not just a small
+sample**: v23's own model card records `embedding_init_compositional_coverage:
+36857/36859` -- effectively the entire real vocabulary extension (99.99%)
+got a genuinely composed row, not a global-mean fallback. (Per this
+stat's own documented caveat above, "decomposable" technically allows a
+sibling-assisted token to inherit a fallback-to-mean piece transitively --
+but at this coverage level, that caveat describes a vanishingly small edge
+case here, not a material qualifier on the headline number.)
+
+### Conclusion: promising, but not (yet) clearing this project's own bar for a default change
+
+This is the first cheap-tier lever in this project's experiment history
+(after label smoothing, dropout, bpe-dropout, checkpoint averaging, and
+corpus cleaning -- all flat or negative) to move **both** BLEU and chrF in
+the same, positive direction in a single comparison. That's a genuinely
+encouraging result, and the near-universal real-corpus coverage confirms
+the mechanism works as designed, not just on a small fixture.
+
+**Being honest about what one comparison run can and can't show**: the
++0.3 BLEU delta sits inside the only run-to-run noise band this project has
+previously measured for this exact hyperparameter config (v7 vs. v11: 0.5
+BLEU) -- on BLEU alone, this result doesn't clearly clear the bar issue
+#199's corpus-cleaning experiment used to reject a similarly-sized, mixed-
+direction effect. The +0.4 chrF delta is larger than that same previously-
+measured chrF noise (0.1), which is a more encouraging signal, but it's a
+single data point, not a repeated-seed measurement for *this* comparison
+specifically -- neural network training is not perfectly reproducible
+across different initial embedding values even with a fixed data seed, so
+part of this delta could still be ordinary training-trajectory variance
+rather than a real effect of the init strategy itself. No repeated-seed
+run was performed for either arm of this specific comparison (that would
+be a second pair of ~6h, real-money jobs, and this ticket's scope was one
+isolated comparison, not a variance study).
+
+**Decision: keep `compositional` as a tested, available opt-in; do not
+promote it to the default yet.** This is consistent with this project's
+existing bar (every other experiment section above required clearing an
+established noise band before changing a default, not just pointing in
+the right direction) -- applied evenly rather than relaxed because this
+result happens to be the first encouraging one. `--embedding-init-strategy`
+keeps defaulting to `mean`; nothing about existing training behavior
+changes as a result of this ticket. Recommended next step, **not executed
+as part of this ticket** (a second real, billable training-job pair,
+needing explicit go-ahead): re-run this same comparison with a different
+seed to get an actual noise-floor estimate for the `compositional` arm
+specifically, which is the missing piece needed to tell this result apart
+from noise with confidence. If a second run confirms the same direction,
+promoting `compositional` to the default would be well-supported;
+`training.vocab_extension.EMBEDDING_INIT_COMPOSITIONAL`/`--embedding-
+init-strategy compositional` already exist and are fully tested, so that
+promotion would be a one-line default change whenever that evidence
+exists -- not a new implementation effort.
 
 ## Serving (`deployment/`)
 
