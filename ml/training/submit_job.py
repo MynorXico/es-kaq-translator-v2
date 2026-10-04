@@ -157,6 +157,7 @@ from training.model_registry import (
 )
 from training.subword_vocab import DEFAULT_VOCAB_SIZE as DEFAULT_SUBWORD_VOCAB_SIZE
 from training.train import DEFAULT_BASE_MODEL, DEFAULT_CHECKPOINT_DIR
+from training.vocab_extension import EMBEDDING_INIT_MEAN, EMBEDDING_INIT_STRATEGIES
 
 # --- Corpus location (ADR 0002: private ALMG corpus, versioned prefix) -----
 # Never derived from corpus content -- bump this (and re-run against a new
@@ -357,6 +358,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Defaults to None (disabled, matching train.py's own default) "
             "-- see train.py's --bpe-dropout-alpha help for the full "
             "rationale."
+        ),
+    )
+    parser.add_argument(
+        "--embedding-init-strategy",
+        choices=EMBEDDING_INIT_STRATEGIES,
+        default=EMBEDDING_INIT_MEAN,
+        help=(
+            "How to initialize new Kaqchikel tokens' embedding rows (issue "
+            f"#218). Defaults to {EMBEDDING_INIT_MEAN!r} (matching train.py's "
+            "own default, unchanged from every past run) -- see train.py's "
+            "--embedding-init-strategy help for the full rationale."
         ),
     )
     parser.add_argument(
@@ -567,6 +579,7 @@ def build_hyperparameters(args: argparse.Namespace) -> dict[str, Any]:
         "label-smoothing": args.label_smoothing,
         "gradient-accumulation-steps": args.gradient_accumulation_steps,
         "subword-vocab-size": args.subword_vocab_size,
+        "embedding-init-strategy": args.embedding_init_strategy,
     }
     if args.init_model_s3_uri:
         hyperparameters["init-model"] = _init_model_container_path(args.init_model_s3_uri)
@@ -1021,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
         "label_smoothing": config["hyperparameters"]["label-smoothing"],
         "gradient_accumulation_steps": config["hyperparameters"]["gradient-accumulation-steps"],
         "subword_vocab_size": config["hyperparameters"]["subword-vocab-size"],
+        "embedding_init_strategy": config["hyperparameters"]["embedding-init-strategy"],
     }
     # Issue #182 code review: `build_hyperparameters` only adds these two to
     # the *training job's* own hyperparameters when explicitly set (see its

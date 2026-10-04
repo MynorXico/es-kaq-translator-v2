@@ -20,6 +20,7 @@ from training.tokenizer_extension import (
     extend_tokenizer_vocab_with_subwords,
     resize_embeddings_for_new_tokens,
 )
+from training.vocab_extension import EMBEDDING_INIT_COMPOSITIONAL, count_decomposable_tokens
 
 MODEL_NAME = "facebook/m2m100_418M"
 FIXTURES = Path(__file__).parent.parent / "fixtures"
@@ -105,6 +106,47 @@ def test_extend_tokenizer_vocab_with_subwords_finds_real_gaps_in_m2m100_vocab(to
     new_embeddings = model.get_input_embeddings().weight.detach().cpu().numpy()
     expected_rows = old_embedding_rows + len(added)
     assert new_embeddings.shape[0] == expected_rows
+
+
+def test_compositional_strategy_finds_real_coverage_against_the_real_m2m100_vocab(
+    tokenizer, model
+):
+    """Issue #218's core premise, checked against the real checkpoint
+    rather than assumed: `facebook/m2m100_418M`'s real (128K-token,
+    multilingual) vocabulary should let a real Kaqchikel-derived whole-word
+    token actually decompose into existing pieces, for at least some
+    tokens -- not just in a toy fixture with a deliberately tiny vocab
+    (see tests/unit/test_vocab_extension.py's own, fully synthetic
+    coverage of the decomposition algorithm itself).
+    """
+    base_vocab = tokenizer.get_vocab()
+
+    added = extend_tokenizer_vocab(
+        tokenizer, [*SAMPLE_KAQCHIKEL_TEXTS, "k'o awäch, la utz awäch?"]
+    )
+    assert added, "expected at least one genuinely new token for this Kaqchikel sample"
+
+    coverage = count_decomposable_tokens(added, base_vocab)
+    assert coverage > 0, (
+        "expected at least one new token to be composable from the real "
+        "base vocab's existing pieces (possibly with help from a "
+        "same-batch sibling, e.g. a newly added single character)"
+    )
+
+    # Must not crash against the real model, and must actually resize.
+    old_embedding_rows = model.get_input_embeddings().weight.shape[0]
+    resize_embeddings_for_new_tokens(
+        model,
+        len(added),
+        seed=42,
+        strategy=EMBEDDING_INIT_COMPOSITIONAL,
+        added_tokens=added,
+        base_vocab=base_vocab,
+    )
+    new_embeddings = model.get_input_embeddings().weight.detach().cpu().numpy()
+    assert new_embeddings.shape[0] == old_embedding_rows + len(added)
+    new_rows = new_embeddings[old_embedding_rows:]
+    assert not np.allclose(new_rows, 0.0)
 
 
 def test_resize_embeddings_is_a_noop_when_num_new_tokens_is_zero(tokenizer, model):

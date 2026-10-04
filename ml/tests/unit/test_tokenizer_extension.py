@@ -9,13 +9,18 @@ sandbox. See the module docstring in `training/tokenizer_extension.py`.
 
 from pathlib import Path
 
+import pytest
+import torch
+
 from training.tokenizer_extension import (
     compute_new_tokens_for_texts,
     extend_tokenizer_vocab,
     extend_tokenizer_vocab_with_subwords,
     patch_word_boundary_decoding_for_checkpoint,
     reconstruct_whole_word_boundary_tokens,
+    resize_embeddings_for_new_tokens,
 )
+from training.vocab_extension import EMBEDDING_INIT_COMPOSITIONAL
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 SAMPLE_KAQCHIKEL_TEXTS = (
@@ -228,3 +233,91 @@ def test_patch_word_boundary_decoding_for_checkpoint_is_a_noop_for_fakes_without
 
     assert applied  # still computed and returned for caller-side logging
     assert not hasattr(tokenizer, "convert_tokens_to_string")
+
+
+# --- resize_embeddings_for_new_tokens strategy wiring (issue #218) ----------
+#
+# A minimal fake model using *real* torch tensors (torch is a real `ml`
+# dependency) -- unlike the fakes above, this needs to exercise the actual
+# numpy<->torch row-assignment `resize_embeddings_for_new_tokens` performs,
+# which a plain get_vocab()/add_tokens() duck-type can't cover.
+
+
+class _FakeEmbedding(torch.nn.Module):
+    def __init__(self, weight: torch.Tensor):
+        super().__init__()
+        self.weight = torch.nn.Parameter(weight)
+
+
+class _FakeEmbeddingModel:
+    def __init__(self, weight: torch.Tensor):
+        self._embeddings = _FakeEmbedding(weight)
+
+    def get_input_embeddings(self) -> _FakeEmbedding:
+        return self._embeddings
+
+    def resize_token_embeddings(self, new_size: int) -> _FakeEmbedding:
+        old_weight = self._embeddings.weight.detach()
+        dim = old_weight.shape[1]
+        new_weight = torch.zeros(new_size, dim)
+        new_weight[: old_weight.shape[0]] = old_weight
+        self._embeddings = _FakeEmbedding(new_weight)
+        return self._embeddings
+
+
+def test_resize_embeddings_for_new_tokens_defaults_to_the_mean_strategy():
+    model = _FakeEmbeddingModel(torch.tensor([[0.0, 0.0], [10.0, 10.0]]))
+
+    resize_embeddings_for_new_tokens(model, 1, seed=0)
+
+    new_row = model.get_input_embeddings().weight[2].detach().numpy()
+    # Global mean of the two existing rows is [5, 5] -- must land near that,
+    # not near either individual row.
+    assert abs(new_row[0] - 5.0) < 1.0
+
+
+def test_resize_embeddings_for_new_tokens_compositional_strategy_uses_composed_rows():
+    vocab = {"a": 0, "b": 1}
+    model = _FakeEmbeddingModel(torch.tensor([[0.0, 0.0], [10.0, 10.0]]))
+
+    resize_embeddings_for_new_tokens(
+        model,
+        1,
+        seed=0,
+        strategy=EMBEDDING_INIT_COMPOSITIONAL,
+        added_tokens=["aa"],
+        base_vocab=vocab,
+    )
+
+    new_row = model.get_input_embeddings().weight[2].detach().numpy()
+    # "aa" decomposes into ["a", "a"] -- both id 0, whose own row is [0, 0] --
+    # a correct compositional init must land near that, not near the global
+    # mean [5, 5] the default strategy would have used for the same input.
+    assert abs(new_row[0] - 0.0) < abs(new_row[0] - 5.0)
+
+
+def test_resize_embeddings_for_new_tokens_compositional_requires_added_tokens_and_base_vocab():
+    model = _FakeEmbeddingModel(torch.tensor([[0.0, 0.0], [10.0, 10.0]]))
+
+    with pytest.raises(ValueError):
+        resize_embeddings_for_new_tokens(model, 1, strategy=EMBEDDING_INIT_COMPOSITIONAL)
+
+
+def test_resize_embeddings_for_new_tokens_compositional_rejects_mismatched_token_count():
+    model = _FakeEmbeddingModel(torch.tensor([[0.0, 0.0], [10.0, 10.0]]))
+
+    with pytest.raises(ValueError):
+        resize_embeddings_for_new_tokens(
+            model,
+            2,
+            strategy=EMBEDDING_INIT_COMPOSITIONAL,
+            added_tokens=["aa"],
+            base_vocab={"a": 0},
+        )
+
+
+def test_resize_embeddings_for_new_tokens_rejects_unknown_strategy():
+    model = _FakeEmbeddingModel(torch.tensor([[0.0, 0.0], [10.0, 10.0]]))
+
+    with pytest.raises(ValueError):
+        resize_embeddings_for_new_tokens(model, 1, strategy="bogus")

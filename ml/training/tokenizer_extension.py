@@ -62,7 +62,7 @@ real caller of this.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Protocol
 
 from training.subword_vocab import (
@@ -72,7 +72,14 @@ from training.subword_vocab import (
     WORD_BOUNDARY_MARKER,
     compute_new_subword_tokens,
 )
-from training.vocab_extension import resize_embedding_matrix, select_new_tokens
+from training.vocab_extension import (
+    EMBEDDING_INIT_COMPOSITIONAL,
+    EMBEDDING_INIT_MEAN,
+    EMBEDDING_INIT_STRATEGIES,
+    resize_embedding_matrix,
+    resize_embedding_matrix_compositional,
+    select_new_tokens,
+)
 from training.vocab_gap import find_missing_characters, find_missing_words
 
 
@@ -372,7 +379,15 @@ def extend_tokenizer_vocab_with_subwords(
     return new_tokens
 
 
-def resize_embeddings_for_new_tokens(model, num_new_tokens: int, *, seed: int | None = None) -> None:
+def resize_embeddings_for_new_tokens(
+    model,
+    num_new_tokens: int,
+    *,
+    seed: int | None = None,
+    strategy: str = EMBEDDING_INIT_MEAN,
+    added_tokens: Sequence[str] | None = None,
+    base_vocab: dict[str, int] | None = None,
+) -> None:
     """Grow `model`'s token embeddings by `num_new_tokens` rows and warm-start them.
 
     Real usage: `model` is a `transformers.M2M100ForConditionalGeneration`
@@ -392,14 +407,33 @@ def resize_embeddings_for_new_tokens(model, num_new_tokens: int, *, seed: int | 
 
     This calls HF's own `model.resize_token_embeddings` first (which
     allocates the new rows), then overwrites just the newly added rows
-    using `training.vocab_extension.resize_embedding_matrix`'s
-    mean-of-existing-rows-plus-noise initialization, rather than leaving
-    them at whatever default `resize_token_embeddings` used.
+    using one of two warm-start strategies (issue #218):
+
+    - `strategy=EMBEDDING_INIT_MEAN` (the default, matching every past
+      training run's behavior exactly): `training.vocab_extension.
+      resize_embedding_matrix`'s mean-of-all-existing-rows-plus-noise
+      initialization, applied uniformly regardless of token content.
+      `added_tokens`/`base_vocab` are not needed for this strategy.
+    - `strategy=EMBEDDING_INIT_COMPOSITIONAL`: `training.vocab_extension.
+      resize_embedding_matrix_compositional`'s composition-aware
+      initialization -- requires both `added_tokens` (the exact token
+      strings added, in the same order counted by `num_new_tokens`) and
+      `base_vocab` (the tokenizer's vocabulary *before* `added_tokens`
+      were added, e.g. captured via `tokenizer.get_vocab()` ahead of the
+      `extend_tokenizer_vocab*` calls that produced `added_tokens`).
+      Raises `ValueError` if either is missing, or if `added_tokens`'
+      length doesn't match `num_new_tokens` -- a silent mismatch here
+      would misalign which row gets which token's composed embedding.
+
+    Raises `ValueError` for any other `strategy` value.
 
     Covered by `tests/integration/test_tokenizer_extension_real_model.py`
-    against the real checkpoint (see ADR 0003); the row-initialization
-    math it delegates to is additionally unit-tested in isolation against
-    a fake embedding matrix.
+    against the real checkpoint (see ADR 0003) for the default strategy;
+    the row-initialization math both strategies delegate to is additionally
+    unit-tested in isolation against a fake embedding matrix
+    (`tests/unit/test_vocab_extension.py`), and this function's own
+    strategy-selection/validation wiring is unit-tested against a fake
+    model using real `torch` tensors (`tests/unit/test_tokenizer_extension.py`).
     """
     if num_new_tokens <= 0:
         return
@@ -411,7 +445,27 @@ def resize_embeddings_for_new_tokens(model, num_new_tokens: int, *, seed: int | 
     old_size = old_weight.shape[0]
     new_size = old_size + num_new_tokens
 
-    resized = resize_embedding_matrix(old_weight, num_new_tokens, seed=seed)
+    if strategy == EMBEDDING_INIT_MEAN:
+        resized = resize_embedding_matrix(old_weight, num_new_tokens, seed=seed)
+    elif strategy == EMBEDDING_INIT_COMPOSITIONAL:
+        if added_tokens is None or base_vocab is None:
+            raise ValueError(
+                f"strategy={EMBEDDING_INIT_COMPOSITIONAL!r} requires both "
+                "added_tokens and base_vocab"
+            )
+        if len(added_tokens) != num_new_tokens:
+            raise ValueError(
+                f"added_tokens has {len(added_tokens)} entries, but "
+                f"num_new_tokens={num_new_tokens}"
+            )
+        resized = resize_embedding_matrix_compositional(
+            old_weight, added_tokens, base_vocab, seed=seed
+        )
+    else:
+        raise ValueError(
+            f"unknown embedding init strategy {strategy!r}; expected one of "
+            f"{EMBEDDING_INIT_STRATEGIES}"
+        )
 
     model.resize_token_embeddings(new_size)
     with torch.no_grad():

@@ -792,6 +792,142 @@ def test_run_training_job_omits_dropout_and_bpe_dropout_alpha_from_card_by_defau
     assert "bpe_dropout_alpha" not in card_text
 
 
+def test_run_training_job_records_embedding_init_strategy_default(tmp_path):
+    """Issue #218: every model card records which embedding-init strategy
+    the run used, even when it's the unchanged default ("mean") -- unlike
+    --dropout/--bpe-dropout-alpha (which are omitted from the card unless
+    explicitly set), this always has a real, meaningful value, so it's
+    always recorded, the same way --subword-vocab-size always is.
+    """
+    model_dir = tmp_path / "model"
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "- **embedding_init_strategy**: mean" in card_text
+    # Only a meaningful, non-trivial stat for the compositional strategy --
+    # must not appear at all for the default.
+    assert "embedding_init_compositional_coverage" not in card_text
+
+
+def test_run_training_job_records_compositional_embedding_init_strategy_and_coverage(tmp_path):
+    model_dir = tmp_path / "model"
+    args = parse_args(
+        [
+            "--train",
+            str(FIXTURES / "sample_train.tsv"),
+            "--validation",
+            str(FIXTURES / "sample_val_clean.tsv"),
+            "--corpus-version",
+            "fixture-v0",
+            "--model-dir",
+            str(model_dir),
+            "--output-data-dir",
+            str(tmp_path / "output"),
+            "--embedding-init-strategy",
+            "compositional",
+        ]
+    )
+
+    run_training_job(
+        args, model_loader=fake_model_loader, trainer=fake_trainer, translator=fake_translator
+    )
+
+    card_text = (model_dir / "model_card.md").read_text(encoding="utf-8")
+    assert "- **embedding_init_strategy**: compositional" in card_text
+    assert "- **embedding_init_compositional_coverage**:" in card_text
+
+
+def _fake_model_loader_with_distinct_base_embeddings(base_model: str):
+    """Like `fake_model_loader`, but with a non-degenerate base embedding
+    matrix (distinct values per row, per dimension) instead of all zeros.
+
+    `fake_model_loader`'s all-zero weight matrix makes the mean strategy
+    and the compositional strategy produce the exact same result by
+    construction (the mean of any subset of all-zero rows is itself zero,
+    and the noise term is also zero since the matrix's standard deviation
+    is zero) -- useless for actually distinguishing the two strategies'
+    real behavior, which is exactly what
+    `test_compositional_strategy_actually_changes_new_token_embeddings`
+    needs to confirm.
+    """
+    vocab = _base_vocab()
+    tokenizer = FakeM2M100Tokenizer(vocab)
+    dim = 4
+    weight = torch.arange(len(vocab) * dim, dtype=torch.float32).reshape(len(vocab), dim)
+    model = FakeM2M100Model(vocab_size=len(vocab), dim=dim)
+    model.get_input_embeddings().weight.data = weight
+    return tokenizer, model
+
+
+def test_compositional_strategy_actually_changes_new_token_embeddings(tmp_path):
+    """The real point of issue #218: the compositional strategy must
+    actually produce different embedding rows than the mean strategy for
+    the *same* run, not just thread a label through to the model card with
+    no behavioral effect.
+    """
+
+    def _run(strategy_flag: list[str], model_dir: Path) -> torch.Tensor:
+        fake_trainer.calls.clear()
+        args = parse_args(
+            [
+                "--train",
+                str(FIXTURES / "sample_train.tsv"),
+                "--validation",
+                str(FIXTURES / "sample_val_clean.tsv"),
+                "--corpus-version",
+                "fixture-v0",
+                "--model-dir",
+                str(model_dir),
+                "--output-data-dir",
+                str(model_dir.parent / f"{model_dir.name}-output"),
+                "--seed",
+                "0",
+                *strategy_flag,
+            ]
+        )
+        captured_model: dict[str, FakeM2M100Model] = {}
+
+        def capturing_trainer(model, tokenizer, train_examples, eval_examples, args):
+            captured_model["model"] = model
+            return fake_trainer(model, tokenizer, train_examples, eval_examples, args)
+
+        run_training_job(
+            args,
+            model_loader=_fake_model_loader_with_distinct_base_embeddings,
+            trainer=capturing_trainer,
+            translator=fake_translator,
+        )
+        return captured_model["model"].get_input_embeddings().weight.detach().clone()
+
+    mean_weights = _run([], tmp_path / "mean-model")
+    compositional_weights = _run(
+        ["--embedding-init-strategy", "compositional"], tmp_path / "compositional-model"
+    )
+
+    assert mean_weights.shape == compositional_weights.shape
+    new_rows_start = len(_base_vocab())
+    assert not torch.allclose(
+        mean_weights[new_rows_start:], compositional_weights[new_rows_start:]
+    )
+
+
 def test_run_training_job_omits_scoping_when_ancestor_checkpoint_has_no_model_card(tmp_path):
     """Same defensive fallback as the pre-#125 case above, for a checkpoint
     directory that has no `model_card.md` at all (e.g. one not produced by
