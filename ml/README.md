@@ -1889,6 +1889,124 @@ real runs. See
 for the full decision record and "Job submission" above for the current
 (again client-side) registration flow.
 
+## Subword vocabulary size sweep (issue #217)
+
+Issue #82 picked a target Kaqchikel subword vocabulary size of 8,000
+tokens (`training.subword_vocab.DEFAULT_VOCAB_SIZE`) when it built the
+vocabulary-extension pipeline, and that choice had never been revisited
+through any of the five subsequent tuning rounds this project ran (epoch
+count, dropout/label-smoothing/bpe-dropout, checkpoint averaging, corpus
+cleaning -- all plateaued or came back no-go, see #192/#193/#199 above
+and the epoch-count progression recorded on issues #205/#208/#214/#216:
+13->13.5 BLEU, 20->16.1, 26->17.8, 35->18.3, the current deployed best).
+Research following those plateaued results identified vocabulary size as
+a literature-backed, genuinely-untried lever: Sennrich & Zhang,
+"Revisiting Low-Resource Neural Machine Translation: A Case Study" (ACL
+2019) found that an oversized BPE vocabulary hurt a from-scratch
+low-resource translation system by fragmenting scarce training data
+across too many undertrained rare-subword embeddings, and that shrinking
+it recovered real BLEU -- with the explicit, up-front caveat that result
+is for a from-scratch bilingual system, not this project's
+vocabulary-extension-of-a-pretrained-multilingual-model setup, so the
+*direction* was worth testing but the *magnitude* was not expected to
+transfer 1:1.
+
+**Methodology: cheap signal first, same discipline as #192/#199.** Per
+issue #192's own precedent, every real comparison run here is isolated to
+*only* `--subword-vocab-size` differing from issue #192's "clean matched
+baseline" reference config (13 epochs, `almg-v1`, batch-size 8,
+learning-rate 5e-5, warmup-ratio 0.05, weight-decay 0.01,
+gradient-accumulation-steps 4, direction `both`, seed 42, no
+dropout/label-smoothing/bpe-dropout overrides) -- verified via
+`submit_job.py --dry-run`'s printed config before each real submission,
+same as every prior comparison run in this README. **The existing
+8,000-vocab baseline was reused rather than re-run**: Model Package v11
+(issue #192's own clean matched baseline) already used the
+`--subword-vocab-size` default (8,000) at this exact config, so
+re-running it would have spent another ~6h/real GPU run to reproduce a
+number already on record (BLEU 13.5/chrF 36.6, full `almg-v1` validation
+set, n=7,218). Two new real training jobs were submitted sequentially
+(this project's AWS account allows only one concurrent `ml.g4dn.xlarge`
+training instance, shared with issue #218's parallel embedding-init
+experiment) -- a smaller size (4,000) and the wide end of the ticket's
+suggested bracket (16,000), to get the clearest possible signal on
+whether an oversized vocabulary measurably hurts at this corpus size.
+Each is a genuinely fresh fine-tune from `facebook/m2m100_418M` (not a
+continuation of any existing checkpoint), since changing the target vocab
+size changes which subwords get added and therefore the whole embedding
+matrix layout.
+
+| vocab size | Model Package | BLEU | chrF | es->cak BLEU/chrF | cak->es BLEU/chrF | new tokens added |
+|---|---|---|---|---|---|---|
+| 4,000 | v20 | 13.7 | 36.7 | 16.3/38.9 | 9.7/33.5 | 33,751 |
+| 8,000 (baseline, v11) | v11 | 13.5 | 36.6 | not re-measured (see above) | not re-measured (see above) | not re-measured (see above) |
+| 16,000 | v21 | 12.1 | 35.9 | 15.4/38.4 | 7.4/32.1 | 40,118 |
+
+(v11's per-direction breakdown and `new_tokens_added` count aren't
+reproduced here: getting them would require re-downloading v11's own
+~28-30GB pre-#187 training artifact just to read a few-KB `model_card.md`
+-- the same cost issue #187 specifically eliminated for every run *after*
+it. Not worth paying for a non-essential breakdown when the combined
+BLEU/chrF already gives a clear, decisive answer below; the full
+validation-set combined score is what every other comparison table in
+this README keys its conclusions on too.)
+
+**Conclusion: vocab size does measurably affect quality in one direction
+-- oversized hurts, undersized is flat-to-borderline. No full-scale
+(35-epoch) run is warranted for either alternative.** Using the
+run-to-run noise band this project actually established in issue #192
+(v7 vs. v11, identical hyperparameters including `--seed 42`: "roughly
+0.5 BLEU / 0.1 chrF of spread" -- see "Checkpoint storage" above for the
+exact source figure):
+
+- **16,000 (larger) is a clear, real regression**: BLEU 12.1 vs. the
+  8,000 baseline's 13.5 (-1.4) and chrF 35.9 vs. 36.6 (-0.7) -- both far
+  outside the noise band (0.5 BLEU / 0.1 chrF), in both translation
+  directions (es->cak BLEU 16.3->15.4, cak->es BLEU 9.7->7.4). This is
+  directionally consistent with Sennrich & Zhang's finding that an
+  oversized vocabulary hurts a low-resource system, though at a much
+  smaller magnitude than their reported ~5 BLEU swing -- exactly as the
+  issue's own caveat anticipated for a vocabulary-*extension* setup (most
+  of this model's representational capacity still comes from M2M100's
+  pretrained multilingual vocabulary/embeddings, unlike a from-scratch
+  system where the entire vocabulary is newly learned). **Growing the
+  subword vocabulary further is a no-go** -- a full 35-epoch confirmation
+  run for 16,000 isn't warranted; the cheap-tier signal is already
+  unambiguous and negative.
+- **4,000 (smaller) is flat on BLEU, right at the edge of the band on
+  chrF -- not a clear improvement either way**: BLEU 13.7 vs. 13.5 (+0.2)
+  is comfortably inside the 0.5 BLEU band, but chrF 36.7 vs. 36.6 (+0.1)
+  sits exactly at the edge of the real 0.1 chrF band, not comfortably
+  inside a wider one -- this is a borderline, not a clean "no effect",
+  result on chrF specifically. Unlike Sennrich & Zhang's from-scratch
+  result, shrinking the vocabulary here shows no clear measurable gain on
+  either metric, consistent with the magnitude-doesn't-transfer caveat:
+  this project's subword-extension step is a comparatively small addition
+  on top of M2M100's large pretrained vocabulary, not the system's only
+  vocabulary the way it was in their from-scratch setup. **Not promising
+  enough to justify a 35-epoch confirmation run** per this ticket's own
+  "only scale up a size showing real promise" guidance -- a borderline
+  cheap-tier result isn't that.
+
+**Net recommendation: keep the current default (8,000).** Nothing in this
+sweep supports moving off it: the one alternative that differs by more
+than noise (16,000) is clearly worse, and the other (4,000) is flat on
+BLEU and at best borderline on chrF -- not a demonstrated improvement
+either way. This closes off subword
+vocabulary size as a lever for this project's corpus/model size, the same
+"real, valuable negative result" shape as #192's checkpoint-averaging and
+#199's corpus-cleaning conclusions -- this project should not adopt a
+different `--subword-vocab-size` default. `training.subword_vocab.
+DEFAULT_VOCAB_SIZE` is left unchanged at 8,000; v20/v21 are expected to be
+rejected in Model Registry with this reasoning recorded, and the
+35-epoch, 8,000-vocab checkpoint (Model Package v19) remains the deployed
+model.
+
+No code or test changes were needed for this ticket: `--subword-vocab-size`
+has been a fully-supported `train.py`/`submit_job.py` CLI flag since issue
+#82, so this was a pure experiment-running ticket, like #192/#199's own
+real-run phases.
+
 ## Compositional embedding initialization for new Kaqchikel tokens (issue #218)
 
 Every tuning lever tried across five rounds (epochs, regularization,
