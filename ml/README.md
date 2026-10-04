@@ -1952,40 +1952,47 @@ validation-set combined score is what every other comparison table in
 this README keys its conclusions on too.)
 
 **Conclusion: vocab size does measurably affect quality in one direction
--- oversized hurts, undersized is flat. No full-scale (35-epoch) run is
-warranted for either alternative.** Using the run-to-run noise band this
-project established in issue #192 (~+-0.5 BLEU / +-0.2 chrF for an
-otherwise-identical config):
+-- oversized hurts, undersized is flat-to-borderline. No full-scale
+(35-epoch) run is warranted for either alternative.** Using the
+run-to-run noise band this project actually established in issue #192
+(v7 vs. v11, identical hyperparameters including `--seed 42`: "roughly
+0.5 BLEU / 0.1 chrF of spread" -- see "Checkpoint storage" above for the
+exact source figure):
 
 - **16,000 (larger) is a clear, real regression**: BLEU 12.1 vs. the
-  8,000 baseline's 13.5 (-1.4) and chrF 35.9 vs. 36.6 (-0.7) -- both well
-  outside the noise band, in both translation directions (es->cak BLEU
-  16.3->15.4, cak->es BLEU 9.7->7.4). This is directionally consistent
-  with Sennrich & Zhang's finding that an oversized vocabulary hurts a
-  low-resource system, though at a much smaller magnitude than their
-  reported ~5 BLEU swing -- exactly as the issue's own caveat
-  anticipated for a vocabulary-*extension* setup (most of this model's
-  representational capacity still comes from M2M100's pretrained
-  multilingual vocabulary/embeddings, unlike a from-scratch system where
-  the entire vocabulary is newly learned). **Growing the subword
-  vocabulary further is a no-go** -- a full 35-epoch confirmation run for
-  16,000 isn't warranted; the cheap-tier signal is already unambiguous
-  and negative.
-- **4,000 (smaller) is flat, not a real improvement**: BLEU 13.7 vs.
-  13.5 (+0.2) and chrF 36.7 vs. 36.6 (+0.1) -- both inside the noise
-  band. Unlike Sennrich & Zhang's from-scratch result, shrinking the
-  vocabulary here shows no measurable gain, consistent with the
-  magnitude-doesn't-transfer caveat: this project's subword-extension
-  step is a comparatively small addition on top of M2M100's large
-  pretrained vocabulary, not the system's only vocabulary the way it was
-  in their from-scratch setup. **Not promising enough to justify a
-  35-epoch confirmation run** per this ticket's own "only scale up a size
-  showing real promise" guidance -- a flat cheap-tier result isn't that.
+  8,000 baseline's 13.5 (-1.4) and chrF 35.9 vs. 36.6 (-0.7) -- both far
+  outside the noise band (0.5 BLEU / 0.1 chrF), in both translation
+  directions (es->cak BLEU 16.3->15.4, cak->es BLEU 9.7->7.4). This is
+  directionally consistent with Sennrich & Zhang's finding that an
+  oversized vocabulary hurts a low-resource system, though at a much
+  smaller magnitude than their reported ~5 BLEU swing -- exactly as the
+  issue's own caveat anticipated for a vocabulary-*extension* setup (most
+  of this model's representational capacity still comes from M2M100's
+  pretrained multilingual vocabulary/embeddings, unlike a from-scratch
+  system where the entire vocabulary is newly learned). **Growing the
+  subword vocabulary further is a no-go** -- a full 35-epoch confirmation
+  run for 16,000 isn't warranted; the cheap-tier signal is already
+  unambiguous and negative.
+- **4,000 (smaller) is flat on BLEU, right at the edge of the band on
+  chrF -- not a clear improvement either way**: BLEU 13.7 vs. 13.5 (+0.2)
+  is comfortably inside the 0.5 BLEU band, but chrF 36.7 vs. 36.6 (+0.1)
+  sits exactly at the edge of the real 0.1 chrF band, not comfortably
+  inside a wider one -- this is a borderline, not a clean "no effect",
+  result on chrF specifically. Unlike Sennrich & Zhang's from-scratch
+  result, shrinking the vocabulary here shows no clear measurable gain on
+  either metric, consistent with the magnitude-doesn't-transfer caveat:
+  this project's subword-extension step is a comparatively small addition
+  on top of M2M100's large pretrained vocabulary, not the system's only
+  vocabulary the way it was in their from-scratch setup. **Not promising
+  enough to justify a 35-epoch confirmation run** per this ticket's own
+  "only scale up a size showing real promise" guidance -- a borderline
+  cheap-tier result isn't that.
 
 **Net recommendation: keep the current default (8,000).** Nothing in this
 sweep supports moving off it: the one alternative that differs by more
-than noise (16,000) is worse, and the other (4,000) is statistically
-indistinguishable from the current default. This closes off subword
+than noise (16,000) is clearly worse, and the other (4,000) is flat on
+BLEU and at best borderline on chrF -- not a demonstrated improvement
+either way. This closes off subword
 vocabulary size as a lever for this project's corpus/model size, the same
 "real, valuable negative result" shape as #192's checkpoint-averaging and
 #199's corpus-cleaning conclusions -- this project should not adopt a
