@@ -1,6 +1,6 @@
 # ADR 0010: Cross-account model promotion via scripted artifact duplication
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-05
 
 ## Context
@@ -254,6 +254,17 @@ no new persistent cross-account IAM trust or resource policy.
   that spans two AWS accounts in one process -- it needs unit tests with
   mocked per-side boto3 clients, per docs/testing.md's TDD policy. This
   ADR does not write that code; see issue #235.
+- Because promote_model.py holds two accounts' SSO credentials live in
+  the same local process at once (via two separate boto3.Session
+  objects), it is the first script in this project where a single
+  invocation ever holds more than one account's credentials
+  simultaneously -- every existing script (submit_job.py, deploy.py,
+  register_existing_job) has only ever held one account's credentials at
+  a time. This is a marginal blast-radius increase (a bug in this one
+  script could, in principle, apply the wrong session to the wrong AWS
+  call) rather than a disqualifying one: both credential sets are the
+  same human's own, already-privileged SSO sessions, held only for the
+  duration of one promotion invocation, not a new standing trust.
 - Landing this ADR's CDK change (the generalized map + conditional in
   app-stage.ts, and the docstring update in ml-hosting-stack.ts) does
   not, by itself, turn on qa/prod -- MODEL_PACKAGE_VERSION_BY_ENVIRONMENT
@@ -273,6 +284,13 @@ no new persistent cross-account IAM trust or resource policy.
   promotion stage or option 2's cross-account sharing -- the same
   "revisit if churn changes" escape hatch ADR 0007 used, not a permanent
   ban on automating this further.
+- Rollback is implicit in the existing mechanism, not a new procedure: a
+  target environment's Model Registry keeps every prior promoted Model
+  Package (promotion never deletes or overwrites one), so rolling back a
+  bad promotion is reverting MODEL_PACKAGE_VERSION_BY_ENVIRONMENT's entry
+  for that environment to the previous version number, in a reviewed PR
+  -- the same review/deploy path already used to promote it in the first
+  place.
 
 ## Alternatives considered
 
