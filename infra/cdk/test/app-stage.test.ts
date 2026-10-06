@@ -49,6 +49,27 @@ describe("TranslatorStage", () => {
     });
   });
 
+  // ADR 0010 (issue #235): MlHostingStack is now instantiated via a
+  // data-driven lookup (MODEL_PACKAGE_VERSION_BY_ENVIRONMENT[environmentName])
+  // rather than a dev-only `if` plus a single hardcoded constant -- verify
+  // the version that lookup resolves for dev (19, per app-stage.ts's own
+  // version-history comment) is actually the one threaded through into the
+  // real Model Package ARN, not just that *some* MlHostingStack exists.
+  it("instantiates MlHostingStack for dev with the version MODEL_PACKAGE_VERSION_BY_ENVIRONMENT maps it to", () => {
+    const { stage } = synthStage("dev");
+
+    const mlHostingStack = stage.node.findChild("MlHosting") as MlHostingStack;
+    const mlHostingTemplate = Template.fromStack(mlHostingStack);
+
+    mlHostingTemplate.hasResourceProperties("AWS::SageMaker::Model", {
+      Containers: Match.arrayWith([
+        Match.objectLike({
+          ModelPackageName: Match.stringLikeRegexp("traductor-kaqchikel-es-cak/19$"),
+        }),
+      ]),
+    });
+  });
+
   it("still synthesizes ApiStack for qa, where no MlHostingStack exists yet", () => {
     const { stage, apiTemplate } = synthStage("qa");
 
@@ -61,6 +82,26 @@ describe("TranslatorStage", () => {
       Environment: {
         Variables: Match.objectLike({
           SAGEMAKER_ENDPOINT_NAME: "traductor-kaqchikel-translate-qa",
+        }),
+      },
+    });
+  });
+
+  // ADR 0010 (issue #235): MODEL_PACKAGE_VERSION_BY_ENVIRONMENT is a
+  // data-driven map, not a dev-only `if` -- this must hold for *any*
+  // environment absent from it, not just the one ("qa") that happened to
+  // be tested before this ticket. "prod" is a second, independent case
+  // confirming the lookup itself is generic rather than still secretly
+  // special-casing "dev" under the hood.
+  it("does not instantiate MlHostingStack for prod, which also has no entry in MODEL_PACKAGE_VERSION_BY_ENVIRONMENT yet", () => {
+    const { stage, apiTemplate } = synthStage("prod");
+
+    expect(stage.node.tryFindChild("MlHosting")).toBeUndefined();
+
+    apiTemplate.hasResourceProperties("AWS::Lambda::Function", {
+      Environment: {
+        Variables: Match.objectLike({
+          SAGEMAKER_ENDPOINT_NAME: "traductor-kaqchikel-translate-prod",
         }),
       },
     });
