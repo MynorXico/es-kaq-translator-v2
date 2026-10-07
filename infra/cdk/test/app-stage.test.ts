@@ -70,18 +70,21 @@ describe("TranslatorStage", () => {
     });
   });
 
-  it("still synthesizes ApiStack for qa, where no MlHostingStack exists yet", () => {
+  // qa gained a real MlHostingStack once the first cross-account promotion
+  // (issue #235) actually ran and MODEL_PACKAGE_VERSION_BY_ENVIRONMENT
+  // picked up a `qa` entry -- this now mirrors the dev test above instead
+  // of asserting the old "no endpoint yet" gap, which no longer holds.
+  it("wires ApiStack's SAGEMAKER_ENDPOINT_NAME to the real MlHostingStack endpoint name in qa", () => {
     const { stage, apiTemplate } = synthStage("qa");
 
-    expect(stage.node.tryFindChild("MlHosting")).toBeUndefined();
+    const mlHostingStack = stage.node.findChild("MlHosting") as MlHostingStack;
 
-    // Falls back to ApiStack's own default naming convention -- a known,
-    // pre-existing gap (no real endpoint in qa yet), not something this
-    // ticket fixes.
+    expect(mlHostingStack.endpointName).toBe("traductor-kaqchikel-es-cak-qa");
+
     apiTemplate.hasResourceProperties("AWS::Lambda::Function", {
       Environment: {
         Variables: Match.objectLike({
-          SAGEMAKER_ENDPOINT_NAME: "traductor-kaqchikel-translate-qa",
+          SAGEMAKER_ENDPOINT_NAME: mlHostingStack.endpointName,
         }),
       },
     });
