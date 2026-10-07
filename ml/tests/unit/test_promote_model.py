@@ -31,28 +31,83 @@ def test_build_profile_name_matches_the_translator_env_convention():
 
 
 # ---------------------------------------------------------------------------
-# resolve_source_model_package_name / describe_source_model_package
+# build_model_package_arn / get_account_id / describe_source_model_package
+#
+# Regression coverage for issue #239: a real `dev` -> `qa` promotion found
+# that `DescribeModelPackage`'s `ModelPackageName` parameter rejects the
+# `<group>/<version>` shorthand this module used to build (that shorthand
+# is only valid for *CreateModelPackage*-style calls) -- the real API
+# returned `ValidationException: Value 'traductor-kaqchikel-es-cak/19' at
+# 'modelPackageName' failed to satisfy constraint: Member must satisfy
+# regular expression pattern: ^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}$`, and a
+# plain `aws sagemaker describe-model-package` CLI call with the same
+# shorthand reproduced the identical error independent of this script.
+# Only a bare (unversioned) name or a full ARN works -- confirmed by the
+# same real CLI call succeeding with the full ARN. These tests assert the
+# *actual* ARN shape AWS accepts, not just "some string got returned",
+# precisely so a future regression like this is caught by mocked unit
+# tests instead of only surfacing against the real API (same class of gap
+# as issue #196).
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_source_model_package_name_is_group_slash_version():
-    name = promote_model.resolve_source_model_package_name("traductor-kaqchikel-es-cak", 19)
+def test_build_model_package_arn_matches_the_real_describe_model_package_shape():
+    arn = promote_model.build_model_package_arn(
+        region="us-east-1",
+        account_id="111111111111",
+        model_package_group_name="traductor-kaqchikel-es-cak",
+        version=19,
+    )
 
-    assert name == "traductor-kaqchikel-es-cak/19"
+    assert arn == "arn:aws:sagemaker:us-east-1:111111111111:model-package/traductor-kaqchikel-es-cak/19"
 
 
-def test_describe_source_model_package_calls_describe_model_package():
+def test_get_account_id_reads_the_sts_caller_identity_account():
+    fake_sts = MagicMock()
+    fake_sts.get_caller_identity.return_value = {
+        "Account": "111111111111",
+        "Arn": "arn:aws:iam::111111111111:user/someone",
+    }
+
+    account_id = promote_model.get_account_id(fake_sts)
+
+    assert account_id == "111111111111"
+    fake_sts.get_caller_identity.assert_called_once_with()
+
+
+def test_describe_source_model_package_calls_describe_model_package_with_the_full_arn():
     fake_sm = MagicMock()
     fake_sm.describe_model_package.return_value = {"ModelApprovalStatus": "Approved"}
 
     description = promote_model.describe_source_model_package(
-        fake_sm, "traductor-kaqchikel-es-cak", 19
+        fake_sm,
+        model_package_arn="arn:aws:sagemaker:us-east-1:111111111111:model-package/traductor-kaqchikel-es-cak/19",
     )
 
     fake_sm.describe_model_package.assert_called_once_with(
-        ModelPackageName="traductor-kaqchikel-es-cak/19"
+        ModelPackageName=(
+            "arn:aws:sagemaker:us-east-1:111111111111:model-package/traductor-kaqchikel-es-cak/19"
+        )
     )
     assert description == {"ModelApprovalStatus": "Approved"}
+
+
+def test_describe_source_model_package_never_passes_the_invalid_group_slash_version_shorthand():
+    # The exact bug from issue #239: `ModelPackageName` must never be given
+    # as a bare "<group>/<version>" string -- AWS's own regex for a
+    # non-ARN ModelPackageName (`^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}$`)
+    # rejects the embedded "/" outright.
+    fake_sm = MagicMock()
+    fake_sm.describe_model_package.return_value = {"ModelApprovalStatus": "Approved"}
+
+    promote_model.describe_source_model_package(
+        fake_sm,
+        model_package_arn="arn:aws:sagemaker:us-east-1:111111111111:model-package/traductor-kaqchikel-es-cak/19",
+    )
+
+    _, kwargs = fake_sm.describe_model_package.call_args
+    assert kwargs["ModelPackageName"].startswith("arn:aws:sagemaker:")
+    assert kwargs["ModelPackageName"] != "traductor-kaqchikel-es-cak/19"
 
 
 # ---------------------------------------------------------------------------

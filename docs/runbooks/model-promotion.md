@@ -34,7 +34,8 @@ promoting the same version to `prod`.
   ```sh
   aws sagemaker describe-model-package \
     --profile translator-dev \
-    --model-package-name traductor-kaqchikel-es-cak/19
+    --model-package-name "arn:aws:sagemaker:us-east-1:$(aws sts get-caller-identity \
+      --profile translator-dev --query Account --output text):model-package/traductor-kaqchikel-es-cak/19"
   ```
 
   and read its `ModelApprovalStatus` (must be `Approved`) and
@@ -42,6 +43,16 @@ promoting the same version to `prod`.
   yourself before promoting it -- `promote_model.py` will refuse a
   non-`Approved` source package (see "What the script enforces" below),
   but it does not re-review quality; that's your job here.
+
+  **Note (issue #239):** `--model-package-name` only accepts a bare
+  (unversioned) name or a full ARN -- never the `<group>/<version>`
+  shorthand (that shorthand is only valid for `create-model-package`-style
+  calls); passing it to `describe-model-package` fails with a
+  `ValidationException` about `modelPackageName`'s regex pattern. The
+  command above builds the full ARN via a nested `aws sts
+  get-caller-identity` call for exactly that reason --
+  `promote_model.py` itself does the equivalent internally
+  (`build_model_package_arn`/`get_account_id`).
 
 ## Running the promotion
 
