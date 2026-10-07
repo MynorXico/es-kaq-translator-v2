@@ -96,6 +96,12 @@ from training.submit_job import resolve_stack_outputs
 # "pending review" state for a promotion, by design (ADR 0010).
 APPROVAL_STATUS = "Approved"
 
+# Matches every other script's single-region convention (submit_job.py/
+# deploy.py's own DEFAULT_REGION) -- used only as a fallback if a profile
+# somehow has no region configured (docs/runbooks/aws-account-bootstrap.md's
+# translator-<env> profiles always set one explicitly).
+DEFAULT_REGION = "us-east-1"
+
 
 class SourceModelPackageNotApprovedError(RuntimeError):
     """Raised by `ensure_approved` when the source Model Package is not
@@ -176,19 +182,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 
 
-def resolve_source_model_package_name(model_package_group_name: str, version: int) -> str:
-    """`DescribeModelPackage`'s `ModelPackageName` parameter accepts the
-    `<group>/<version>` shorthand for a versioned package -- no need to
-    build (or know) a full ARN, which would require the source account ID.
+def build_model_package_arn(
+    *, region: str, account_id: str, model_package_group_name: str, version: int
+) -> str:
+    """Full Model Package ARN -- the *only* form `DescribeModelPackage`'s
+    `ModelPackageName` parameter accepts for a versioned package (issue
+    #239: a real `dev` -> `qa` promotion found that the `<group>/<version>`
+    shorthand this module previously built fails AWS's real API with
+    `ValidationException: ... Member must satisfy regular expression
+    pattern: ^[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}$` -- that pattern is
+    `DescribeModelPackage`'s validation for a *bare, unversioned* name; it
+    rejects the embedded `/` outright. A full ARN is validated against a
+    different, ARN-shaped pattern and works, confirmed directly against
+    the real API). Mirrors `infra/cdk/lib/ml-hosting-stack.ts`'s
+    `this.formatArn(...)` construction of this exact ARN shape, in Python/
+    boto3 form -- the one difference is the account ID: CDK resolves it
+    from the stack's own `account` token at synth time, whereas this
+    script looks it up at runtime via STS (`get_account_id`), since the
+    source account is never the account this script happens to run in.
     """
-    return f"{model_package_group_name}/{version}"
+    return f"arn:aws:sagemaker:{region}:{account_id}:model-package/{model_package_group_name}/{version}"
 
 
-def describe_source_model_package(
-    sm_client: Any, model_package_group_name: str, version: int
-) -> dict[str, Any]:
-    model_package_name = resolve_source_model_package_name(model_package_group_name, version)
-    return sm_client.describe_model_package(ModelPackageName=model_package_name)
+def get_account_id(sts_client: Any) -> str:
+    """The calling session's own AWS account ID, via STS -- used to build
+    the source Model Package's full ARN (`build_model_package_arn`), since
+    `boto3`/SSO profiles never expose the account ID directly as a plain
+    attribute.
+    """
+    return sts_client.get_caller_identity()["Account"]
+
+
+def describe_source_model_package(sm_client: Any, *, model_package_arn: str) -> dict[str, Any]:
+    return sm_client.describe_model_package(ModelPackageName=model_package_arn)
 
 
 def ensure_approved(description: dict[str, Any], *, source_model_package_version: int) -> None:
@@ -338,9 +364,19 @@ def main(argv: list[str] | None = None) -> int:
     target_session = boto3.Session(profile_name=target_profile)
 
     source_sm_client = source_session.client("sagemaker")
+    source_sts_client = source_session.client("sts")
+
+    source_account_id = get_account_id(source_sts_client)
+    source_region = source_session.region_name or DEFAULT_REGION
+    source_model_package_arn = build_model_package_arn(
+        region=source_region,
+        account_id=source_account_id,
+        model_package_group_name=args.model_package_group_name,
+        version=args.source_model_package_version,
+    )
 
     description = describe_source_model_package(
-        source_sm_client, args.model_package_group_name, args.source_model_package_version
+        source_sm_client, model_package_arn=source_model_package_arn
     )
     try:
         ensure_approved(

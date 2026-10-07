@@ -17,7 +17,12 @@ from unittest.mock import MagicMock
 
 from deployment import promote_model
 
-SOURCE_MODEL_PACKAGE_ARN = "arn:aws:sagemaker:us-east-1:111111111111:model-package/traductor-kaqchikel-es-cak/19"
+SOURCE_ACCOUNT_ID = "111111111111"
+SOURCE_REGION = "us-east-1"
+SOURCE_MODEL_PACKAGE_ARN = (
+    f"arn:aws:sagemaker:{SOURCE_REGION}:{SOURCE_ACCOUNT_ID}:"
+    "model-package/traductor-kaqchikel-es-cak/19"
+)
 
 
 def _fake_source_description(approval_status: str = "Approved") -> dict:
@@ -56,9 +61,20 @@ def _fake_target_cfn_client() -> MagicMock:
     return client
 
 
+def _fake_sts_client(account_id: str = SOURCE_ACCOUNT_ID) -> MagicMock:
+    client = MagicMock()
+    client.get_caller_identity.return_value = {
+        "Account": account_id,
+        "Arn": f"arn:aws:iam::{account_id}:user/someone",
+    }
+    return client
+
+
 def _install_fake_sessions(monkeypatch, *, source_sm, source_s3, target_sm, target_s3, target_cfn):
     sessions_by_profile = {
-        "translator-dev": _fake_session(sagemaker=source_sm, s3=source_s3),
+        "translator-dev": _fake_session(
+            sagemaker=source_sm, s3=source_s3, sts=_fake_sts_client(), region_name=SOURCE_REGION
+        ),
         "translator-qa": _fake_session(sagemaker=target_sm, s3=target_s3, cloudformation=target_cfn),
     }
 
@@ -68,8 +84,9 @@ def _install_fake_sessions(monkeypatch, *, source_sm, source_s3, target_sm, targ
     monkeypatch.setattr(promote_model.boto3, "Session", fake_session_factory)
 
 
-def _fake_session(**clients_by_service) -> MagicMock:
+def _fake_session(*, region_name: str = "us-east-1", **clients_by_service) -> MagicMock:
     session = MagicMock()
+    session.region_name = region_name
     session.client.side_effect = lambda service, **kw: clients_by_service[service]
     return session
 
@@ -173,7 +190,7 @@ def test_full_promotion_downloads_from_source_and_registers_in_target(monkeypatc
     assert exit_code == 0
 
     source_sm.describe_model_package.assert_called_once_with(
-        ModelPackageName="traductor-kaqchikel-es-cak/19"
+        ModelPackageName=SOURCE_MODEL_PACKAGE_ARN
     )
 
     assert uploaded["bucket"] == "qa-bucket"
@@ -213,7 +230,12 @@ def test_default_profiles_follow_the_translator_env_convention(monkeypatch):
     def fake_session_factory(*, profile_name):
         seen_profiles.append(profile_name)
         if profile_name == "translator-dev":
-            return _fake_session(sagemaker=source_sm, s3=source_s3)
+            return _fake_session(
+                sagemaker=source_sm,
+                s3=source_s3,
+                sts=_fake_sts_client(),
+                region_name=SOURCE_REGION,
+            )
         return _fake_session(sagemaker=target_sm, s3=target_s3, cloudformation=target_cfn)
 
     monkeypatch.setattr(promote_model.boto3, "Session", fake_session_factory)
