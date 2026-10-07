@@ -131,7 +131,17 @@ export interface TranslatorStageProps extends StageProps {
 // populated does not, by itself, turn on qa/prod.
 const MODEL_PACKAGE_VERSION_BY_ENVIRONMENT: Partial<Record<string, number>> = {
   dev: 19,
-  // qa/prod: added once ml/deployment/promote_model.py has been run for
+  // qa version 1 -- the first real cross-account promotion (issue #235),
+  // run via `ml/deployment/promote_model.py --source-environment dev
+  // --source-model-package-version 19 --target-environment qa`. Same
+  // underlying weights as dev's version 19 (BLEU 18.3/chrF 40.7),
+  // verified directly against the real qa Model Registry entry before
+  // this PR: `ModelApprovalStatus: Approved`, `ModelPackageStatus:
+  // Completed`, artifact ~1.94GB (matches dev's artifact size),
+  // `CustomerMetadataProperties.promoted_from_model_package_arn` points
+  // at dev's version 19 ARN.
+  qa: 1,
+  // prod: added once ml/deployment/promote_model.py has been run for
   // that environment -- see docs/runbooks/model-promotion.md.
 };
 
