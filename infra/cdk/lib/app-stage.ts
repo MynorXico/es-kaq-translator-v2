@@ -111,13 +111,36 @@ export interface TranslatorStageProps extends StageProps {
 // - Version 19 -- v18's weights, repackaged via `deploy.py` (fast this
 //   time -- source artifact already small, no large-artifact workaround
 //   needed). Same BLEU/chrF as v18 -- deployed here.
-const DEV_MODEL_PACKAGE_VERSION = 19;
+//
+// Per-environment Model Package version to deploy, keyed by
+// `environmentName` (ADR 0010: "Implement scripted cross-account model
+// promotion"). Generalized from a single `DEV_MODEL_PACKAGE_VERSION`
+// constant because SageMaker Model Registry entries are account-scoped --
+// `dev`, `qa`, and `prod` each have their own, wholly independent Model
+// Registry, so each needs (and tracks) its own version number here.
+// These numbers will NOT line up across environments (e.g. dev's version
+// 19 might become qa's version 2) -- traceability across environments is
+// carried by `ml/deployment/promote_model.py`'s own
+// `promoted_from_environment`/`promoted_from_model_package_arn` Model
+// Package metadata, not by this map's numbers agreeing with each other.
+// An environment absent from this map means "no MlHostingStack/endpoint
+// there yet" -- same semantics as the old dev-only `if`. qa/prod are only
+// added once `ml/deployment/promote_model.py` has actually been run for
+// that environment (a separate, explicit operational step -- see
+// `docs/runbooks/model-promotion.md`); landing this map with only `dev`
+// populated does not, by itself, turn on qa/prod.
+const MODEL_PACKAGE_VERSION_BY_ENVIRONMENT: Partial<Record<string, number>> = {
+  dev: 19,
+  // qa/prod: added once ml/deployment/promote_model.py has been run for
+  // that environment -- see docs/runbooks/model-promotion.md.
+};
 
 /**
  * One promotion target (dev/qa/prod) for the CDK Pipelines deployment
  * pipeline (ADR 0004). Wraps every stack that should exist in a given
- * environment/account — `WebStack`, `DataStack`, `ApiStack`, and (dev only
- * for now) `MlHostingStack` (see ADR 0001).
+ * environment/account — `WebStack`, `DataStack`, `ApiStack`, and (only for
+ * environments with an entry in `MODEL_PACKAGE_VERSION_BY_ENVIRONMENT`
+ * above, per ADR 0010) `MlHostingStack`.
  */
 export class TranslatorStage extends Stage {
   constructor(scope: Construct, id: string, props: TranslatorStageProps) {
@@ -134,13 +157,12 @@ export class TranslatorStage extends Stage {
       environmentName: props.environmentName,
     });
 
-    // Model Registry entries are account-scoped, and only "dev" has a
-    // trained, registered, approved model right now -- training only runs
-    // against dev's corpus bucket (ml/training/submit_job.py's
-    // --environment default). Promoting a model to qa/prod would need
-    // either a duplicated registration there or cross-account Model
-    // Registry sharing, neither of which ADR 0001 addresses -- deferred
-    // rather than guessed at here (see MlHostingStack's own docstring).
+    // Model Registry entries are account-scoped -- each environment's
+    // `MlHostingStack` (if any) is instantiated purely from this
+    // environment's own entry in `MODEL_PACKAGE_VERSION_BY_ENVIRONMENT`
+    // (ADR 0010). Absence here means "no MlHostingStack/endpoint in that
+    // environment yet," exactly as the old dev-only `if` meant before ADR
+    // 0010 generalized it.
     //
     // Created before ApiStack (rather than after, as originally written) so
     // its real `endpointName` can be passed into ApiStack below -- issue #9
@@ -149,22 +171,24 @@ export class TranslatorStage extends Stage {
     // real endpoint this stack creates
     // (`traductor-kaqchikel-es-cak-<environmentName>`), because nothing
     // ever overrode it.
+    const modelPackageVersion = MODEL_PACKAGE_VERSION_BY_ENVIRONMENT[props.environmentName];
     let mlHostingStack: MlHostingStack | undefined;
-    if (props.environmentName === "dev") {
+    if (modelPackageVersion !== undefined) {
       mlHostingStack = new MlHostingStack(this, "MlHosting", {
         environmentName: props.environmentName,
-        modelPackageVersion: DEV_MODEL_PACKAGE_VERSION,
+        modelPackageVersion,
         modelDataBucket: dataStack.bucket,
       });
     }
 
     new ApiStack(this, "Api", {
       environmentName: props.environmentName,
-      // Only pass an explicit override where a real endpoint exists (dev,
-      // for now -- see MlHostingStack's own "Scope: dev only" docstring).
-      // qa/prod fall back to ApiStack's own default, which names a
+      // Only pass an explicit override where a real endpoint exists (i.e.
+      // this environment has an entry in
+      // MODEL_PACKAGE_VERSION_BY_ENVIRONMENT above). Any environment
+      // without one falls back to ApiStack's own default, which names a
       // not-yet-existing endpoint there -- an already-known gap (no
-      // MlHostingStack there yet), not something this ticket can fix.
+      // MlHostingStack there yet), not something this ticket fixes.
       sageMakerEndpointName: mlHostingStack?.endpointName,
     });
   }

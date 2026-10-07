@@ -2335,9 +2335,29 @@ authorized deploying the current best available model as an
 originally planned BLEU>=10 quality gate (issue #76). A UI disclaimer
 communicating this to end users is being added in parallel (issue #43).
 Model Registry's versioning is exactly what makes this reversible at low
-effort: approving a better model's version later and bumping
-`infra/cdk/lib/ml-hosting-stack.ts`'s `DEV_MODEL_PACKAGE_VERSION` constant
-(in `app-stage.ts`) is the entire swap procedure.
+effort: approving a better model's version later and bumping that
+environment's entry in `app-stage.ts`'s
+`MODEL_PACKAGE_VERSION_BY_ENVIRONMENT` map is the entire swap procedure.
+
+### Cross-account promotion to qa/prod (`deployment/promote_model.py`)
+
+`deploy.py` above only ever runs against one environment's own
+credentials -- it has no way to get an approved `dev` model into `qa`'s or
+`prod`'s own Model Registry, since Model Registry entries are
+account-scoped. `deployment/promote_model.py` (issue #235, [ADR
+0010](../docs/adr/0010-cross-account-model-promotion.md)) is the scripted,
+manually-triggered mechanism for that: given two named AWS SSO profiles
+(one per account, defaulting to `translator-<env>`), it reads the source
+Model Package's `Image`/`ModelDataUrl`/`CustomerMetadataProperties`
+directly via `DescribeModelPackage` (hard-failing if it isn't
+`ModelApprovalStatus=Approved`), downloads the already inference-ready
+artifact unchanged, re-uploads it into the target environment's own
+bucket under `promoted-artifacts/<run_id>/model.tar.gz`, and registers it
+as a new, `Approved` Model Package in the target account's own
+`traductor-kaqchikel-es-cak` group -- no repackaging, no new persistent
+cross-account IAM trust. See
+[`docs/runbooks/model-promotion.md`](../docs/runbooks/model-promotion.md)
+for the full human process, including rollback.
 
 ### Infrastructure (`infra/cdk/lib/ml-hosting-stack.ts`)
 

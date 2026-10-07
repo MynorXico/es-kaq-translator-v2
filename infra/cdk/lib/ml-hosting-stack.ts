@@ -60,16 +60,24 @@ const SERVERLESS_MAX_CONCURRENCY = 2;
  * `account`/`region` (a CDK token in a real deploy, a fake test value in
  * `test/ml-hosting-stack.test.ts` -- never a literal real ID in source).
  *
- * ## Scope: dev only, for now
+ * ## Scope: one Model Registry per environment (ADR 0010)
  *
- * SageMaker Model Registry entries are account-scoped, and only the `dev`
- * account has a trained, registered, approved model today (training only
- * runs against `dev`'s corpus bucket, per `ml/training/submit_job.py`'s
- * `--environment` default). Promoting a model to qa/prod (separate AWS
- * accounts) would need either a duplicated registration there or
- * cross-account Model Registry sharing -- neither is addressed by ADR 0001,
- * so this is deliberately out of scope here; `app-stage.ts` only
- * instantiates this stack for `environmentName === "dev"`.
+ * SageMaker Model Registry entries are account-scoped, so this stack only
+ * ever references a Model Package from *its own* environment's account --
+ * nothing inside this file is dev-specific (the ARN it builds above already
+ * resolves to whichever account/region the stack itself is deployed into).
+ * Historically only `dev` had a trained, registered, approved model
+ * (training only ran against `dev`'s corpus bucket), so `app-stage.ts` used
+ * to instantiate this stack only for `environmentName === "dev"`. ADR 0010
+ * (`docs/adr/0010-cross-account-model-promotion.md`) generalized that: a new
+ * script, `ml/deployment/promote_model.py`, duplicates an already-approved
+ * artifact from one environment's Model Registry into another's (no
+ * repackaging, no new cross-account IAM trust), and `app-stage.ts` now
+ * instantiates this stack for *any* environment with an entry in its
+ * `MODEL_PACKAGE_VERSION_BY_ENVIRONMENT` map -- `qa`/`prod` gain one only
+ * once a real promotion has actually been run for that environment (see
+ * `docs/runbooks/model-promotion.md`), not automatically from this stack
+ * existing in the abstract.
  */
 export class MlHostingStack extends Stack {
   /**
