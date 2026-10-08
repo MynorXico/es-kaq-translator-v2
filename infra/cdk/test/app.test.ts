@@ -10,9 +10,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // picks up this mock too.
 const sendMock = vi.fn();
 
+// Vitest 4's `vi.fn()` now forwards `new`-calls to the mock implementation
+// itself (so it can faithfully mock classes), which means that
+// implementation must be a regular `function`, not an arrow function --
+// arrow functions can never be used as constructors ("is not a
+// constructor" at runtime). See Vitest's 3.x/4.x migration notes on
+// mocking classes/constructors.
 vi.mock("@aws-sdk/client-ssm", () => ({
-  SSMClient: vi.fn().mockImplementation(() => ({ send: sendMock })),
-  GetParameterCommand: vi.fn().mockImplementation((input: { Name: string }) => ({ input })),
+  SSMClient: vi.fn().mockImplementation(function () {
+    return { send: sendMock };
+  }),
+  GetParameterCommand: vi.fn().mockImplementation(function (input: { Name: string }) {
+    return { input };
+  }),
 }));
 
 import { App } from "aws-cdk-lib";
