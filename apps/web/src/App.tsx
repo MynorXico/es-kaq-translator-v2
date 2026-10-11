@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  cancelTranslate,
   translate,
   TranslateHttpError,
+  TranslateJobNotFoundError,
   TranslateTimeoutError,
   type TranslationDirection,
 } from "./api";
@@ -168,7 +170,13 @@ type View = "translate" | "about";
 
 type CopyState = "idle" | "success" | "error";
 
-type TranslateErrorKind = "network" | "client" | "rateLimited" | "server" | "timeout";
+type TranslateErrorKind =
+  | "network"
+  | "client"
+  | "rateLimited"
+  | "server"
+  | "timeout"
+  | "jobNotFound";
 
 type TranslateState =
   | { status: "idle" }
@@ -183,11 +191,19 @@ const ERROR_MESSAGES: Record<TranslateErrorKind, string> = {
   rateLimited: "Demasiadas solicitudes, inténtalo de nuevo en unos minutos.",
   server: "Hubo un problema en el servidor. Inténtalo de nuevo en unos minutos.",
   timeout: "El modelo está tardando más de lo esperado. Inténtalo de nuevo en unos minutos.",
+  // ADR 0008: a 404 on GET /v1/translate-jobs/{job_id} means the job
+  // genuinely expired (or is otherwise unknown) mid-poll -- distinct from
+  // "client" below, which means the model itself rejected the submitted
+  // text, not that the result was lost.
+  jobNotFound: "No se pudo recuperar esa traducción porque tardó demasiado. Inténtalo de nuevo.",
 };
 
 function classifyError(error: unknown): TranslateErrorKind {
   if (error instanceof TranslateTimeoutError) {
     return "timeout";
+  }
+  if (error instanceof TranslateJobNotFoundError) {
+    return "jobNotFound";
   }
   if (error instanceof TranslateHttpError) {
     if (error.status >= 500) {
@@ -279,8 +295,19 @@ export default function App() {
     }
   }, [translateState]);
 
+  // Stops any in-flight poll loop (ADR 0008) -- not just a discarded value,
+  // the underlying timers/request are actually torn down -- whenever this
+  // component abandons a translation: unmount, "Borrar", or a direction
+  // swap. A no-op if nothing is in flight.
+  useEffect(() => {
+    return () => {
+      cancelTranslate();
+    };
+  }, []);
+
   function handleSwap() {
     requestIdRef.current += 1;
+    cancelTranslate();
     clearTimeout(copyRevertTimerRef.current);
 
     const nextDirection = direction === "es-to-cak" ? "cak-to-es" : "es-to-cak";
@@ -330,6 +357,7 @@ export default function App() {
 
   function handleClear() {
     requestIdRef.current += 1;
+    cancelTranslate();
     clearTimeout(copyRevertTimerRef.current);
     setInput("");
     setTranslateState({ status: "idle" });
@@ -369,7 +397,7 @@ export default function App() {
     translateState.status === "loading"
       ? "Traduciendo…"
       : translateState.status === "warming"
-        ? "Calentando el modelo. Puede tardar hasta un minuto."
+        ? "Calentando el modelo. Puede tardar hasta un minuto y medio."
         : translateState.status === "error"
           ? ERROR_MESSAGES[translateState.kind]
           : "";

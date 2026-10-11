@@ -183,7 +183,15 @@ test.describe("wide desktop layout non-happy-path states (#122)", () => {
     page,
   }) => {
     await page.setViewportSize(WIDE_VIEWPORT);
-    await page.route("**/v1/translate", (route) => route.abort("failed"));
+    // ADR 0008: translate() now enqueues via POST /v1/translate-jobs before
+    // ever polling -- aborting that first request is enough to reach the
+    // same network-error state this test cares about.
+    await page.route("**/v1/translate-jobs", (route) => {
+      if (route.request().method() !== "POST") {
+        return route.continue();
+      }
+      return route.abort("failed");
+    });
     await page.goto("/");
 
     await page.getByLabel(/^Texto en /).fill("Hola");
