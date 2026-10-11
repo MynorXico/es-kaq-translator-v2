@@ -1,9 +1,11 @@
 import * as path from "node:path";
-import { CfnOutput, Duration, Stack, StackProps } from "aws-cdk-lib";
+import { CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from "aws-cdk-lib";
 import { EndpointType, LambdaRestApi } from "aws-cdk-lib/aws-apigateway";
 import { Alarm, ComparisonOperator, Metric, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
+import { AttributeType, BillingMode, Table } from "aws-cdk-lib/aws-dynamodb";
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { DockerImageCode, DockerImageFunction } from "aws-cdk-lib/aws-lambda";
+import { LambdaDestination } from "aws-cdk-lib/aws-lambda-destinations";
 import { CfnWebACL, CfnWebACLAssociation } from "aws-cdk-lib/aws-wafv2";
 import type { Construct } from "constructs";
 import { webHostName } from "./config";
@@ -76,6 +78,9 @@ export interface ApiStackProps extends StackProps {
  */
 export class ApiStack extends Stack {
   public readonly apiFunction: DockerImageFunction;
+  public readonly workerFunction: DockerImageFunction;
+  public readonly failureFunction: DockerImageFunction;
+  public readonly translateJobsTable: Table;
   public readonly restApi: LambdaRestApi;
   public readonly webAcl: CfnWebACL;
 
@@ -85,26 +90,55 @@ export class ApiStack extends Stack {
     const sageMakerEndpointName =
       props.sageMakerEndpointName ?? `traductor-kaqchikel-translate-${props.environmentName}`;
 
-    this.apiFunction = new DockerImageFunction(this, "ApiFunction", {
-      // apps/api is the Docker build context (Dockerfile lives there);
-      // resolved relative to this file so it works regardless of cwd.
-      code: DockerImageCode.fromImageAsset(path.join(__dirname, "../../../apps/api")),
+    // apps/api is the Docker build context (Dockerfile lives there);
+    // resolved relative to this file so it works regardless of cwd. Shared
+    // by all three Lambdas below (ADR 0008: "two Lambda roles, one Docker
+    // image", plus a third onFailure destination handler on that same
+    // image) -- each overrides `cmd` to select its own handler entry point.
+    const apiImageDirectory = path.join(__dirname, "../../../apps/api");
+
+    // ADR 0008's TranslateJobsTable: on-demand billing (this project's
+    // low, bursty traffic -- ADR 0001), keyed by job_id, with a ttl
+    // attribute so jobs self-expire with no manual cleanup. Ephemeral
+    // request data (not the durable training corpus DataStack's bucket
+    // holds), so DESTROY is the right removal policy here, unlike that
+    // bucket's RETAIN.
+    this.translateJobsTable = new Table(this, "TranslateJobsTable", {
+      tableName: `traductor-kaqchikel-translate-jobs-${props.environmentName}`,
+      partitionKey: { name: "job_id", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // Worker Lambda (ADR 0008): never fronted by API Gateway, invoked only
+    // via an async (`InvocationType=Event`) `lambda:InvokeFunction` call
+    // from the Request Lambda below. Runs `translate_via_sagemaker`
+    // against the unchanged SageMaker endpoint -- this is the only one of
+    // the three Lambdas that needs `SAGEMAKER_ENDPOINT_NAME`/the
+    // `sagemaker:InvokeEndpoint` grant, since the Request Lambda's own
+    // work (a DynamoDB write + one async invoke) never calls SageMaker.
+    this.workerFunction = new DockerImageFunction(this, "WorkerFunction", {
+      code: DockerImageCode.fromImageAsset(apiImageDirectory, {
+        cmd: ["app.worker_handler.handler"],
+      }),
       memorySize: 512,
-      // Must stay below API Gateway's fixed 30s integration timeout, or a
-      // slow (e.g. cold-start) invocation would 504 at the gateway instead
-      // of returning the Lambda's own response.
-      timeout: Duration.seconds(29),
+      // Comfortably covers a real cold start with margin, still far under
+      // Lambda's 15-minute hard ceiling -- not constrained by API
+      // Gateway's 29s integration timeout at all, unlike the Request
+      // Lambda below.
+      timeout: Duration.seconds(90),
       environment: {
         SAGEMAKER_ENDPOINT_NAME: sageMakerEndpointName,
-        ALLOWED_ORIGINS: `https://${webHostName(props.environmentName)}`,
+        TRANSLATE_JOBS_TABLE_NAME: this.translateJobsTable.tableName,
       },
-      description: `Traductor Kaqchikel API (${props.environmentName})`,
+      description: `Traductor Kaqchikel translate-job worker (${props.environmentName})`,
     });
 
     // Least-privilege: invoke exactly this environment's SageMaker
     // endpoint, never a wildcard resource or a broad AWS-managed policy
     // like AmazonSageMakerFullAccess.
-    this.apiFunction.addToRolePolicy(
+    this.workerFunction.addToRolePolicy(
       new PolicyStatement({
         actions: ["sagemaker:InvokeEndpoint"],
         resources: [
@@ -116,6 +150,62 @@ export class ApiStack extends Stack {
         ],
       }),
     );
+    this.translateJobsTable.grantReadWriteData(this.workerFunction);
+
+    // onFailure Lambda Destination (ADR 0008): a third handler entry point
+    // on the same shared Docker image, wired below as the Worker Lambda's
+    // async-invoke onFailure destination. Marks a job failed if the
+    // Worker is killed by its own timeout or crashes before writing a
+    // terminal status itself -- only ever needs to write to the table, via
+    // the same conditional-write-guarded path the Worker's own normal
+    // write uses (apps/api/app/jobs.py), never reads it first.
+    this.failureFunction = new DockerImageFunction(this, "FailureFunction", {
+      code: DockerImageCode.fromImageAsset(apiImageDirectory, {
+        cmd: ["app.failure_handler.handler"],
+      }),
+      memorySize: 512,
+      environment: {
+        TRANSLATE_JOBS_TABLE_NAME: this.translateJobsTable.tableName,
+      },
+      description: `Traductor Kaqchikel translate-job worker onFailure handler (${props.environmentName})`,
+    });
+    this.translateJobsTable.grantWriteData(this.failureFunction);
+
+    // ADR 0008: a single attempt, fail fast -- Lambda's async-invoke
+    // default (up to 2 automatic retries, 1-/2-minute backoff) would leave
+    // a failed/timed-out job sitting "pending" for several extra minutes,
+    // well past the point a real client has already given up.
+    this.workerFunction.configureAsyncInvoke({
+      retryAttempts: 0,
+      onFailure: new LambdaDestination(this.failureFunction),
+    });
+
+    // Request Lambda (ADR 0008): fronts API Gateway, handles both
+    // /v1/translate-jobs routes. Its own work is trivial (a DynamoDB
+    // PutItem/GetItem and, on POST, one async Lambda invoke) -- no
+    // SageMaker call on this path at all, so it keeps today's
+    // Duration.seconds(29) comfortably.
+    this.apiFunction = new DockerImageFunction(this, "ApiFunction", {
+      code: DockerImageCode.fromImageAsset(apiImageDirectory, {
+        cmd: ["app.lambda_handler.handler"],
+      }),
+      memorySize: 512,
+      // Must stay below API Gateway's fixed 30s integration timeout, or a
+      // slow (e.g. cold-start) invocation would 504 at the gateway instead
+      // of returning the Lambda's own response.
+      timeout: Duration.seconds(29),
+      environment: {
+        ALLOWED_ORIGINS: `https://${webHostName(props.environmentName)}`,
+        TRANSLATE_JOBS_TABLE_NAME: this.translateJobsTable.tableName,
+        WORKER_FUNCTION_NAME: this.workerFunction.functionName,
+      },
+      description: `Traductor Kaqchikel API (${props.environmentName})`,
+    });
+
+    this.translateJobsTable.grantReadWriteData(this.apiFunction);
+    // Least-privilege: invoke exactly the Worker Lambda, never a wildcard
+    // resource or a broad AWS-managed Lambda policy.
+    this.workerFunction.grantInvoke(this.apiFunction);
 
     this.restApi = new LambdaRestApi(this, "RestApi", {
       restApiName: `traductor-kaqchikel-api-${props.environmentName}`,
@@ -156,6 +246,8 @@ export class ApiStack extends Stack {
     const apiUrl = this.restApi.url.replace(/\/$/, "");
     new CfnOutput(this, "ApiUrl", { value: apiUrl });
     new CfnOutput(this, "ApiFunctionName", { value: this.apiFunction.functionName });
+    new CfnOutput(this, "WorkerFunctionName", { value: this.workerFunction.functionName });
+    new CfnOutput(this, "TranslateJobsTableName", { value: this.translateJobsTable.tableName });
 
     // Same per-environment origin `apps/api/app/config.py`'s
     // `ALLOWED_ORIGINS` uses for `apps/api/app/main.py`'s CORSMiddleware
