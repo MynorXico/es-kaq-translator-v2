@@ -65,12 +65,49 @@ export interface ApiStackProps extends StackProps {
  * an edge-optimized REST API is fronted by an AWS-managed CloudFront
  * distribution that isn't directly WAF-associable either.
  *
+ * ## Three Lambdas, one Docker image -- ADR 0008, issue #256
+ *
+ * API Gateway's fixed, non-configurable 29s integration timeout can be
+ * shorter than a genuine SageMaker Serverless Inference cold start. ADR
+ * 0008 replaces `/v1/translate`'s old synchronous contract with an
+ * enqueue-and-poll job pattern (`POST`/`GET /v1/translate-jobs[/{job_id}]`)
+ * split across three Lambdas that all share `apps/api`'s one Docker image
+ * (`DockerImageCode.fromImageAsset`'s `cmd` override selects each one's
+ * handler entry point, per `apps/api/Dockerfile`'s comment):
+ *
+ * - `apiFunction` (Request Lambda, `app.lambda_handler.handler`): fronts
+ *   this stack's `RestApi`, keeps the original `Duration.seconds(29)`.
+ *   Its own work (a DynamoDB read/write + one async Lambda invoke) never
+ *   calls SageMaker, so it holds no `SAGEMAKER_ENDPOINT_NAME`/
+ *   `sagemaker:InvokeEndpoint` grant at all.
+ * - `workerFunction` (Worker Lambda, `app.worker_handler.handler`):
+ *   invoked only via an async (`InvocationType=Event`)
+ *   `lambda:InvokeFunction` call from `apiFunction`, never fronted by API
+ *   Gateway. Runs the unchanged `translate_via_sagemaker` call, with its
+ *   own longer `Duration.seconds(90)` ceiling -- this is the one Lambda
+ *   that holds `SAGEMAKER_ENDPOINT_NAME`/the `sagemaker:InvokeEndpoint`
+ *   grant. Configured with `retryAttempts: 0` (fail fast, no automatic
+ *   Lambda retries) and an `onFailure` destination pointing at
+ *   `failureFunction`.
+ * - `failureFunction` (onFailure Lambda Destination,
+ *   `app.failure_handler.handler`): marks a job `failed` in
+ *   `translateJobsTable` if `workerFunction` is killed by its own timeout
+ *   or crashes before writing a terminal status itself.
+ *
+ * `translateJobsTable` (DynamoDB, on-demand, partition key `job_id`, a
+ * `ttl` attribute) is this project's first use of DynamoDB (flagged in
+ * ADR 0008 as a new AWS service beyond ADR 0001's original list) and is
+ * per-environment, like every other resource in this stack -- not a
+ * shared/singleton table across dev/qa/prod.
+ *
  * ## Environment-variable contract (read from `os.environ` in `apps/api/app`)
  *
- * | Env var                  | Purpose |
- * |---------------------------|---------|
- * | `SAGEMAKER_ENDPOINT_NAME` | Name (not ARN) of the SageMaker Serverless Inference endpoint `apps/api/app/translation.py` invokes via `boto3`'s `sagemaker-runtime` `invoke_endpoint` (#9). The Lambda's execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN in this account/region -- nothing broader (no wildcard resource, no `AmazonSageMakerFullAccess`). |
- * | `ALLOWED_ORIGINS`         | Pre-existing CORS config (see `apps/api/app/config.py`, issue #46). Set to this environment's real `apps/web` custom domain (`webHostName()`, the same SSOT `WebStack` uses) now that it exists for every environment (issues #84/#99) -- confirmed live that leaving this unset broke every real browser request with a CORS preflight failure, even though a direct `curl` against the API looked fine (curl doesn't enforce CORS). |
+ * | Env var                      | Set on            | Purpose |
+ * |-------------------------------|--------------------|---------|
+ * | `SAGEMAKER_ENDPOINT_NAME`     | `workerFunction`   | Name (not ARN) of the SageMaker Serverless Inference endpoint `apps/api/app/translation.py` invokes via `boto3`'s `sagemaker-runtime` `invoke_endpoint` (#9), from inside `app.worker_handler`. Its execution role is granted `sagemaker:InvokeEndpoint` scoped to exactly this endpoint's ARN in this account/region -- nothing broader (no wildcard resource, no `AmazonSageMakerFullAccess`). |
+ * | `ALLOWED_ORIGINS`             | `apiFunction`      | Pre-existing CORS config (see `apps/api/app/config.py`, issue #46). Set to this environment's real `apps/web` custom domain (`webHostName()`, the same SSOT `WebStack` uses) now that it exists for every environment (issues #84/#99) -- confirmed live that leaving this unset broke every real browser request with a CORS preflight failure, even though a direct `curl` against the API looked fine (curl doesn't enforce CORS). |
+ * | `TRANSLATE_JOBS_TABLE_NAME`   | `apiFunction`, `workerFunction`, `failureFunction` | Name of `translateJobsTable`, read by `apps/api/app/jobs.py` for every DynamoDB read/write (ADR 0008). |
+ * | `WORKER_FUNCTION_NAME`        | `apiFunction`      | Name of `workerFunction`, used by `apps/api/app/jobs.invoke_worker` to fire the async invoke on `POST /v1/translate-jobs` (ADR 0008). |
  *
  * See `sageMakerEndpointName` above for how this stack's default
  * `SAGEMAKER_ENDPOINT_NAME` convention gets overridden with the real
