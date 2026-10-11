@@ -17,6 +17,57 @@ function synthApiStack(props?: { sageMakerEndpointName?: string }) {
   return { stack, template };
 }
 
+type SynthedResource = { Properties: Record<string, unknown> };
+type FoundFunction = { logicalId: string; resource: SynthedResource };
+
+// ADR 0008: three Lambda functions share one Docker image, distinguished by
+// `ImageConfig.Command` (the handler entry point) -- these helpers find the
+// right one, and trace its execution role, so IAM assertions below can be
+// scoped to exactly the function ADR 0008 says should hold a given grant.
+function findFunctionByHandler(template: Template, handler: string): FoundFunction {
+  const functions = template.findResources("AWS::Lambda::Function");
+  const matches = Object.entries(functions).filter(([, fn]) => {
+    const command = (fn.Properties?.ImageConfig as { Command?: string[] } | undefined)?.Command;
+    return command?.includes(handler);
+  });
+  expect(matches.length).toBe(1);
+  const [logicalId, resource] = matches[0];
+  return { logicalId, resource: resource as SynthedResource };
+}
+
+function roleLogicalIdForFunction({ resource: fn }: FoundFunction): string {
+  const role = fn.Properties.Role as { "Fn::GetAtt": [string, string] };
+  return role["Fn::GetAtt"][0];
+}
+
+function policyStatementsForRole(
+  template: Template,
+  roleLogicalId: string,
+): Array<{ Effect: string; Action: string | string[]; Resource: unknown }> {
+  const policies = template.findResources("AWS::IAM::Policy");
+  return Object.values(policies)
+    .filter((policy) => {
+      const roles = policy.Properties.PolicyDocument ? policy.Properties.Roles : undefined;
+      return JSON.stringify(roles ?? []).includes(roleLogicalId);
+    })
+    .flatMap(
+      (policy) =>
+        policy.Properties.PolicyDocument.Statement as Array<{
+          Effect: string;
+          Action: string | string[];
+          Resource: unknown;
+        }>,
+    );
+}
+
+function actionsGranted(statements: ReturnType<typeof policyStatementsForRole>): Set<string> {
+  return new Set(
+    statements
+      .filter((s) => s.Effect === "Allow")
+      .flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])),
+  );
+}
+
 describe("ApiStack", () => {
   it("deploys apps/api as a Lambda container image", () => {
     const { template } = synthApiStack();
@@ -357,12 +408,290 @@ describe("ApiStack", () => {
       const { template } = synthApiStack();
 
       const alarms = template.findResources("AWS::CloudWatch::Alarm");
-      // ServerErrorRateAlarm, HighLatencyAlarm, and (issue #151) the new
-      // WAF BlockedRequestsAlarm.
-      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(3);
+      // ServerErrorRateAlarm, HighLatencyAlarm, the WAF BlockedRequestsAlarm
+      // (issue #151), and (ADR 0008, PR #259 review) WorkerErrorRateAlarm/
+      // WorkerHighDurationAlarm.
+      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(5);
       for (const alarm of Object.values(alarms)) {
         expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
       }
+    });
+  });
+
+  describe("Async translate-jobs pattern (ADR 0008, issue #256)", () => {
+    it("creates an on-demand TranslateJobsTable keyed by job_id, with a ttl attribute", () => {
+      const { template } = synthApiStack();
+
+      template.hasResourceProperties("AWS::DynamoDB::Table", {
+        TableName: "traductor-kaqchikel-translate-jobs-test",
+        BillingMode: "PAY_PER_REQUEST",
+        KeySchema: [{ AttributeName: "job_id", KeyType: "HASH" }],
+        TimeToLiveSpecification: { AttributeName: "ttl", Enabled: true },
+      });
+    });
+
+    it("creates exactly three Lambda functions, one Docker image, distinguished by handler", () => {
+      const { template } = synthApiStack();
+
+      const functions = template.findResources("AWS::Lambda::Function");
+      expect(Object.keys(functions).length).toBe(3);
+      for (const fn of Object.values(functions)) {
+        expect(fn.Properties.PackageType).toBe("Image");
+      }
+
+      findFunctionByHandler(template, "app.lambda_handler.handler");
+      findFunctionByHandler(template, "app.worker_handler.handler");
+      findFunctionByHandler(template, "app.failure_handler.handler");
+    });
+
+    it("keeps the Request Lambda at 29s but gives the Worker Lambda a longer ceiling", () => {
+      const { template } = synthApiStack();
+
+      const requestFn = findFunctionByHandler(template, "app.lambda_handler.handler");
+      expect(requestFn.resource.Properties.Timeout).toBe(29);
+
+      const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+      // Comfortably covers a real cold start with margin, still far under
+      // Lambda's 15-minute hard ceiling (ADR 0008).
+      expect(workerFn.resource.Properties.Timeout).toBe(90);
+    });
+
+    it("passes the SageMaker endpoint name only to the Worker Lambda, not the Request Lambda", () => {
+      const { template } = synthApiStack();
+
+      // ADR 0008: the Request Lambda's work is trivial (DynamoDB + one
+      // async invoke) and never calls SageMaker at all -- only the Worker
+      // Lambda does.
+      const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+      const workerVars = (
+        workerFn.resource.Properties.Environment as { Variables: Record<string, unknown> }
+      ).Variables;
+      expect(workerVars.SAGEMAKER_ENDPOINT_NAME).toBe("traductor-kaqchikel-translate-test");
+
+      const requestFn = findFunctionByHandler(template, "app.lambda_handler.handler");
+      const requestVars = (
+        requestFn.resource.Properties.Environment as { Variables: Record<string, unknown> }
+      ).Variables;
+      expect(requestVars.SAGEMAKER_ENDPOINT_NAME).toBeUndefined();
+    });
+
+    it("passes the TranslateJobsTable name to the Request and Worker Lambdas", () => {
+      const { template } = synthApiStack();
+
+      for (const handler of ["app.lambda_handler.handler", "app.worker_handler.handler"]) {
+        const fn = findFunctionByHandler(template, handler);
+        const vars = (fn.resource.Properties.Environment as { Variables: Record<string, unknown> })
+          .Variables;
+        expect(vars.TRANSLATE_JOBS_TABLE_NAME).toBeDefined();
+      }
+    });
+
+    it("passes the Worker Lambda's function name to the Request Lambda", () => {
+      const { template } = synthApiStack();
+
+      const requestFn = findFunctionByHandler(template, "app.lambda_handler.handler");
+      const vars = (
+        requestFn.resource.Properties.Environment as { Variables: Record<string, unknown> }
+      ).Variables;
+      expect(vars.WORKER_FUNCTION_NAME).toBeDefined();
+    });
+
+    it("configures the Worker Lambda's async invoke with retryAttempts: 0 and an onFailure destination", () => {
+      const { template } = synthApiStack();
+
+      const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+      const failureFn = findFunctionByHandler(template, "app.failure_handler.handler");
+
+      const eventInvokeConfigs = template.findResources("AWS::Lambda::EventInvokeConfig");
+      // The EventInvokeConfig whose own FunctionName resolves to the
+      // Worker's logical id -- i.e. it's configuring the Worker's async
+      // invoke behavior, not some other function's.
+      const configsForWorker = Object.values(eventInvokeConfigs).filter((config) =>
+        JSON.stringify(config.Properties.FunctionName).includes(workerFn.logicalId),
+      );
+      expect(configsForWorker.length).toBe(1);
+
+      const [config] = configsForWorker;
+      expect(config.Properties.MaximumRetryAttempts).toBe(0);
+
+      const destination = (
+        config.Properties.DestinationConfig as { OnFailure: { Destination: unknown } }
+      ).OnFailure.Destination;
+      // The destination must resolve to the onFailure handler's own
+      // function, not the Worker itself or some other resource.
+      expect(JSON.stringify(destination)).toContain(failureFn.logicalId);
+    });
+
+    it("grants the Request Lambda lambda:InvokeFunction scoped to exactly the Worker Lambda", () => {
+      const { template } = synthApiStack();
+
+      const requestFn = findFunctionByHandler(template, "app.lambda_handler.handler");
+      const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+      const requestRoleId = roleLogicalIdForFunction(requestFn);
+      const statements = policyStatementsForRole(template, requestRoleId);
+
+      const invokeStatements = statements.filter((statement) => {
+        const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+        return statement.Effect === "Allow" && actions.includes("lambda:InvokeFunction");
+      });
+
+      expect(invokeStatements.length).toBe(1);
+      const resources = Array.isArray(invokeStatements[0].Resource)
+        ? invokeStatements[0].Resource
+        : [invokeStatements[0].Resource];
+      // `Function.grantInvoke` grants both the function's own ARN and its
+      // `:*` alias/version wildcard -- never a bare "*" resource, and both
+      // must resolve to the Worker Lambda specifically, not any other
+      // function.
+      expect(resources.length).toBeGreaterThan(0);
+      for (const resource of resources) {
+        expect(JSON.stringify(resource)).not.toBe('"*"');
+        expect(JSON.stringify(resource)).toContain(workerFn.logicalId);
+      }
+    });
+
+    it("grants each Lambda exactly the DynamoDB actions its own code calls, nothing broader", () => {
+      // Precise per-role grants (not a blanket grantReadWriteData, which
+      // would hand each Lambda actions it never calls -- e.g. the
+      // internet-facing Request Lambda holding UpdateItem/DeleteItem it
+      // never uses would mean IAM no longer enforces the same
+      // "pending vs. terminal" protection app.jobs's ConditionExpression
+      // guard enforces at the application layer; a future vulnerability in
+      // that Lambda's dependency tree could bypass the guard via IAM
+      // instead of DynamoDB rejecting the call outright).
+      const { template } = synthApiStack();
+
+      const tables = template.findResources("AWS::DynamoDB::Table");
+      expect(Object.keys(tables).length).toBe(1);
+
+      const expectedActionsByHandler: Record<string, string[]> = {
+        // apiFunction (Request Lambda): app.jobs.create_job (put_item) and
+        // get_job (get_item) -- never updates or deletes an item itself.
+        "app.lambda_handler.handler": ["dynamodb:GetItem", "dynamodb:PutItem"],
+        // workerFunction (Worker Lambda): app.jobs.get_job_input (get_item)
+        // and mark_succeeded/mark_failed (update_item) -- never creates or
+        // deletes an item itself.
+        "app.worker_handler.handler": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+        // failureFunction (onFailure handler): app.jobs.mark_failed
+        // (update_item) and, for logging only, app.jobs.get_job (get_item).
+        "app.failure_handler.handler": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+      };
+
+      for (const [handler, expectedActions] of Object.entries(expectedActionsByHandler)) {
+        const fn = findFunctionByHandler(template, handler);
+        const roleId = roleLogicalIdForFunction(fn);
+        const statements = policyStatementsForRole(template, roleId);
+        const dynamoStatements = statements.filter((statement) => {
+          const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+          return (
+            statement.Effect === "Allow" && actions.some((action) => action.startsWith("dynamodb:"))
+          );
+        });
+
+        const grantedDynamoActions = new Set(
+          dynamoStatements.flatMap((statement) =>
+            (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).filter(
+              (action) => action.startsWith("dynamodb:"),
+            ),
+          ),
+        );
+        expect(grantedDynamoActions).toEqual(new Set(expectedActions));
+
+        for (const statement of dynamoStatements) {
+          const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+          for (const resource of resources) {
+            expect(JSON.stringify(resource)).not.toBe('"*"');
+          }
+        }
+      }
+    });
+
+    it("grants the Worker Lambda (not the Request Lambda) the sagemaker:InvokeEndpoint permission", () => {
+      const { template } = synthApiStack();
+
+      const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+      const workerRoleId = roleLogicalIdForFunction(workerFn);
+      const workerGranted = actionsGranted(policyStatementsForRole(template, workerRoleId));
+      expect(workerGranted.has("sagemaker:InvokeEndpoint")).toBe(true);
+
+      const requestFn = findFunctionByHandler(template, "app.lambda_handler.handler");
+      const requestRoleId = roleLogicalIdForFunction(requestFn);
+      const requestGranted = actionsGranted(policyStatementsForRole(template, requestRoleId));
+      expect(requestGranted.has("sagemaker:InvokeEndpoint")).toBe(false);
+    });
+
+    describe("Worker Lambda observability (PR #259 review)", () => {
+      // ApiStack's pre-existing ServerErrorRateAlarm/HighLatencyAlarm watch
+      // the REST API's own metrics -- but POST /v1/translate-jobs never
+      // calls SageMaker and returns fast, and GET /v1/translate-jobs/{id}
+      // always responds 200 even when the job itself failed (status_code/
+      // error travel inside the JSON body, not the outer HTTP status). So
+      // neither alarm can see a SageMaker-side failure/slowness anymore --
+      // that only happens inside workerFunction, invisible to API Gateway.
+      // These alarms close that gap directly against workerFunction's own
+      // CloudWatch metrics.
+      it("alarms on an elevated error rate from the Worker Lambda's own metrics", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        template.hasResourceProperties(
+          "AWS::CloudWatch::Alarm",
+          Match.objectLike({
+            MetricName: "Errors",
+            Namespace: "AWS/Lambda",
+            Dimensions: Match.arrayWith([
+              Match.objectLike({
+                Name: "FunctionName",
+                Value: { Ref: workerFn.logicalId },
+              }),
+            ]),
+            ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+          }),
+        );
+      });
+
+      it("alarms on elevated duration from the Worker Lambda's own metrics", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        template.hasResourceProperties(
+          "AWS::CloudWatch::Alarm",
+          Match.objectLike({
+            MetricName: "Duration",
+            Namespace: "AWS/Lambda",
+            Dimensions: Match.arrayWith([
+              Match.objectLike({
+                Name: "FunctionName",
+                Value: { Ref: workerFn.logicalId },
+              }),
+            ]),
+            ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+          }),
+        );
+      });
+
+      it("does not treat missing data as breaching for the new Worker alarms either", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        const alarms = template.findResources("AWS::CloudWatch::Alarm");
+        const workerAlarms = Object.values(alarms).filter((alarm) => {
+          const dimensions = (alarm.Properties.Dimensions ?? []) as Array<{
+            Name: string;
+            Value: unknown;
+          }>;
+          return dimensions.some(
+            (dimension) =>
+              dimension.Name === "FunctionName" &&
+              JSON.stringify(dimension.Value).includes(workerFn.logicalId),
+          );
+        });
+
+        expect(workerAlarms.length).toBeGreaterThanOrEqual(2);
+        for (const alarm of workerAlarms) {
+          expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
+        }
+      });
     });
   });
 });

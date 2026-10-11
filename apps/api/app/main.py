@@ -1,4 +1,4 @@
-import time
+import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -6,19 +6,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_allowed_origins
-from app.models import ErrorResponse, TranslateRequest, TranslateResponse
-from app.observability import log_translate_request
-from app.translation import TranslationServiceError, translate_via_sagemaker
+from app.jobs import create_job, get_job, invoke_worker
+from app.models import (
+    ErrorResponse,
+    JobCreatedResponse,
+    JobStatus,
+    JobStatusResponse,
+    TranslateRequest,
+)
 from app.validation import translate_validation_error_message
 
 app = FastAPI(title="Traductor Kaqchikel API", version="0.0.1")
 
 # Allow apps/web (a separate CloudFront/S3 origin, per ADR 0001) to call
-# /v1/translate. Restricted to the method/header it actually uses.
+# /v1/translate-jobs. GET is explicitly listed (ADR 0008) even though a
+# plain cross-origin GET with no custom headers is a CORS "simple request"
+# that wouldn't actually be blocked by this on its own (no preflight is
+# triggered, and allow_methods only governs the preflight response) --
+# still correct to list it defensively rather than rely on that nuance.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
-    allow_methods=["POST"],
+    allow_methods=["POST", "GET"],
     allow_headers=["Content-Type"],
 )
 
@@ -33,20 +42,17 @@ async def validation_exception_handler(
     )
 
 
-@app.exception_handler(TranslationServiceError)
-async def translation_service_error_handler(
-    request: Request, exc: TranslationServiceError
-) -> JSONResponse:
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
-
-
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # Anything not already handled by a more specific handler above (e.g.
-    # a misconfigured environment, or a malformed upstream response) --
-    # still logged by the route itself (see /v1/translate), this just
-    # gives it a real 500 response instead of an unhandled-exception
-    # traceback reaching the client.
+    # a misconfigured environment reaching app.jobs, or a malformed
+    # DynamoDB response) -- this just gives it a real 500 response instead
+    # of an unhandled-exception traceback reaching the client. Neither
+    # FastAPI route in this module calls translate_via_sagemaker directly
+    # anymore (ADR 0008 moved that to app.worker_handler, which logs its
+    # own terminal resolutions via app.observability.log_job_resolution),
+    # so there's no per-request structured logging at this layer at all --
+    # unlike the retired /v1/translate route this module used to have.
     return JSONResponse(status_code=500, content={"error": "Ocurrió un error inesperado."})
 
 
@@ -55,119 +61,92 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# Spanish, user-facing messages for the two GET-only failure cases this
+# route introduces (ADR 0008) -- distinct from each other and from
+# app.translation's messages, which only ever apply inside app.worker_handler
+# now, not on a live FastAPI route's own exception path.
+_INVALID_JOB_ID_MESSAGE = "El identificador del trabajo no es válido."
+_JOB_NOT_FOUND_MESSAGE = (
+    "No se encontró esa traducción. Puede que el enlace sea incorrecto o que haya expirado."
+)
+
+
 @app.post(
-    "/v1/translate",
-    response_model=TranslateResponse,
+    "/v1/translate-jobs",
+    status_code=202,
+    response_model=JobCreatedResponse,
     description=(
-        "Translates `text` between Spanish and Kaqchikel by invoking the "
-        "deployed SageMaker endpoint, per the `direction` requested.\n\n"
-        "Every error response (whichever status code) uses the same "
-        "`{\"error\": \"<Spanish message>\"}` shape:\n\n"
-        "- **400**: the model itself rejected the input as untranslatable "
-        "(e.g. unsupported content) -- not a request-validation failure.\n"
+        "Enqueues a translation job between Spanish and Kaqchikel, per the "
+        "`direction` requested (ADR 0008). Returns immediately with a "
+        "`job_id` to poll via `GET /v1/translate-jobs/{job_id}` -- this "
+        "route never calls the SageMaker endpoint itself (that happens "
+        "asynchronously, in a separate Worker Lambda), so it isn't subject "
+        "to API Gateway's 29-second integration timeout the way a cold "
+        "SageMaker Serverless Inference start could be.\n\n"
         "- **422**: `text` or `direction` failed request validation (e.g. "
-        "empty/over-length text, or an unrecognized `direction`) before "
-        "the request ever reached the model.\n"
-        "- **502**: the SageMaker endpoint is unavailable, or returned a "
-        "response that violates its own documented contract.\n"
-        "- **504**: the SageMaker endpoint took too long to respond."
+        "empty/over-length text, or an unrecognized `direction`)."
     ),
     responses={
-        400: {
-            "model": ErrorResponse,
-            "description": "The model rejected the submitted text as untranslatable.",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "error": (
-                            "No se pudo traducir el texto enviado. "
-                            "Verifica el contenido e inténtalo de nuevo."
-                        )
-                    }
-                }
-            },
-        },
         422: {
             "model": ErrorResponse,
             "description": "`text` or `direction` failed request validation.",
             "content": {
-                "application/json": {
-                    "example": {"error": "El texto no puede estar vacío."}
-                }
-            },
-        },
-        502: {
-            "model": ErrorResponse,
-            "description": "The translation service is unavailable or returned a malformed response.",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "error": (
-                            "El servicio de traducción no está disponible en este "
-                            "momento. Inténtalo más tarde."
-                        )
-                    }
-                }
-            },
-        },
-        504: {
-            "model": ErrorResponse,
-            "description": "The translation service took too long to respond.",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "error": (
-                            "El servicio de traducción tardó demasiado en "
-                            "responder. Inténtalo de nuevo."
-                        )
-                    }
-                }
+                "application/json": {"example": {"error": "El texto no puede estar vacío."}}
             },
         },
     },
 )
-def translate(request: TranslateRequest) -> TranslateResponse:
-    # Structured logging (issue #47) starts here, after request validation
-    # (`TranslateRequest`'s own field constraints) has already passed --
-    # a malformed request never reaches this function body at all, so it
-    # never has a `direction`/`text` worth logging metadata about in the
-    # first place. This covers the actual translate call: the thing whose
-    # error rate/latency the CloudWatch alarms in infra/cdk care about.
-    direction = request.direction.value
-    input_length = len(request.text)
-    start = time.perf_counter()
-    try:
-        result = translate_via_sagemaker(request)
-    except TranslationServiceError as error:
-        log_translate_request(
-            direction=direction,
-            input_length=input_length,
-            latency_ms=(time.perf_counter() - start) * 1000,
-            status_code=error.status_code,
-            error_type=type(error).__name__,
-        )
-        raise
-    except Exception as error:
-        # Anything that isn't a TranslationServiceError -- e.g. a
-        # RuntimeError from a misconfigured environment, or a pydantic
-        # ValidationError from a malformed upstream SageMaker response --
-        # still surfaces as a 500 and still needs to be logged, or the
-        # structured logs silently miss exactly the failure modes the
-        # CloudWatch alarms exist to catch.
-        log_translate_request(
-            direction=direction,
-            input_length=input_length,
-            latency_ms=(time.perf_counter() - start) * 1000,
-            status_code=500,
-            error_type=type(error).__name__,
-        )
-        raise
+def create_translate_job(request: TranslateRequest) -> JobCreatedResponse:
+    job_id = create_job(request)
+    invoke_worker(job_id)
+    return JobCreatedResponse(job_id=job_id)
 
-    log_translate_request(
-        direction=direction,
-        input_length=input_length,
-        latency_ms=(time.perf_counter() - start) * 1000,
-        status_code=200,
-        error_type=None,
-    )
-    return result
+
+@app.get(
+    "/v1/translate-jobs/{job_id}",
+    response_model=JobStatusResponse,
+    response_model_exclude_none=True,
+    description=(
+        "Polls a translation job enqueued via `POST /v1/translate-jobs` "
+        "(ADR 0008). Always responds `200`; `status` discriminates between "
+        "`pending`, `succeeded` (with `translation`), and `failed` (with "
+        "`status_code`/`error` -- the numeric HTTP status and Spanish "
+        "message this API would have returned synchronously for that "
+        "failure, carried explicitly since the outer HTTP response is "
+        "always `200` here).\n\n"
+        "- **400**: `job_id` is not a well-formed UUID.\n"
+        "- **404**: `job_id` is well-formed but unknown, or has expired."
+    ),
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "`job_id` is not a well-formed UUID.",
+            "content": {"application/json": {"example": {"error": _INVALID_JOB_ID_MESSAGE}}},
+        },
+        404: {
+            "model": ErrorResponse,
+            "description": "`job_id` is well-formed but unknown or has expired.",
+            "content": {"application/json": {"example": {"error": _JOB_NOT_FOUND_MESSAGE}}},
+        },
+    },
+)
+def get_translate_job(job_id: str) -> JobStatusResponse | JSONResponse:
+    try:
+        uuid.UUID(job_id)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": _INVALID_JOB_ID_MESSAGE})
+
+    job = get_job(job_id)
+    if job is None:
+        return JSONResponse(status_code=404, content={"error": _JOB_NOT_FOUND_MESSAGE})
+
+    status = job["status"]
+    if status == JobStatus.SUCCEEDED.value:
+        return JobStatusResponse(status=JobStatus.SUCCEEDED, translation=job["translation"])
+    if status == JobStatus.FAILED.value:
+        return JobStatusResponse(
+            status=JobStatus.FAILED,
+            status_code=int(job["status_code"]),
+            error=job["error"],
+        )
+    return JobStatusResponse(status=JobStatus.PENDING)

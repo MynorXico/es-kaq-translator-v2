@@ -56,12 +56,12 @@ def test_allowed_origins_are_configurable_via_env_var(monkeypatch):
     assert "access-control-allow-origin" not in response.headers
 
 
-def test_translate_preflight_allows_configured_origin(monkeypatch):
+def test_translate_jobs_post_preflight_allows_configured_origin(monkeypatch):
     monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
     client = _client_with_reloaded_app()
 
     response = client.options(
-        "/v1/translate",
+        "/v1/translate-jobs",
         headers={
             "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "POST",
@@ -74,12 +74,12 @@ def test_translate_preflight_allows_configured_origin(monkeypatch):
     assert "POST" in response.headers["access-control-allow-methods"]
 
 
-def test_translate_preflight_rejects_disallowed_origin(monkeypatch):
+def test_translate_jobs_post_preflight_rejects_disallowed_origin(monkeypatch):
     monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
     client = _client_with_reloaded_app()
 
     response = client.options(
-        "/v1/translate",
+        "/v1/translate-jobs",
         headers={
             "Origin": "https://not-allowed.example",
             "Access-Control-Request-Method": "POST",
@@ -88,3 +88,24 @@ def test_translate_preflight_rejects_disallowed_origin(monkeypatch):
     )
 
     assert "access-control-allow-origin" not in response.headers
+
+
+def test_translate_jobs_get_preflight_allows_configured_origin(monkeypatch):
+    # ADR 0008: GET /v1/translate-jobs/{job_id} (the poll route) must be
+    # explicitly allowed too, not just POST -- main.py's CORSMiddleware
+    # allow_methods lists "GET" defensively for this reason.
+    monkeypatch.delenv("ALLOWED_ORIGINS", raising=False)
+    client = _client_with_reloaded_app()
+
+    response = client.options(
+        "/v1/translate-jobs/11111111-1111-4111-8111-111111111111",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert "GET" in response.headers["access-control-allow-methods"]
