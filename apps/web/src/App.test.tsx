@@ -2,18 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import App from "./App";
 import {
+  cancelTranslate,
   translate,
   TranslateHttpError,
+  TranslateJobNotFoundError,
   TranslateNetworkError,
   TranslateTimeoutError,
 } from "./api";
 
 vi.mock("./api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./api")>();
-  return { ...actual, translate: vi.fn() };
+  return { ...actual, translate: vi.fn(), cancelTranslate: vi.fn() };
 });
 
 const mockedTranslate = vi.mocked(translate);
+const mockedCancelTranslate = vi.mocked(cancelTranslate);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -105,6 +108,7 @@ describe("App", () => {
 describe("App translate flow", () => {
   beforeEach(() => {
     mockedTranslate.mockReset();
+    mockedCancelTranslate.mockClear();
   });
 
   afterEach(() => {
@@ -245,6 +249,38 @@ describe("App translate flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a distinct error message (not the generic client-error wording) when a poll GET returns 404", async () => {
+    mockedTranslate.mockRejectedValueOnce(new TranslateJobNotFoundError());
+    render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    expect(
+      await screen.findByText(
+        "No se pudo recuperar esa traducción porque tardó demasiado. Inténtalo de nuevo.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "No se pudo traducir ese texto. Revisa lo que escribiste e inténtalo de nuevo.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("cancels any in-flight translation when the component unmounts", () => {
+    const { promise } = deferred<{ translation: string }>();
+    mockedTranslate.mockReturnValue(promise);
+    const { unmount } = render(<App />);
+
+    fireEvent.change(screen.getByLabelText(/^Texto en /), { target: { value: "Hola" } });
+    fireEvent.click(screen.getByRole("button", { name: "Traducir" }));
+
+    unmount();
+
+    expect(mockedCancelTranslate).toHaveBeenCalled();
+  });
+
   it("retries with the current input text when 'Reintentar' is clicked", async () => {
     mockedTranslate.mockRejectedValueOnce(new TranslateNetworkError());
     mockedTranslate.mockResolvedValueOnce({ translation: "Utz" });
@@ -281,6 +317,9 @@ describe("App translate flow", () => {
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Texto en /)).toHaveValue("Hola");
     expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
+    // ADR 0008: a direction swap must actually cancel the poll loop, not
+    // just have its eventual result discarded.
+    expect(mockedCancelTranslate).toHaveBeenCalled();
 
     await act(async () => {
       resolve({ translation: "Utz" });
@@ -315,6 +354,7 @@ describe("App translate flow", () => {
     expect(screen.getByText("Kaqchikel")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Texto en /)).toHaveValue("Hola");
     expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
+    expect(mockedCancelTranslate).toHaveBeenCalled();
 
     await act(async () => {
       resolve({ translation: "Utz" });
@@ -332,6 +372,7 @@ describe("App translate flow", () => {
 describe("App copy and clear affordances", () => {
   beforeEach(() => {
     mockedTranslate.mockReset();
+    mockedCancelTranslate.mockClear();
   });
 
   afterEach(() => {
@@ -384,6 +425,9 @@ describe("App copy and clear affordances", () => {
 
     expect(screen.getByLabelText(/^Texto en /)).toHaveValue("");
     expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
+    // ADR 0008: "Borrar" must actually cancel the poll loop, not just have
+    // its eventual result discarded.
+    expect(mockedCancelTranslate).toHaveBeenCalled();
 
     await act(async () => {
       resolve({ translation: "Utz" });

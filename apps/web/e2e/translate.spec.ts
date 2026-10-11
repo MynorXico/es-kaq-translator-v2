@@ -1,4 +1,33 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+// ADR 0008: translate() now does POST /v1/translate-jobs (enqueue), then
+// polls GET /v1/translate-jobs/{job_id} until a terminal status. The exact
+// job_id value never matters to these tests, just that it round-trips from
+// the enqueue response into the poll URL.
+const JOB_ID = "11111111-1111-1111-1111-111111111111";
+
+// Routes a POST /v1/translate-jobs enqueue to `job_id` (optionally after
+// `delayMs`), and a GET /v1/translate-jobs/{job_id} poll straight to a
+// `succeeded` response with `translation`. Covers the common "already warm"
+// case most of these tests only care about the end-to-end result for.
+async function mockSucceedingJob(
+  page: Page,
+  translation: string,
+  { delayMs = 0 }: { delayMs?: number } = {},
+): Promise<void> {
+  await page.route("**/v1/translate-jobs", async (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
+  });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) =>
+    route.fulfill({ json: { status: "succeeded", translation } }),
+  );
+}
 
 test("loads the translator page", async ({ page }) => {
   await page.goto("/");
@@ -20,9 +49,7 @@ test("swaps translation direction", async ({ page }) => {
 });
 
 test("swapping carries a successful translation into the input", async ({ page }) => {
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Utz" } }),
-  );
+  await mockSucceedingJob(page, "Utz");
 
   await page.goto("/");
   const input = page.getByLabel(/^Texto en /);
@@ -40,9 +67,7 @@ test("swapping carries a successful translation into the input", async ({ page }
 test("does not force the caret to the end on a later edit when the carried-over text equals the current input", async ({
   page,
 }) => {
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Hola" } }),
-  );
+  await mockSucceedingJob(page, "Hola");
 
   await page.goto("/");
   const input = page.getByLabel(/^Texto en /);
@@ -77,9 +102,7 @@ test("translate button is disabled until text is entered", async ({ page }) => {
 });
 
 test("submitting a translation shows a result", async ({ page }) => {
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Utz" } }),
-  );
+  await mockSucceedingJob(page, "Utz");
 
   await page.goto("/");
   await page.getByLabel(/^Texto en /).fill("Hola");
@@ -92,17 +115,48 @@ test("submitting a translation shows a result", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("polls GET /v1/translate-jobs/{job_id} until the job succeeds", async ({ page }) => {
+  let pollCount = 0;
+  await page.route("**/v1/translate-jobs", (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
+  });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) => {
+    pollCount += 1;
+    if (pollCount === 1) {
+      return route.fulfill({ json: { status: "pending" } });
+    }
+    return route.fulfill({ json: { status: "succeeded", translation: "Utz" } });
+  });
+
+  await page.goto("/");
+  await page.getByLabel(/^Texto en /).fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+
+  // POLL_INTERVAL_MS (apps/web/src/api.ts) stands between the first
+  // "pending" response and the second poll that reports "succeeded".
+  await expect(page.getByLabel(/^Traducción en /)).toHaveValue("Utz", { timeout: 10_000 });
+});
+
 test("shows a Spanish error message and a working retry button on a network failure", async ({
   page,
 }) => {
   let requestCount = 0;
-  await page.route("**/v1/translate", (route) => {
+  await page.route("**/v1/translate-jobs", (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
     requestCount += 1;
     if (requestCount === 1) {
       return route.abort("failed");
     }
-    return route.fulfill({ json: { translation: "Utz" } });
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
   });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) =>
+    route.fulfill({ json: { status: "succeeded", translation: "Utz" } }),
+  );
 
   await page.goto("/");
   await page.getByLabel(/^Texto en /).fill("Hola");
@@ -117,17 +171,50 @@ test("shows a Spanish error message and a working retry button on a network fail
   await expect(page.getByLabel(/^Traducción en /)).toHaveValue("Utz");
 });
 
+test("shows a distinct error message when a poll GET returns 404 (job expired mid-poll)", async ({
+  page,
+}) => {
+  await page.route("**/v1/translate-jobs", (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
+  });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) =>
+    route.fulfill({ status: 404, json: { error: "No se encontró esa traducción." } }),
+  );
+
+  await page.goto("/");
+  await page.getByLabel(/^Texto en /).fill("Hola");
+  await page.getByRole("button", { name: "Traducir" }).click();
+
+  await expect(
+    page.getByText(
+      "No se pudo recuperar esa traducción porque tardó demasiado. Inténtalo de nuevo.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("No se pudo traducir ese texto. Revisa lo que escribiste e inténtalo de nuevo."),
+  ).toBeHidden();
+});
+
 test("clears the input, output, and error state via the clear button, and refocuses the input", async ({
   page,
 }) => {
   let requestCount = 0;
-  await page.route("**/v1/translate", (route) => {
+  await page.route("**/v1/translate-jobs", (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
     requestCount += 1;
     if (requestCount === 1) {
       return route.abort("failed");
     }
-    return route.fulfill({ json: { translation: "Utz" } });
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
   });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) =>
+    route.fulfill({ json: { status: "succeeded", translation: "Utz" } }),
+  );
 
   await page.goto("/");
   const input = page.getByLabel(/^Texto en /);
@@ -148,12 +235,14 @@ test("clears the input, output, and error state via the clear button, and refocu
   await expect(page.getByRole("button", { name: "Borrar el texto de entrada" })).toBeHidden();
 });
 
-test("ignores a stale in-flight response after Borrar clears the fields mid-request", async ({
+test("ignores a stale in-flight response after Borrar clears the fields mid-request, and actually cancels the poll loop", async ({
   page,
 }) => {
-  await page.route("**/v1/translate", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    return route.fulfill({ json: { translation: "Utz" } });
+  let pollCalls = 0;
+  await mockSucceedingJob(page, "Utz", { delayMs: 500 });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) => {
+    pollCalls += 1;
+    return route.fulfill({ json: { status: "succeeded", translation: "Utz" } });
   });
 
   await page.goto("/");
@@ -167,19 +256,24 @@ test("ignores a stale in-flight response after Borrar clears the fields mid-requ
   await expect(input).toHaveValue("");
   await expect(page.getByLabel(/^Traducción en /)).toHaveValue("");
 
-  // Give the delayed (now-stale) response time to resolve, then confirm it
-  // never landed -- the field should still be idle/empty, not "Utz".
+  // Give the delayed (now-cancelled) enqueue time to resolve, then confirm
+  // it never landed, and that the cancelled request never even reached the
+  // poll step (ADR 0008: the poll loop is actually cancelled, not just
+  // discarded).
   await page.waitForTimeout(700);
   await expect(page.getByLabel(/^Traducción en /)).toHaveValue("");
   await expect(page.getByText("Traduciendo…")).toBeHidden();
+  expect(pollCalls).toBe(0);
 });
 
-test("ignores a stale in-flight response after swapping direction mid-request", async ({
+test("ignores a stale in-flight response after swapping direction mid-request, and actually cancels the poll loop", async ({
   page,
 }) => {
-  await page.route("**/v1/translate", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    return route.fulfill({ json: { translation: "Utz" } });
+  let pollCalls = 0;
+  await mockSucceedingJob(page, "Utz", { delayMs: 500 });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) => {
+    pollCalls += 1;
+    return route.fulfill({ json: { status: "succeeded", translation: "Utz" } });
   });
 
   await page.goto("/");
@@ -198,6 +292,7 @@ test("ignores a stale in-flight response after swapping direction mid-request", 
   await page.waitForTimeout(700);
   await expect(page.getByLabel(/^Traducción en /)).toHaveValue("");
   await expect(page.getByText("Traduciendo…")).toBeHidden();
+  expect(pollCalls).toBe(0);
 });
 
 test("copies a successful translation to the clipboard with temporary confirmation", async ({
@@ -205,9 +300,7 @@ test("copies a successful translation to the clipboard with temporary confirmati
   context,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Utz" } }),
-  );
+  await mockSucceedingJob(page, "Utz");
 
   await page.goto("/");
   await page.getByLabel(/^Texto en /).fill("Hola");
@@ -243,9 +336,7 @@ test("gives the input and output direction-matching accessible names and lang at
 });
 
 test("moves focus to the output once a translation succeeds", async ({ page }) => {
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Utz" } }),
-  );
+  await mockSucceedingJob(page, "Utz");
 
   await page.goto("/");
   await page.getByLabel(/^Texto en /).fill("Hola");
@@ -259,10 +350,7 @@ test("moves focus to the output once a translation succeeds", async ({ page }) =
 test("does not steal focus from the input if the user is still typing when a translation resolves", async ({
   page,
 }) => {
-  await page.route("**/v1/translate", async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    return route.fulfill({ json: { translation: "Utz" } });
-  });
+  await mockSucceedingJob(page, "Utz", { delayMs: 500 });
 
   await page.goto("/");
   const input = page.getByLabel(/^Texto en /);
@@ -286,9 +374,7 @@ test("does not steal focus from the input if the user is still typing when a tra
 test("keyboard tab order follows nav -> swap -> input -> clear -> translate -> copy -> output", async ({
   page,
 }) => {
-  await page.route("**/v1/translate", (route) =>
-    route.fulfill({ json: { translation: "Utz" } }),
-  );
+  await mockSucceedingJob(page, "Utz");
 
   await page.goto("/");
   await page.getByLabel(/^Texto en /).fill("Hola");

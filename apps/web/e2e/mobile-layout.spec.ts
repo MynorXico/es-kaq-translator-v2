@@ -1,9 +1,27 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 // A common small-phone width (iPhone SE/mini class) -- if anything overflows
 // here, it'll overflow everywhere.
 const MOBILE_VIEWPORT = { width: 320, height: 640 };
 const DESKTOP_VIEWPORT = { width: 900, height: 800 };
+
+// ADR 0008: translate() now does POST /v1/translate-jobs (enqueue), then
+// polls GET /v1/translate-jobs/{job_id} until a terminal status -- these
+// layout tests only care that a translation eventually shows up, not about
+// the job pattern itself (see e2e/translate.spec.ts for that coverage).
+const JOB_ID = "22222222-2222-2222-2222-222222222222";
+
+async function mockSucceedingJob(page: Page, translation: string): Promise<void> {
+  await page.route("**/v1/translate-jobs", (route) => {
+    if (route.request().method() !== "POST") {
+      return route.continue();
+    }
+    return route.fulfill({ status: 202, json: { job_id: JOB_ID } });
+  });
+  await page.route(`**/v1/translate-jobs/${JOB_ID}`, (route) =>
+    route.fulfill({ json: { status: "succeeded", translation } }),
+  );
+}
 
 test.describe("mobile layout (#41)", () => {
   test("the viewport meta tag is present and correct", async ({ page }) => {
@@ -30,9 +48,7 @@ test.describe("mobile layout (#41)", () => {
     page,
   }) => {
     await page.setViewportSize(MOBILE_VIEWPORT);
-    await page.route("**/v1/translate", (route) =>
-      route.fulfill({ json: { translation: "Utz" } }),
-    );
+    await mockSucceedingJob(page, "Utz");
     await page.goto("/");
 
     const input = page.getByLabel(/^Texto en /);
@@ -52,9 +68,7 @@ test.describe("mobile layout (#41)", () => {
   });
 
   test("every visible tap target is at least 44x44px", async ({ page }) => {
-    await page.route("**/v1/translate", (route) =>
-      route.fulfill({ json: { translation: "Utz" } }),
-    );
+    await mockSucceedingJob(page, "Utz");
     await page.setViewportSize(MOBILE_VIEWPORT);
     await page.goto("/");
     await page.getByLabel(/^Texto en /).fill("Hola");
