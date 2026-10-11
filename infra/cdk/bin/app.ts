@@ -2,7 +2,7 @@
 import path from "node:path";
 import { App } from "aws-cdk-lib";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { webHostName } from "../lib/config";
+import { WEB_ENVIRONMENTS, type WebEnvironment, webBuildOutputDirName, webHostName } from "../lib/config";
 import { buildPipelineApp, type PipelineConfig } from "../lib/pipeline-stack";
 
 // Single source of truth for the region everything in this project lives in
@@ -188,26 +188,34 @@ async function resolveConfig(app: App): Promise<PipelineConfig> {
 
 /**
  * `WebStack`'s `BucketDeployment` (lib/web-stack.ts) needs a real directory
- * on disk at synth time. A real (`useMockAccounts` unset) synth always
- * builds `apps/web` first in the pipeline's own CodeBuild synth step (see
- * `lib/pipeline-stack.ts`) or must be built locally first for a manual
- * `cdk synth`/`deploy` -- so the real `apps/web/dist` output is expected to
- * exist by the time this runs. The mock-accounts path (CI's credential-free
- * PR check, `test/mock-synth.test.ts`) instead points at a tiny committed
- * fixture, so it never depends on a real Vite build having run.
+ * on disk at synth time, *per environment* (issue #263 -- each
+ * environment's own `apps/web` build, with its own `VITE_API_BASE_URL`
+ * baked in). A real (`useMockAccounts` unset) synth always builds
+ * `apps/web` three times -- once per `WEB_ENVIRONMENTS` entry, each into
+ * its own `webBuildOutputDirName()` directory -- in the pipeline's own
+ * CodeBuild synth step (see `lib/pipeline-stack.ts`) before `cdk synth`
+ * runs, or must be built locally first (same three commands) for a manual
+ * `cdk synth`/`deploy`. The mock-accounts path (CI's credential-free PR
+ * check, `test/mock-synth.test.ts`) instead points every environment at
+ * the same tiny committed fixture, so it never depends on a real Vite
+ * build having run.
  */
-function resolveWebSiteContentPath(useMockAccounts: boolean): string {
-  return useMockAccounts
-    ? path.join(__dirname, "../test/fixtures/site")
-    : path.join(__dirname, "../../../apps/web/dist");
+function resolveWebSiteContentPaths(useMockAccounts: boolean): Record<WebEnvironment, string> {
+  const paths = {} as Record<WebEnvironment, string>;
+  for (const environmentName of WEB_ENVIRONMENTS) {
+    paths[environmentName] = useMockAccounts
+      ? path.join(__dirname, "../test/fixtures/site")
+      : path.join(__dirname, "../../../apps/web", webBuildOutputDirName(environmentName));
+  }
+  return paths;
 }
 
 async function main(): Promise<void> {
   const app = new App();
   const useMockAccounts = app.node.tryGetContext("useMockAccounts") === "true";
   const config = await resolveConfig(app);
-  const webSiteContentPath = resolveWebSiteContentPath(useMockAccounts);
-  buildPipelineApp(app, config, webSiteContentPath);
+  const webSiteContentPaths = resolveWebSiteContentPaths(useMockAccounts);
+  buildPipelineApp(app, config, webSiteContentPaths);
 }
 
 // Only auto-run when executed directly (`cdk synth`/`deploy`, via ts-node --

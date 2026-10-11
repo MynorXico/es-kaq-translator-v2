@@ -8,6 +8,13 @@ venv/
 
 # Build outputs
 dist/
+# Per-environment apps/web Vite build outputs (issue #263) -- lib/
+# pipeline-stack.ts's synth step builds apps/web once per dev/qa/prod, each
+# into its own dist-<env>/ directory (see lib/config.ts's
+# webBuildOutputDirName), so a plain `dist/` entry above doesn't cover them.
+dist-dev/
+dist-qa/
+dist-prod/
 build/
 *.egg-info/
 cdk.out/

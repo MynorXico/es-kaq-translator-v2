@@ -2,6 +2,7 @@ import { App, Stack } from "aws-cdk-lib";
 import { PolicyStatement } from "aws-cdk-lib/aws-iam";
 import { CodeBuildStep, CodePipeline, CodePipelineSource, ManualApprovalStep } from "aws-cdk-lib/pipelines";
 import { TranslatorStage } from "./app-stage";
+import { WEB_ENVIRONMENTS, type WebEnvironment, webBuildOutputDirName } from "./config";
 import { PipelineFailureAlerting } from "./pipeline-alerting";
 
 /**
@@ -32,17 +33,20 @@ export interface PipelineConfig {
    * `ApiStack` for issue #9. An absent entry means no real `ApiStack` has
    * been deployed for that environment yet (qa/prod, for now).
    *
-   * Only `dev`'s value is actually used below: the synth step below builds
-   * `apps/web` once, shared by every stage (issue #84), so there's only
-   * one `VITE_API_BASE_URL` to bake in. `qa`/`prod` are captured here so
-   * they're ready to use once per-stage builds (or their own real
-   * `ApiStack`s) exist -- see `webSiteContentPath`'s doc comment above
-   * `buildPipelineApp`.
+   * Each environment's value is baked into that environment's *own* build
+   * of `apps/web` (issue #263): the synth step below runs `vite build`
+   * once per environment in `WEB_ENVIRONMENTS` (lib/config.ts), each with
+   * its own `VITE_API_BASE_URL` and its own output directory (see
+   * `webSiteContentPaths`'s doc comment above `buildPipelineApp`) -- a
+   * single shared build can't work here because Vite inlines this env var
+   * into the built JS bundle at build time, not read at runtime.
    *
-   * A missing `dev` value falls back to an empty string (a same-origin
-   * relative request against this environment's own CloudFront
-   * distribution, rather than silently pointing a deployed environment at
-   * a local dev server). Note this doesn't actually fail with a 404:
+   * A missing value for a given environment falls back to an empty string
+   * (a same-origin relative request against that environment's own
+   * CloudFront distribution, rather than silently pointing a deployed
+   * environment at a local dev server, or -- the bug this replaced,
+   * issue #263 -- at a *different* environment's real API). Note this
+   * doesn't actually fail with a 404:
    * `WebStack`'s SPA-routing fallback (403/404 -> `index.html` with a 200)
    * means the client gets a 200 with the app's own HTML body instead,
    * which then fails harmlessly client-side (`response.json()` throws
@@ -97,14 +101,25 @@ const PIPELINE_NAME = "TraductorKaqchikelPipeline";
  * Pure and synchronous so it's unit-testable with fake config values —
  * see `test/pipeline-stack.test.ts`.
  *
- * `webSiteContentPath` is the built `apps/web` static site content (see
- * `WebStackProps.siteContentPath`) shared by every stage -- the synth step
- * below builds `apps/web` once, before running `cdk synth`, so all of
- * Dev/Qa/Prod deploy the exact same build output (issue #84; per-stage
- * builds only become meaningful once each environment has its own real
- * `apps/api` URL to bake in, see `webApiBaseUrls` above).
+ * `webSiteContentPaths` is the built `apps/web` static site content *per
+ * environment* (see `WebStackProps.siteContentPath`) -- one absolute path
+ * per `WebEnvironment`, each pointing at that environment's own `vite
+ * build` output (issue #263). `BucketDeployment`'s underlying CDK asset
+ * model needs real, already-built content on disk at synth time, which is
+ * why these three builds all happen inside the synth step below, *before*
+ * `cdk synth` runs, rather than via a per-stage `CodeBuildStep` added with
+ * `pipeline.addStage(stage, { pre: [...] })`: a stage-scoped step only
+ * runs *after* synth has already produced (and asset-hashed) the
+ * CloudFormation template that references this content, so its output
+ * could never reach `WebStack`'s asset. Building three times inside one
+ * CodeBuildStep sidesteps that, at the cost of a slightly longer synth
+ * step -- an acceptable trade for `apps/web`'s size.
  */
-export function buildPipelineApp(app: App, config: PipelineConfig, webSiteContentPath: string): Stack {
+export function buildPipelineApp(
+  app: App,
+  config: PipelineConfig,
+  webSiteContentPaths: Record<WebEnvironment, string>,
+): Stack {
   const stack = new Stack(app, "TraductorKaqchikel-Pipeline", {
     env: { account: config.toolingAccount, region: config.region },
   });
@@ -113,15 +128,30 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
     connectionArn: config.connectionArn,
   });
 
+  // One `vite build` per environment, each with its own `VITE_API_BASE_URL`
+  // and its own output directory (issue #263) -- see `webSiteContentPaths`'
+  // doc comment above for why these all run here, inside the single synth
+  // step, rather than as per-stage steps. Single-quoted so an absent URL
+  // (environment has no real `ApiStack` yet) still sets the env var to an
+  // explicit empty string rather than leaving it unset, and so a real
+  // URL's own characters (always a plain `https://` origin, never shell
+  // metacharacters) never need escaping.
+  const webBuildCommands = WEB_ENVIRONMENTS.map((environmentName) => {
+    const apiBaseUrl = config.webApiBaseUrls?.[environmentName] ?? "";
+    const outDir = webBuildOutputDirName(environmentName);
+    return `VITE_API_BASE_URL='${apiBaseUrl}' pnpm --filter web exec vite build --outDir ${outDir}`;
+  });
+
   const synthStep = new CodeBuildStep("Synth", {
     input: source,
     installCommands: ["corepack enable", "pnpm install --frozen-lockfile"],
-    // Build apps/web before synth so `WebStack`'s `BucketDeployment` asset
-    // (lib/web-stack.ts) has real content to pick up from disk.
-    commands: ["pnpm --filter web build", "pnpm --filter infra-cdk synth"],
-    env: {
-      VITE_API_BASE_URL: config.webApiBaseUrls?.dev ?? "",
-    },
+    commands: [
+      // Type-check once -- shared across every environment's build below,
+      // since it doesn't depend on VITE_API_BASE_URL.
+      "pnpm --filter web exec tsc --noEmit",
+      ...webBuildCommands,
+      "pnpm --filter infra-cdk synth",
+    ],
     primaryOutputDirectory: "infra/cdk/cdk.out",
     rolePolicyStatements: [
       new PolicyStatement({
@@ -154,7 +184,7 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
 
   const devStage = new TranslatorStage(stack, "Dev", {
     environmentName: "dev",
-    webSiteContentPath,
+    webSiteContentPath: webSiteContentPaths.dev,
     previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.dev,
     newCertificateAck: config.newCertificateAck,
     env: { account: config.devAccount, region: config.region },
@@ -163,7 +193,7 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
 
   const qaStage = new TranslatorStage(stack, "Qa", {
     environmentName: "qa",
-    webSiteContentPath,
+    webSiteContentPath: webSiteContentPaths.qa,
     previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.qa,
     newCertificateAck: config.newCertificateAck,
     env: { account: config.qaAccount, region: config.region },
@@ -172,7 +202,7 @@ export function buildPipelineApp(app: App, config: PipelineConfig, webSiteConten
 
   const prodStage = new TranslatorStage(stack, "Prod", {
     environmentName: "prod",
-    webSiteContentPath,
+    webSiteContentPath: webSiteContentPaths.prod,
     previouslyValidatedWebDomainName: config.previouslyValidatedWebCertDomains?.prod,
     newCertificateAck: config.newCertificateAck,
     env: { account: config.prodAccount, region: config.region },
