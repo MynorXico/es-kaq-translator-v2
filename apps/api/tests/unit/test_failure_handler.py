@@ -9,6 +9,8 @@ something `app.worker_handler` constructs.
 
 from __future__ import annotations
 
+import json
+import logging
 import time
 
 import pytest
@@ -67,6 +69,55 @@ def test_marks_the_job_failed_on_a_worker_timeout_destination_event(fake_resourc
     assert item["status"] == "failed"
     assert isinstance(item["status_code"], int)
     assert isinstance(item["error"], str) and item["error"]
+
+
+def test_logs_the_job_resolution_with_a_null_latency(fake_resource, caplog):
+    # Issue #47's structured logging, revived job_id-keyed for ADR 0008
+    # (app.observability.log_job_resolution). This handler has no
+    # visibility into how long the Worker Lambda actually ran before being
+    # killed -- latency_ms must be None, not a fabricated number.
+    job_id = "55555555-5555-4555-8555-555555555555"
+    fake_resource.table.seed(
+        {
+            "job_id": job_id,
+            "status": "pending",
+            "text": "Buenos días",
+            "direction": "es-to-cak",
+            "ttl": int(time.time()) + 3600,
+        }
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        handler(_failure_envelope(job_id), None)
+
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    payload = json.loads(records[0].message)
+    assert payload["job_id"] == job_id
+    assert payload["direction"] == "es-to-cak"
+    assert payload["input_length"] == len("Buenos días")
+    assert payload["latency_ms"] is None
+    assert payload["error_type"] is not None
+
+
+def test_logs_the_job_resolution_even_when_the_job_item_has_no_text_or_direction(
+    fake_resource, caplog
+):
+    # A best-effort read -- must not crash just because the seeded item
+    # (e.g. in the other tests in this file) never stored text/direction.
+    job_id = "66666666-6666-4666-8666-666666666666"
+    fake_resource.table.seed({"job_id": job_id, "status": "pending", "ttl": int(time.time()) + 3600})
+
+    with caplog.at_level(logging.INFO, logger="app.request"):
+        handler(_failure_envelope(job_id), None)
+
+    records = [r for r in caplog.records if r.name == "app.request"]
+    assert len(records) == 1
+    payload = json.loads(records[0].message)
+    assert payload["job_id"] == job_id
+    assert payload["direction"] is None
+    assert payload["input_length"] is None
 
 
 def test_does_not_clobber_a_job_the_worker_already_marked_succeeded(fake_resource):

@@ -408,9 +408,10 @@ describe("ApiStack", () => {
       const { template } = synthApiStack();
 
       const alarms = template.findResources("AWS::CloudWatch::Alarm");
-      // ServerErrorRateAlarm, HighLatencyAlarm, and (issue #151) the new
-      // WAF BlockedRequestsAlarm.
-      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(3);
+      // ServerErrorRateAlarm, HighLatencyAlarm, the WAF BlockedRequestsAlarm
+      // (issue #151), and (ADR 0008, PR #259 review) WorkerErrorRateAlarm/
+      // WorkerHighDurationAlarm.
+      expect(Object.keys(alarms).length).toBeGreaterThanOrEqual(5);
       for (const alarm of Object.values(alarms)) {
         expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
       }
@@ -549,14 +550,34 @@ describe("ApiStack", () => {
       }
     });
 
-    it("grants the Request and Worker Lambdas DynamoDB access, scoped to the TranslateJobsTable", () => {
+    it("grants each Lambda exactly the DynamoDB actions its own code calls, nothing broader", () => {
+      // Precise per-role grants (not a blanket grantReadWriteData, which
+      // would hand each Lambda actions it never calls -- e.g. the
+      // internet-facing Request Lambda holding UpdateItem/DeleteItem it
+      // never uses would mean IAM no longer enforces the same
+      // "pending vs. terminal" protection app.jobs's ConditionExpression
+      // guard enforces at the application layer; a future vulnerability in
+      // that Lambda's dependency tree could bypass the guard via IAM
+      // instead of DynamoDB rejecting the call outright).
       const { template } = synthApiStack();
 
       const tables = template.findResources("AWS::DynamoDB::Table");
-      const tableLogicalIds = Object.keys(tables);
-      expect(tableLogicalIds.length).toBe(1);
+      expect(Object.keys(tables).length).toBe(1);
 
-      for (const handler of ["app.lambda_handler.handler", "app.worker_handler.handler"]) {
+      const expectedActionsByHandler: Record<string, string[]> = {
+        // apiFunction (Request Lambda): app.jobs.create_job (put_item) and
+        // get_job (get_item) -- never updates or deletes an item itself.
+        "app.lambda_handler.handler": ["dynamodb:GetItem", "dynamodb:PutItem"],
+        // workerFunction (Worker Lambda): app.jobs.get_job_input (get_item)
+        // and mark_succeeded/mark_failed (update_item) -- never creates or
+        // deletes an item itself.
+        "app.worker_handler.handler": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+        // failureFunction (onFailure handler): app.jobs.mark_failed
+        // (update_item) and, for logging only, app.jobs.get_job (get_item).
+        "app.failure_handler.handler": ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+      };
+
+      for (const [handler, expectedActions] of Object.entries(expectedActionsByHandler)) {
         const fn = findFunctionByHandler(template, handler);
         const roleId = roleLogicalIdForFunction(fn);
         const statements = policyStatementsForRole(template, roleId);
@@ -566,7 +587,15 @@ describe("ApiStack", () => {
             statement.Effect === "Allow" && actions.some((action) => action.startsWith("dynamodb:"))
           );
         });
-        expect(dynamoStatements.length).toBeGreaterThan(0);
+
+        const grantedDynamoActions = new Set(
+          dynamoStatements.flatMap((statement) =>
+            (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).filter(
+              (action) => action.startsWith("dynamodb:"),
+            ),
+          ),
+        );
+        expect(grantedDynamoActions).toEqual(new Set(expectedActions));
 
         for (const statement of dynamoStatements) {
           const resources = Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
@@ -575,17 +604,6 @@ describe("ApiStack", () => {
           }
         }
       }
-    });
-
-    it("grants the onFailure handler write access to the TranslateJobsTable", () => {
-      const { template } = synthApiStack();
-
-      const failureFn = findFunctionByHandler(template, "app.failure_handler.handler");
-      const roleId = roleLogicalIdForFunction(failureFn);
-      const statements = policyStatementsForRole(template, roleId);
-      const granted = actionsGranted(statements);
-
-      expect(granted.has("dynamodb:UpdateItem") || granted.has("dynamodb:PutItem")).toBe(true);
     });
 
     it("grants the Worker Lambda (not the Request Lambda) the sagemaker:InvokeEndpoint permission", () => {
@@ -600,6 +618,80 @@ describe("ApiStack", () => {
       const requestRoleId = roleLogicalIdForFunction(requestFn);
       const requestGranted = actionsGranted(policyStatementsForRole(template, requestRoleId));
       expect(requestGranted.has("sagemaker:InvokeEndpoint")).toBe(false);
+    });
+
+    describe("Worker Lambda observability (PR #259 review)", () => {
+      // ApiStack's pre-existing ServerErrorRateAlarm/HighLatencyAlarm watch
+      // the REST API's own metrics -- but POST /v1/translate-jobs never
+      // calls SageMaker and returns fast, and GET /v1/translate-jobs/{id}
+      // always responds 200 even when the job itself failed (status_code/
+      // error travel inside the JSON body, not the outer HTTP status). So
+      // neither alarm can see a SageMaker-side failure/slowness anymore --
+      // that only happens inside workerFunction, invisible to API Gateway.
+      // These alarms close that gap directly against workerFunction's own
+      // CloudWatch metrics.
+      it("alarms on an elevated error rate from the Worker Lambda's own metrics", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        template.hasResourceProperties(
+          "AWS::CloudWatch::Alarm",
+          Match.objectLike({
+            MetricName: "Errors",
+            Namespace: "AWS/Lambda",
+            Dimensions: Match.arrayWith([
+              Match.objectLike({
+                Name: "FunctionName",
+                Value: { Ref: workerFn.logicalId },
+              }),
+            ]),
+            ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+          }),
+        );
+      });
+
+      it("alarms on elevated duration from the Worker Lambda's own metrics", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        template.hasResourceProperties(
+          "AWS::CloudWatch::Alarm",
+          Match.objectLike({
+            MetricName: "Duration",
+            Namespace: "AWS/Lambda",
+            Dimensions: Match.arrayWith([
+              Match.objectLike({
+                Name: "FunctionName",
+                Value: { Ref: workerFn.logicalId },
+              }),
+            ]),
+            ComparisonOperator: Match.stringLikeRegexp("GreaterThan"),
+          }),
+        );
+      });
+
+      it("does not treat missing data as breaching for the new Worker alarms either", () => {
+        const { template } = synthApiStack();
+
+        const workerFn = findFunctionByHandler(template, "app.worker_handler.handler");
+        const alarms = template.findResources("AWS::CloudWatch::Alarm");
+        const workerAlarms = Object.values(alarms).filter((alarm) => {
+          const dimensions = (alarm.Properties.Dimensions ?? []) as Array<{
+            Name: string;
+            Value: unknown;
+          }>;
+          return dimensions.some(
+            (dimension) =>
+              dimension.Name === "FunctionName" &&
+              JSON.stringify(dimension.Value).includes(workerFn.logicalId),
+          );
+        });
+
+        expect(workerAlarms.length).toBeGreaterThanOrEqual(2);
+        for (const alarm of workerAlarms) {
+          expect(alarm.Properties.TreatMissingData).toBe("notBreaching");
+        }
+      });
     });
   });
 });

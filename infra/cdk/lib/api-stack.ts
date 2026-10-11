@@ -187,15 +187,20 @@ export class ApiStack extends Stack {
         ],
       }),
     );
-    this.translateJobsTable.grantReadWriteData(this.workerFunction);
+    // Precise grant, not grantReadWriteData -- app.worker_handler only ever
+    // calls get_job_input (GetItem) and mark_succeeded/mark_failed
+    // (UpdateItem) on this table; it never creates or deletes an item.
+    this.translateJobsTable.grant(this.workerFunction, "dynamodb:GetItem", "dynamodb:UpdateItem");
 
     // onFailure Lambda Destination (ADR 0008): a third handler entry point
     // on the same shared Docker image, wired below as the Worker Lambda's
     // async-invoke onFailure destination. Marks a job failed if the
     // Worker is killed by its own timeout or crashes before writing a
-    // terminal status itself -- only ever needs to write to the table, via
-    // the same conditional-write-guarded path the Worker's own normal
-    // write uses (apps/api/app/jobs.py), never reads it first.
+    // terminal status itself, via the same conditional-write-guarded path
+    // the Worker's own normal write uses (apps/api/app/jobs.py). Also does
+    // a best-effort read of the job's own record (GetItem) purely to
+    // enrich its own structured log line (issue #47) with direction/
+    // input-length metadata -- never creates or deletes an item.
     this.failureFunction = new DockerImageFunction(this, "FailureFunction", {
       code: DockerImageCode.fromImageAsset(apiImageDirectory, {
         cmd: ["app.failure_handler.handler"],
@@ -206,7 +211,7 @@ export class ApiStack extends Stack {
       },
       description: `Traductor Kaqchikel translate-job worker onFailure handler (${props.environmentName})`,
     });
-    this.translateJobsTable.grantWriteData(this.failureFunction);
+    this.translateJobsTable.grant(this.failureFunction, "dynamodb:GetItem", "dynamodb:UpdateItem");
 
     // ADR 0008: a single attempt, fail fast -- Lambda's async-invoke
     // default (up to 2 automatic retries, 1-/2-minute backoff) would leave
@@ -239,7 +244,15 @@ export class ApiStack extends Stack {
       description: `Traductor Kaqchikel API (${props.environmentName})`,
     });
 
-    this.translateJobsTable.grantReadWriteData(this.apiFunction);
+    // Precise grant, not grantReadWriteData -- app.main's two routes only
+    // ever call create_job (PutItem) and get_job (GetItem) on this table;
+    // the Request Lambda never updates or deletes an item itself. Holding
+    // UpdateItem/DeleteItem it never calls would mean IAM no longer
+    // enforces the same "pending vs. terminal" protection app.jobs's
+    // ConditionExpression guard enforces at the application layer, for
+    // the one Lambda directly exposed behind API Gateway to
+    // attacker-controlled input.
+    this.translateJobsTable.grant(this.apiFunction, "dynamodb:GetItem", "dynamodb:PutItem");
     // Least-privilege: invoke exactly the Worker Lambda, never a wildcard
     // resource or a broad AWS-managed Lambda policy.
     this.workerFunction.grantInvoke(this.apiFunction);
@@ -382,11 +395,19 @@ export class ApiStack extends Stack {
     //
     // Sourced from the REST API's own built-in CloudWatch metrics (5XX
     // count, p90 latency) rather than a custom metric filter over
-    // `apps/api`'s structured request logs (see `app/observability.py`):
-    // `TranslationServiceError` is caught and turned into a normal HTTP
-    // 4xx/5xx response by `app/main.py`'s exception handler, so it never
-    // shows up as a Lambda-level `Errors` metric -- the API Gateway layer
-    // is the one place that reliably sees every response's status code.
+    // `apps/api`'s structured request logs (see `app/observability.py`).
+    //
+    // ADR 0008 note: these two alarms watch the Request Lambda's own side
+    // of API Gateway (DynamoDB errors, a misconfigured environment, etc.)
+    // -- they can no longer see a SageMaker-side failure or slowness at
+    // all, since `POST /v1/translate-jobs` never calls SageMaker and
+    // returns fast, and `GET /v1/translate-jobs/{job_id}` always responds
+    // `200` even when the job itself resolved to `failed` (`status_code`/
+    // `error` travel inside the JSON body, not the outer HTTP status). The
+    // `WorkerErrorRateAlarm`/`WorkerHighDurationAlarm` pair below, against
+    // `workerFunction`'s own CloudWatch metrics, is what closes that gap
+    // -- without it, a real, sustained SageMaker outage would be
+    // completely invisible once the Worker split landed.
     //
     // No alarm action (e.g. an SNS topic) is wired up yet -- these alarms
     // are visible in the CloudWatch console/API immediately, but nothing
@@ -413,6 +434,34 @@ export class ApiStack extends Stack {
       // seconds on their own, so this should catch a genuinely degraded
       // endpoint, not a single cold start.
       threshold: Duration.seconds(10).toMilliseconds(),
+      evaluationPeriods: 3,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+
+    // ADR 0008 (PR #259 review): the Worker Lambda's own CloudWatch
+    // metrics are now the only place that can see a SageMaker-side
+    // failure or slowness at all -- see the note above. `metricErrors`/
+    // `metricDuration` are canned per-function metrics (`AWS/Lambda`,
+    // dimensioned by `FunctionName`), the same pattern this project
+    // already uses for the REST API's own canned metrics above.
+    new Alarm(this, "WorkerErrorRateAlarm", {
+      alarmDescription: `Elevated error rate on the Traductor Kaqchikel translate-job worker (${props.environmentName})`,
+      metric: this.workerFunction.metricErrors({ period: Duration.minutes(5) }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+
+    new Alarm(this, "WorkerHighDurationAlarm", {
+      alarmDescription: `Elevated duration on the Traductor Kaqchikel translate-job worker (${props.environmentName}), may indicate a degraded/cold SageMaker endpoint`,
+      metric: this.workerFunction.metricDuration({ period: Duration.minutes(5), statistic: "p90" }),
+      // Comfortably below the Worker's own Duration.seconds(90) ceiling
+      // (so a real timeout is caught well before the hard cutoff), but
+      // well above a normal warm SageMaker call -- catches a sustained
+      // degraded/repeatedly-cold endpoint, not a single ordinary cold start.
+      threshold: Duration.seconds(60).toMilliseconds(),
       evaluationPeriods: 3,
       comparisonOperator: ComparisonOperator.GREATER_THAN_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,

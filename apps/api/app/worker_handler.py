@@ -19,13 +19,22 @@ e.g. 90s) since it isn't constrained by API Gateway's 29s integration
 timeout at all; if this handler is killed by that longer timeout before
 returning, `app.failure_handler`'s `onFailure` Lambda Destination is what
 marks the job `failed` instead.
+
+Every terminal resolution (succeeded or the caught `TranslationServiceError`
+case) is logged via `app.observability.log_job_resolution` -- this is now
+the only place a SageMaker-side failure/slowness is observable at all,
+since the actual SageMaker call moved off the Request Lambda API Gateway's
+own CloudWatch metrics can see (issue #47, ADR 0008's "Observability
+trade-off").
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.jobs import get_job_input, mark_failed, mark_succeeded
+from app.observability import log_job_resolution
 from app.translation import TranslationServiceError, translate_via_sagemaker
 
 
@@ -35,13 +44,34 @@ def handler(event: dict[str, Any], context: Any) -> None:
     request = get_job_input(job_id)
     if request is None:
         # The job record is already gone (e.g. expired) by the time this
-        # invocation actually runs -- nothing to translate or write back to.
+        # invocation actually runs -- nothing to translate or write back to,
+        # and nothing worth logging as a job resolution either.
         return
+
+    direction = request.direction.value
+    input_length = len(request.text)
+    start = time.perf_counter()
 
     try:
         result = translate_via_sagemaker(request)
     except TranslationServiceError as error:
         mark_failed(job_id, error.status_code, error.message)
+        log_job_resolution(
+            job_id=job_id,
+            direction=direction,
+            input_length=input_length,
+            latency_ms=(time.perf_counter() - start) * 1000,
+            status_code=error.status_code,
+            error_type=type(error).__name__,
+        )
         return
 
     mark_succeeded(job_id, result.translation)
+    log_job_resolution(
+        job_id=job_id,
+        direction=direction,
+        input_length=input_length,
+        latency_ms=(time.perf_counter() - start) * 1000,
+        status_code=200,
+        error_type=None,
+    )

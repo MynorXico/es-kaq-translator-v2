@@ -26,7 +26,16 @@ FROM public.ecr.aws/lambda/python:3.12
 COPY --from=deps /asset "${LAMBDA_TASK_ROOT}"
 COPY app "${LAMBDA_TASK_ROOT}/app"
 
-# Mangum-wrapped FastAPI app (app/lambda_handler.py) -- see that module's
-# docstring and this repo's PR for issue #96 for the API Gateway
-# integration contract (HTTP API, payload format 2.0).
+# Default CMD: the Mangum-wrapped FastAPI app (app/lambda_handler.py) --
+# see that module's docstring and this repo's PR for issue #96 for the API
+# Gateway integration contract (HTTP API, payload format 2.0).
+#
+# ADR 0008/issue #256: `infra/cdk/lib/api-stack.ts` deploys this same
+# image three times as three separate Lambda functions (the Request
+# Lambda using this default CMD, plus a Worker and an onFailure-
+# destination Lambda), each overriding `cmd` via
+# `DockerImageCode.fromImageAsset`'s `cmd` prop to select
+# `app.worker_handler.handler`/`app.failure_handler.handler` instead --
+# "one Docker image, distinguished by handler entry point", not three
+# separate images/Dockerfiles.
 CMD ["app.lambda_handler.handler"]

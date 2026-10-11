@@ -45,10 +45,14 @@ async def validation_exception_handler(
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # Anything not already handled by a more specific handler above (e.g.
-    # a misconfigured environment, or a malformed upstream response) --
-    # still logged by the route itself (see /v1/translate), this just
-    # gives it a real 500 response instead of an unhandled-exception
-    # traceback reaching the client.
+    # a misconfigured environment reaching app.jobs, or a malformed
+    # DynamoDB response) -- this just gives it a real 500 response instead
+    # of an unhandled-exception traceback reaching the client. Neither
+    # FastAPI route in this module calls translate_via_sagemaker directly
+    # anymore (ADR 0008 moved that to app.worker_handler, which logs its
+    # own terminal resolutions via app.observability.log_job_resolution),
+    # so there's no per-request structured logging at this layer at all --
+    # unlike the retired /v1/translate route this module used to have.
     return JSONResponse(status_code=500, content={"error": "Ocurrió un error inesperado."})
 
 
