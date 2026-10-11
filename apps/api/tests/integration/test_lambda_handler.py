@@ -25,8 +25,8 @@ import json
 from typing import Any
 from unittest.mock import MagicMock
 
-from app import translation as translation_module
 from app.lambda_handler import handler
+from tests._fake_dynamodb import FakeDynamoDBResource
 
 
 def _http_api_v2_event(
@@ -108,61 +108,80 @@ def test_health_via_lambda_handler_rest_api_v1_event():
     assert json.loads(response["body"]) == {"status": "ok"}
 
 
-def test_translate_via_lambda_handler(monkeypatch):
-    # Mocked at the same boundary as tests/integration/test_main.py -- see
-    # its `_mock_invoke_endpoint` docstring.
-    monkeypatch.setenv("SAGEMAKER_ENDPOINT_NAME", "traductor-kaqchikel-es-cak-test")
-    fake_client = MagicMock()
-    fake_body = MagicMock()
-    fake_body.read.return_value = json.dumps({"translated_text": "Utz sq'ij"}).encode("utf-8")
-    fake_client.invoke_endpoint.return_value = {"Body": fake_body}
-    monkeypatch.setattr(translation_module.boto3, "client", lambda *args, **kwargs: fake_client)
+def _mock_jobs_boundary(monkeypatch) -> FakeDynamoDBResource:
+    # Mocked at the same boundary as tests/integration/test_translate_jobs.py
+    # -- app.jobs's own DynamoDB resource / Lambda client, never real AWS.
+    monkeypatch.setenv("TRANSLATE_JOBS_TABLE_NAME", "traductor-kaqchikel-translate-jobs-test")
+    monkeypatch.setenv("WORKER_FUNCTION_NAME", "traductor-kaqchikel-translate-worker-test")
+    resource = FakeDynamoDBResource()
+    monkeypatch.setattr("app.jobs.boto3.resource", lambda *args, **kwargs: resource)
+    monkeypatch.setattr("app.jobs.boto3.client", lambda *args, **kwargs: MagicMock())
+    return resource
+
+
+def test_create_translate_job_via_lambda_handler(monkeypatch):
+    _mock_jobs_boundary(monkeypatch)
 
     body = json.dumps({"text": "Hola", "direction": "es-to-cak"})
-    event = _http_api_v2_event("POST", "/v1/translate", body=body)
+    event = _http_api_v2_event("POST", "/v1/translate-jobs", body=body)
 
     response = handler(event, None)
 
-    assert response["statusCode"] == 200
-    assert json.loads(response["body"]) == {"translation": "Utz sq'ij"}
+    assert response["statusCode"] == 202
+    assert "job_id" in json.loads(response["body"])
 
 
-def test_translate_via_lambda_handler_rest_api_v1_event(monkeypatch):
-    # Same as test_translate_via_lambda_handler, but through the real
-    # (post-#151) REST API v1 event shape -- the actual JSON body, path
+def test_create_translate_job_via_lambda_handler_rest_api_v1_event(monkeypatch):
+    # Same as test_create_translate_job_via_lambda_handler, but through the
+    # real (post-#151) REST API v1 event shape -- the actual JSON body, path
     # routing, and response Mangum produces for a POST all need to keep
     # working, not just GET /health's simpler, bodyless request.
-    monkeypatch.setenv("SAGEMAKER_ENDPOINT_NAME", "traductor-kaqchikel-es-cak-test")
-    fake_client = MagicMock()
-    fake_body = MagicMock()
-    fake_body.read.return_value = json.dumps({"translated_text": "Utz sq'ij"}).encode("utf-8")
-    fake_client.invoke_endpoint.return_value = {"Body": fake_body}
-    monkeypatch.setattr(translation_module.boto3, "client", lambda *args, **kwargs: fake_client)
+    _mock_jobs_boundary(monkeypatch)
 
     body = json.dumps({"text": "Hola", "direction": "es-to-cak"})
-    event = _rest_api_v1_event("POST", "/v1/translate", body=body)
+    event = _rest_api_v1_event("POST", "/v1/translate-jobs", body=body)
+
+    response = handler(event, None)
+
+    assert response["statusCode"] == 202
+    assert "job_id" in json.loads(response["body"])
+
+
+def test_create_translate_job_validation_error_via_lambda_handler(monkeypatch):
+    _mock_jobs_boundary(monkeypatch)
+
+    body = json.dumps({"text": "", "direction": "es-to-cak"})
+    event = _http_api_v2_event("POST", "/v1/translate-jobs", body=body)
+
+    response = handler(event, None)
+
+    assert response["statusCode"] == 422
+    assert json.loads(response["body"]) == {"error": "El texto no puede estar vacío."}
+
+
+def test_create_translate_job_validation_error_via_lambda_handler_rest_api_v1_event(monkeypatch):
+    _mock_jobs_boundary(monkeypatch)
+
+    body = json.dumps({"text": "", "direction": "es-to-cak"})
+    event = _rest_api_v1_event("POST", "/v1/translate-jobs", body=body)
+
+    response = handler(event, None)
+
+    assert response["statusCode"] == 422
+    assert json.loads(response["body"]) == {"error": "El texto no puede estar vacío."}
+
+
+def test_get_translate_job_via_lambda_handler_rest_api_v1_event(monkeypatch):
+    # GET (ADR 0008) must also route correctly through Mangum's REST API v1
+    # path-parameter handling, not just POST -- the real stack serves both
+    # /v1/translate-jobs routes off the same {proxy+} resource.
+    resource = _mock_jobs_boundary(monkeypatch)
+    job_id = "11111111-1111-4111-8111-111111111111"
+    resource.table.seed({"job_id": job_id, "status": "pending", "ttl": 9999999999})
+
+    event = _rest_api_v1_event("GET", f"/v1/translate-jobs/{job_id}")
 
     response = handler(event, None)
 
     assert response["statusCode"] == 200
-    assert json.loads(response["body"]) == {"translation": "Utz sq'ij"}
-
-
-def test_translate_validation_error_via_lambda_handler():
-    body = json.dumps({"text": "", "direction": "es-to-cak"})
-    event = _http_api_v2_event("POST", "/v1/translate", body=body)
-
-    response = handler(event, None)
-
-    assert response["statusCode"] == 422
-    assert json.loads(response["body"]) == {"error": "El texto no puede estar vacío."}
-
-
-def test_translate_validation_error_via_lambda_handler_rest_api_v1_event():
-    body = json.dumps({"text": "", "direction": "es-to-cak"})
-    event = _rest_api_v1_event("POST", "/v1/translate", body=body)
-
-    response = handler(event, None)
-
-    assert response["statusCode"] == 422
-    assert json.loads(response["body"]) == {"error": "El texto no puede estar vacío."}
+    assert json.loads(response["body"]) == {"status": "pending"}
