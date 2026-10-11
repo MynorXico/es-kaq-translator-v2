@@ -171,7 +171,7 @@ describe("App translate flow", () => {
     });
 
     expect(
-      screen.getByText("Calentando el modelo. Puede tardar hasta un minuto."),
+      screen.getByText("Calentando el modelo. Puede tardar hasta un minuto y medio."),
     ).toBeInTheDocument();
   });
 
@@ -344,7 +344,7 @@ describe("App translate flow", () => {
       await vi.advanceTimersByTimeAsync(4000);
     });
     expect(
-      screen.getByText("Calentando el modelo. Puede tardar hasta un minuto."),
+      screen.getByText("Calentando el modelo. Puede tardar hasta un minuto y medio."),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Cambiar dirección" }));
@@ -364,7 +364,7 @@ describe("App translate flow", () => {
     // still be idle, not showing that translation.
     expect(screen.getByLabelText(/^Traducción en /)).toHaveValue("");
     expect(
-      screen.queryByText("Calentando el modelo. Puede tardar hasta un minuto."),
+      screen.queryByText("Calentando el modelo. Puede tardar hasta un minuto y medio."),
     ).not.toBeInTheDocument();
   });
 });

@@ -397,7 +397,7 @@ export default function App() {
     translateState.status === "loading"
       ? "Traduciendo…"
       : translateState.status === "warming"
-        ? "Calentando el modelo. Puede tardar hasta un minuto."
+        ? "Calentando el modelo. Puede tardar hasta un minuto y medio."
         : translateState.status === "error"
           ? ERROR_MESSAGES[translateState.kind]
           : "";
