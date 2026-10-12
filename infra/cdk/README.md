@@ -82,26 +82,38 @@ two ways `bin/app.ts` resolves them, chosen via CDK context:
 
 ## Building and deploying `apps/web`
 
-The pipeline's synth step (`lib/pipeline-stack.ts`) runs `pnpm --filter web
-build` before `cdk synth`, so `WebStack`'s `BucketDeployment` always has a
-real, fresh Vite build to deploy — every environment currently gets the
-exact same build output (see the doc comment on `buildPipelineApp` for why
-that's fine for now). The build's `VITE_API_BASE_URL` (see
-`apps/web/README.md`) comes from `PipelineConfig.webApiBaseUrls.dev`,
-fetched by `bin/app.ts` from the `/traductor-kaqchikel/api-urls/dev` SSM
-parameter (issue #130) — it defaults to an empty string only when that
-parameter is absent, which now means a same-origin relative request
-against the environment's own CloudFront distribution, failing harmlessly
-and surfacing as a generic client-side error (not an actual HTTP 404 —
-see the doc comment on `PipelineConfig.webApiBaseUrls` for why). `qa`/
-`prod` don't have a real `ApiStack` URL to bake in yet, so their SSM
-parameters (and `PipelineConfig` entries) are expected to stay absent
-until each environment has one.
+The pipeline's synth step (`lib/pipeline-stack.ts`) builds `apps/web`
+**once per environment** before `cdk synth` runs (issue #263) — `dev`,
+`qa`, and `prod` each get their own `vite build`, each with their own
+`VITE_API_BASE_URL` baked in and written to their own output directory
+(`dist-dev`/`dist-qa`/`dist-prod`, see `lib/config.ts`'s
+`webBuildOutputDirName`). This can't be a single shared build: Vite
+inlines `VITE_API_BASE_URL` into the built JS bundle at build time, not
+read at runtime, so one build can only ever point at one API. (This
+replaced a single shared build that silently baked dev's API URL into
+every environment — see issue #263 for how that surfaced as qa's web app
+calling dev's API.)
 
-A local `cdk synth`/`cdk deploy` needs `apps/web/dist` to already exist
-(run `pnpm --filter web build` first) unless you're using
-`--context useMockAccounts=true`, which points at a tiny fixture directory
-instead (`test/fixtures/site`) so it never depends on a real build.
+Each environment's `VITE_API_BASE_URL` (see `apps/web/README.md`) comes
+from `PipelineConfig.webApiBaseUrls.{dev,qa,prod}`, fetched by `bin/app.ts`
+from the matching `/traductor-kaqchikel/api-urls/{dev,qa,prod}` SSM
+parameter (issue #130) — it defaults to an empty string only when that
+environment's parameter is absent, which now means a same-origin relative
+request against that environment's own CloudFront distribution, failing
+harmlessly and surfacing as a generic client-side error (not an actual
+HTTP 404 — see the doc comment on `PipelineConfig.webApiBaseUrls` for
+why). An environment without a real `ApiStack` yet (prod, for now) is
+expected to have an absent SSM parameter until it gets one — see
+[the api-url-ssm-parameters runbook](../../docs/runbooks/api-url-ssm-parameters.md)
+for how to populate it once that changes.
+
+A local `cdk synth`/`cdk deploy` needs `apps/web/dist-dev`,
+`apps/web/dist-qa`, and `apps/web/dist-prod` to already exist (run the
+three `VITE_API_BASE_URL=... pnpm --filter web exec vite build --outDir
+dist-<env>` commands from `lib/pipeline-stack.ts`'s synth step by hand)
+unless you're using `--context useMockAccounts=true`, which points every
+environment at the same tiny fixture directory instead
+(`test/fixtures/site`) so it never depends on a real build.
 
 ## Tests
 
