@@ -250,7 +250,7 @@ export default function App() {
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [announcement, setAnnouncement] = useState("");
   // Bumped by runTranslate (a new request starting) and by handleSwap/
-  // handleClear (abandoning whatever request is in flight), so a response
+  // handleClear/unmount (abandoning whatever request is in flight), so a response
   // for a request that's no longer current can't clobber later state.
   // Not touched by ordinary typing.
   const requestIdRef = useRef(0);
@@ -298,9 +298,14 @@ export default function App() {
   // Stops any in-flight poll loop (ADR 0008) -- not just a discarded value,
   // the underlying timers/request are actually torn down -- whenever this
   // component abandons a translation: unmount, "Borrar", or a direction
-  // swap. A no-op if nothing is in flight.
+  // swap. A no-op if nothing is in flight. Every call site bumps
+  // requestIdRef first: cancelTranslate() synchronously rejects the pending
+  // translate() promise, and without the bump runTranslate()'s catch would
+  // still see its request as current and set state (here: on an unmounted
+  // component -- see issue #261).
   useEffect(() => {
     return () => {
+      requestIdRef.current += 1;
       cancelTranslate();
     };
   }, []);
